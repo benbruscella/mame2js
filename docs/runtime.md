@@ -194,19 +194,25 @@ Composition + interrupt wiring (hand-transpiled from galaga.cpp):
   boards forward register writes through `sinks.soundWrite`. WSG master
   volume 0.5625 (MAME route gain), other cores bake their own scale.
 - **Esc → menu**: keydown Escape (capture phase, registered before ROM load)
-  saves a box-art snapshot (localStorage `mame2js:snap:<game>`) and navigates
-  to `config.menuUrl`. Snapshots save ONLY on Esc — toDataURL+localStorage
-  are synchronous and a periodic save hitches the run loop.
-- **Cabinet bezel** (`artwork.ts`, shared with the menu): if
-  `/artwork/<game>.zip` has a bezel PNG with a transparent CRT window
-  (flood-fill detected), the game canvas is positioned inside the window and
-  the artwork drawn over it; falls back to the plain integer-scaled canvas.
+  navigates to `config.menuUrl`. Games start immediately on load — the menu
+  click that navigated counts as the user gesture; audio resumes on first
+  input if the browser held the context suspended.
+- **Cabinet view** (`artwork.ts`, shared with the menu): the game plays
+  inside the real cabinet — marquee scan above (`/artwork/media/marquees/`),
+  bezel around the screen (from `/artwork/<game>.zip`, screen window taken
+  from the zip's MAME `default.lay`, alpha flood-fill as fallback), control
+  panel scan below (`/artwork/media/cpanels/`). Media source pattern:
+  `adb.arcadeitalia.net/media/mame.current/<kind>/<game>.png` (kinds:
+  flyers, marquees, cpanels, cabinets, pcbs, decals, titles…). All
+  user-supplied + gitignored like roms/. Missing pieces degrade gracefully.
 - **Menu** (`menu.ts`, browser-only): the /app/ home screen — video-store
-  shelves of game boxes from `/games.json`, live search (title/maker/year),
-  arrow-key + Enter navigation. Box cover priority: MAME artwork zip from
-  `/artwork/<game>.zip` (marquee > upright bezel > largest PNG, user-supplied,
-  gitignored like roms/) → shell snapshot → 2bpp tile-sheet art decoded from
-  the user's gfx ROM → stylized placeholder. `INSERT ROM` ribbon when no zip.
+  shelves (Netflix-scale tiles) from `/games.json`, live search, arrow-key +
+  Enter navigation. Cover priority: classic flyer
+  (`/artwork/covers/<game>.png`) → bezel composited with a DETERMINISTIC
+  emulated screenshot (the game's board run exactly COVER_FRAMES frames,
+  cached in localStorage — permanent across visits) → that screenshot alone
+  → 2bpp tile-sheet art from the user's gfx ROM → stylized placeholder.
+  `INSERT ROM` ribbon when no zip.
 - `runShell(config)`: fetch `/roms/<game>.zip` → else drag-drop/file-picker;
   `assembleRegions` matches zip entries by **name, then dash/underscore
   swapped, then CRC32** (romset filenames drift across MAME eras — the user's

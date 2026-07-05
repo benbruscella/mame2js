@@ -94,9 +94,12 @@ any future input-replay/test automation.
 
 ## 12. AudioWorklet serving
 The worklet is a separate compiled module (`dist/runtime/wsg-worklet.js`)
-that ES-imports `./wsg.js` — both must be served; a bundler-style inline
-would break. Audio requires a user gesture; `AudioOutput` buffers pre-start
-register writes and replays them.
+that ES-imports `./wsg.js` (and `./namco54.js`) — all must be served; a
+bundler-style inline would break. Audio needs user activation, but the menu
+click that navigated to the game normally satisfies it (same-origin
+carryover); the shell starts audio immediately and resumes on first input
+as fallback. `AudioOutput` buffers pre-start register writes and replays
+them.
 
 ## 13. Playwright MCP can't open file:// URLs
 Use the dev server (`--serve`, :8280). The KG viewer works from file:// for

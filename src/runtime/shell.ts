@@ -47,11 +47,10 @@ export async function runShell(cfg: ShellConfig): Promise<void> {
   });
 
   // Esc: back to the boot menu (registered first + capture so a single press
-  // always works, at any stage of loading), saving a box-art snapshot
+  // always works, at any stage of loading)
   addEventListener('keydown', ev => {
     if (ev.code !== 'Escape') return;
     ev.preventDefault();
-    ui.saveSnapshot(cfg.game);
     location.href = cfg.menuUrl ?? './';
   }, { capture: true });
 
@@ -87,25 +86,27 @@ export async function runShell(cfg: ShellConfig): Promise<void> {
   // debug/testing handle (also the hook for the future live KG-viewer overlay)
   (window as unknown as Record<string, unknown>).mame2js = { board, input, config: cfg };
 
-  ui.status('Ready — click or press any key to start');
-  await userGesture(ui);
+  // Start immediately — the menu click that navigated here counts as the
+  // user gesture in same-origin sessions. Audio starts in parallel; if the
+  // browser still holds the AudioContext suspended, the first real input
+  // resumes it without ever blocking gameplay.
   if (cfg.sound.kind !== 'none') {
-    try {
-      const clock = cfg.sound.clock ?? 96000;
-      await audio.start(
-        {
-          sampleRate: clock,
-          clock,
-          waveRom: cfg.sound.waveRegion ? regions[cfg.sound.waveRegion] : undefined,
-        },
-        `${cfg.runtimeUrl}${cfg.sound.kind}-worklet.js`,
-        cfg.sound.kind,
-      );
+    const clock = cfg.sound.clock ?? 96000;
+    void audio.start(
+      {
+        sampleRate: clock,
+        clock,
+        waveRom: cfg.sound.waveRegion ? regions[cfg.sound.waveRegion] : undefined,
+      },
+      `${cfg.runtimeUrl}${cfg.sound.kind}-worklet.js`,
+      cfg.sound.kind,
+    ).then(() => {
       // wsg: MAME route gain 0.90 * 10/16; other cores bake their own scale
       audio.setVolume(cfg.sound.kind === 'wsg' ? 0.5625 : 1);
-    } catch (err) {
-      console.warn('audio unavailable:', err);
-    }
+    }).catch(err => console.warn('audio unavailable:', err));
+    const resumeAudio = () => audio.resume();
+    addEventListener('pointerdown', resumeAudio, { once: true });
+    addEventListener('keydown', resumeAudio, { once: true });
   }
   ui.overlayHide();
 
@@ -203,6 +204,12 @@ function buildDom(cfg: ShellConfig) {
   h1.style.cssText = 'font-size:15px;font-weight:600;margin:0';
   root.appendChild(h1);
 
+  // cabinet column: screen inside cropped bezel art — no banner/marquee or
+  // control panel, the screen is the star
+  const cab = document.createElement('div');
+  cab.style.cssText = 'display:flex;flex-direction:column;align-items:center;gap:0';
+  root.appendChild(cab);
+
   // native frame is rendered landscape; the cabinet monitor is rotated (ROT90)
   const rotated = cfg.board.screen.rotate === 90 || cfg.board.screen.rotate === 270;
   const w = cfg.board.screen.width, h = cfg.board.screen.height;
@@ -216,16 +223,17 @@ function buildDom(cfg: ShellConfig) {
 
   // optional cabinet bezel: the game canvas sits inside its transparent
   // CRT window, the artwork drawn on top (pointer-events off)
-  let bezel: { bmp: ImageBitmap; win: ArtWindow } | null = null;
+  let bezel: { w: number; h: number; win: ArtWindow } | null = null;
   const bezelCanvas = document.createElement('canvas');
   bezelCanvas.style.cssText = 'position:absolute;inset:0;pointer-events:none';
 
   const fit = () => {
+    const availH = innerHeight - 150;
     if (bezel) {
-      const { bmp, win } = bezel;
-      const s = Math.min((innerHeight - 140) / bmp.height, (innerWidth - 40) / bmp.width);
-      holder.style.width = bezelCanvas.style.width = `${bmp.width * s}px`;
-      holder.style.height = bezelCanvas.style.height = `${bmp.height * s}px`;
+      const { w, h, win } = bezel;
+      const s = Math.min((innerWidth - 40) / w, availH / h);
+      holder.style.width = bezelCanvas.style.width = `${w * s}px`;
+      holder.style.height = bezelCanvas.style.height = `${h * s}px`;
       const winW = win.w * s, winH = win.h * s;
       const gs = Math.min(winW / dispW, winH / dispH);
       canvas.style.position = 'absolute';
@@ -234,7 +242,7 @@ function buildDom(cfg: ShellConfig) {
       canvas.style.width = `${dispW * gs}px`;
       canvas.style.height = `${dispH * gs}px`;
     } else {
-      const displayScale = Math.max(1, Math.floor((innerHeight - 120) / dispH));
+      const displayScale = Math.max(1, Math.floor(availH / dispH));
       canvas.style.width = `${dispW * displayScale}px`;
       canvas.style.height = `${dispH * displayScale}px`;
     }
@@ -242,7 +250,7 @@ function buildDom(cfg: ShellConfig) {
   fit();
   addEventListener('resize', fit);
   holder.appendChild(canvas);
-  root.appendChild(holder);
+  cab.appendChild(holder);
 
   const overlay = document.createElement('div');
   overlay.style.cssText = 'position:absolute;inset:0;display:flex;align-items:center;justify-content:center;text-align:center;background:rgba(0,0,0,.75);color:#fff;cursor:pointer;padding:20px';
@@ -273,7 +281,7 @@ function buildDom(cfg: ShellConfig) {
       bezelCanvas.width = bmp.width; bezelCanvas.height = bmp.height;
       bezelCanvas.getContext('2d')!.drawImage(bmp, 0, 0);
       holder.insertBefore(bezelCanvas, overlay); // above the game, below the overlay
-      bezel = { bmp, win };
+      bezel = { w: bmp.width, h: bmp.height, win };
       fit();
     },
     blit: (image: ImageData) => {
@@ -286,11 +294,6 @@ function buildDom(cfg: ShellConfig) {
       }
       ctx.drawImage(off, 0, 0);
       ctx.restore();
-    },
-    /** persist the current (rotated) frame as menu box art */
-    saveSnapshot: (game: string) => {
-      try { localStorage.setItem(`mame2js:snap:${game}`, canvas.toDataURL('image/png')); }
-      catch { /* storage full/disabled — menu falls back to tile art */ }
     },
   };
 }
@@ -315,10 +318,3 @@ function waitForZip(ui: ReturnType<typeof buildDom>): Promise<Map<string, Uint8A
   });
 }
 
-function userGesture(ui: ReturnType<typeof buildDom>): Promise<void> {
-  return new Promise(resolve => {
-    const done = () => { removeEventListener('keydown', done); ui.overlay.removeEventListener('click', done); resolve(); };
-    ui.overlay.addEventListener('click', done);
-    addEventListener('keydown', done);
-  });
-}

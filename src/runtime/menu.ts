@@ -2,15 +2,21 @@
 // live search. Browser-only (like shell.ts). Games come from /games.json
 // (generated-game manifest served by src/serve.ts); box art is, in order of
 // preference:
-//   1. a real attract-mode snapshot saved by the shell (localStorage)
-//   2. tile art decoded from the game's own gfx ROM (the user's zip)
-//   3. a stylized placeholder when no ROM is present
+//   0. the classic promotional flyer (artwork/covers/<game>.png, user-
+//      supplied — e.g. adb.arcadeitalia.net/media/mame.current/flyers/)
+//   1. cabinet bezel (artwork zip via its default.lay) with a DETERMINISTIC
+//      screenshot in the CRT window — the game's own board emulated for a
+//      fixed frame count, so the cover is permanent across visits
+//   2. the deterministic screenshot alone
+//   3. tile art decoded from the game's own gfx ROM (the user's zip)
+//   4. a stylized placeholder when no ROM is present
 // Nothing here is game-specific: everything comes from the manifest, the
-// generated config.json, and the ROM bytes.
+// generated config.json, the ROM bytes, and user-supplied art files.
 
 import { readZip, crc32 } from './zip.ts';
 import { decodeGfx, type GfxLayout } from './gfx.ts';
 import { loadArtwork } from './artwork.ts';
+import { createBoard } from './boards/index.ts';
 
 interface GameEntry {
   game: string;
@@ -23,7 +29,11 @@ interface GameEntry {
   hasArt: boolean;
 }
 
-const SNAP_KEY = (game: string) => `mame2js:snap:${game}`;
+// Deterministic covers: emulate exactly COVER_FRAMES frames (deep into
+// attract mode) and screenshot that frame. Cached forever in localStorage,
+// keyed by frame count so changing it regenerates.
+const COVER_FRAMES = 900; // ~15 s of attract
+const COVER_KEY = (game: string) => `mame2js:cover:${game}:f${COVER_FRAMES}`;
 
 export async function runMenu(): Promise<void> {
   document.title = 'mame2js — game shelf';
@@ -94,7 +104,7 @@ export async function runMenu(): Promise<void> {
     boxes.forEach(b => { b.box.style.outline = 'none'; b.box.style.transform = ''; });
     const b = vis[selected];
     b.box.style.outline = '3px solid #f2c200';
-    b.box.style.transform = 'translateY(-8px)';
+    b.box.style.transform = 'translateY(-12px) scale(1.03)';
     b.box.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
   };
 
@@ -119,7 +129,7 @@ export async function runMenu(): Promise<void> {
 
   addEventListener('keydown', ev => {
     if (ev.target === search && ev.key !== 'Enter' && ev.key !== 'ArrowDown') return;
-    const perRow = Math.max(1, Math.floor((wall.clientWidth - 72) / 206));
+    const perRow = Math.max(1, Math.floor((wall.clientWidth - 72) / 350));
     switch (ev.key) {
       case 'ArrowRight': select(selected + 1); ev.preventDefault(); break;
       case 'ArrowLeft': select(selected - 1); ev.preventDefault(); break;
@@ -138,24 +148,25 @@ export async function runMenu(): Promise<void> {
   function buildBox(entry: GameEntry): HTMLElement {
     const item = el('div', 'display:flex;flex-direction:column;align-items:center;cursor:pointer');
 
-    const box = el('div', `position:relative;width:180px;height:250px;border-radius:6px 10px 10px 6px;
+    // Netflix-scale tile: big cover, slim label
+    const box = el('div', `position:relative;width:320px;height:480px;border-radius:8px 12px 12px 8px;
       background:linear-gradient(105deg,#1b2148,#242c63 55%,#1b2148);
-      box-shadow:inset 6px 0 10px -6px #000, inset -2px 0 6px -3px rgba(255,255,255,.25), 0 10px 22px rgba(0,0,0,.55);
+      box-shadow:inset 6px 0 10px -6px #000, inset -2px 0 6px -3px rgba(255,255,255,.25), 0 14px 30px rgba(0,0,0,.6);
       transition:transform .18s ease, box-shadow .18s ease;overflow:hidden`);
     // spine highlight (VHS box left edge)
-    box.appendChild(el('div', `position:absolute;left:0;top:0;bottom:0;width:10px;
+    box.appendChild(el('div', `position:absolute;left:0;top:0;bottom:0;width:12px;
       background:linear-gradient(90deg, rgba(255,255,255,.22), rgba(0,0,0,.4));pointer-events:none;z-index:3`));
 
     const cover = document.createElement('canvas');
-    cover.width = 160; cover.height = 168;
-    cover.style.cssText = 'display:block;width:160px;height:168px;margin:10px auto 0;background:#000;border:2px solid #0006;image-rendering:pixelated';
+    cover.width = 600; cover.height = 800; // 2x backing for crisp flyer art
+    cover.style.cssText = 'display:block;width:300px;height:400px;margin:10px auto 0;background:#000;border:2px solid #0006';
     box.appendChild(cover);
 
-    const label = el('div', `position:absolute;left:10px;right:0;bottom:0;height:60px;padding:7px 10px 0;
+    const label = el('div', `position:absolute;left:12px;right:0;bottom:0;height:66px;padding:9px 14px 0;
       background:linear-gradient(#f7f3e8,#e8e0c8);color:#1b1b1b;border-top:3px solid #c9b98b`);
-    const name = el('div', 'font-weight:800;font-size:13px;line-height:1.15;overflow:hidden;max-height:30px');
+    const name = el('div', 'font-weight:800;font-size:17px;line-height:1.15;overflow:hidden;max-height:36px');
     name.textContent = entry.fullname.replace(/\s*\(.*\)$/, ''); // shelf label: drop the set/licence suffix
-    const meta = el('div', 'font-size:10px;color:#6b6045;margin-top:3px;letter-spacing:.4px');
+    const meta = el('div', 'font-size:12px;color:#6b6045;margin-top:4px;letter-spacing:.4px');
     meta.textContent = `${entry.manufacturer} · ${entry.year}`;
     label.append(name, meta);
     box.appendChild(label);
@@ -168,12 +179,12 @@ export async function runMenu(): Promise<void> {
       box.appendChild(ribbon);
     }
 
-    box.addEventListener('mouseenter', () => { box.style.transform = 'translateY(-8px) rotate(-1deg)'; });
+    box.addEventListener('mouseenter', () => { box.style.transform = 'translateY(-12px) scale(1.04)'; });
     box.addEventListener('mouseleave', () => { box.style.transform = ''; box.style.outline = 'none'; });
     box.addEventListener('click', () => { location.href = `?g=${encodeURIComponent(entry.game)}`; });
 
     // shelf plank under each box — planks in a row join into one shelf
-    const plank = el('div', `width:206px;height:14px;margin-top:0;border-radius:2px;
+    const plank = el('div', `width:350px;height:16px;margin-top:0;border-radius:2px;
       background:linear-gradient(#7a4a1f,#5b3413 60%,#3c2008);
       box-shadow:0 6px 8px rgba(0,0,0,.6), inset 0 2px 2px rgba(255,255,255,.18)`);
 
@@ -185,21 +196,27 @@ export async function runMenu(): Promise<void> {
 
   async function paintCover(entry: GameEntry, canvas: HTMLCanvasElement): Promise<void> {
     const ctx = canvas.getContext('2d')!;
-    // 1. real cabinet artwork (MAME artwork zip in <repo>/artwork/, user-supplied)
+    // 0. the classic promotional flyer (artwork/covers/<game>.png,
+    //    user-supplied) — real box art beats anything synthesized
+    const flyer = await imageFrom(`/artwork/covers/${encodeURIComponent(entry.game)}.png`);
+    if (flyer) {
+      const s = Math.max(canvas.width / flyer.width, canvas.height / flyer.height);
+      const w = flyer.width * s, h = flyer.height * s;
+      ctx.drawImage(flyer, (canvas.width - w) / 2, (canvas.height - h) / 2, w, h);
+      return;
+    }
+    // 1. cabinet artwork frame (drawn immediately; the deterministic
+    //    screenshot fills the CRT window when it's ready)
     if (entry.hasArt && await paintArtwork(entry, canvas, ctx)) return;
-    // 2. attract-mode snapshot captured by the shell
-    const snap = localStorage.getItem(SNAP_KEY(entry.game));
-    if (snap) {
-      const img = new Image();
-      img.onload = () => {
-        const s = Math.min(canvas.width / img.width, canvas.height / img.height);
-        const w = img.width * s, h = img.height * s;
-        ctx.imageSmoothingEnabled = false;
-        ctx.fillStyle = '#000';
-        ctx.fillRect(0, 0, canvas.width, canvas.height);
-        ctx.drawImage(img, (canvas.width - w) / 2, (canvas.height - h) / 2, w, h);
-      };
-      img.src = snap;
+    // 2. deterministic emulated screenshot alone
+    const shot = await coverShot(entry);
+    if (shot) {
+      const s = Math.min(canvas.width / shot.width, canvas.height / shot.height);
+      const w = shot.width * s, h = shot.height * s;
+      ctx.imageSmoothingEnabled = false;
+      ctx.fillStyle = '#000';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.drawImage(shot, (canvas.width - w) / 2, (canvas.height - h) / 2, w, h);
       return;
     }
     // 3. tile art from the game's own gfx ROM
@@ -209,10 +226,9 @@ export async function runMenu(): Promise<void> {
   }
 
   /**
-   * Cover from the MAME artwork zip (see artwork.ts). Bezels have a
-   * transparent window where the CRT sits — fill it with the game's
-   * attract-mode snapshot (saved by the shell while playing), falling back
-   * to decoded tile art, before drawing the bezel on top.
+   * Cover from the MAME artwork zip (see artwork.ts): the bezel is drawn
+   * right away, and the deterministic screenshot lands in its CRT window
+   * once emulated (instant on later visits — it's cached).
    */
   async function paintArtwork(entry: GameEntry, canvas: HTMLCanvasElement, ctx: CanvasRenderingContext2D): Promise<boolean> {
     try {
@@ -224,43 +240,113 @@ export async function runMenu(): Promise<void> {
       const s = Math.max(canvas.width / bmp.width, canvas.height / bmp.height);
       const dx = (canvas.width - bmp.width * s) / 2, dy = (canvas.height - bmp.height * s) / 2;
 
-      ctx.fillStyle = '#000';
-      ctx.fillRect(0, 0, canvas.width, canvas.height);
-      if (win) {
-        const wx = dx + win.x * s, wy = dy + win.y * s, ww = win.w * s, wh = win.h * s;
-        const screen = await screenImage(entry);
-        if (screen) {
-          // contain-fit the screen inside the window
+      const paint = (screen: HTMLImageElement | HTMLCanvasElement | null) => {
+        ctx.fillStyle = '#000';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        if (win && screen) {
+          const wx = dx + win.x * s, wy = dy + win.y * s, ww = win.w * s, wh = win.h * s;
           const fs = Math.min(ww / screen.width, wh / screen.height);
           const fw = screen.width * fs, fh = screen.height * fs;
           ctx.imageSmoothingEnabled = false;
           ctx.drawImage(screen, wx + (ww - fw) / 2, wy + (wh - fh) / 2, fw, fh);
-        } else if (entry.hasRom) {
-          // no snapshot yet — tile art peeks through the glass
-          const sub = document.createElement('canvas');
-          sub.width = Math.max(8, Math.round(ww)); sub.height = Math.max(8, Math.round(wh));
-          const subCtx = sub.getContext('2d')!;
-          if (await paintTileArt(entry, sub, subCtx)) ctx.drawImage(sub, wx, wy);
         }
-      }
-      ctx.imageSmoothingEnabled = true;
-      ctx.drawImage(bmp, dx, dy, bmp.width * s, bmp.height * s);
+        ctx.imageSmoothingEnabled = true;
+        ctx.drawImage(bmp, dx, dy, bmp.width * s, bmp.height * s);
+      };
+
+      paint(null);
+      if (win && entry.hasRom) void coverShot(entry).then(shot => { if (shot) paint(shot); });
       return true;
     } catch {
       return false;
     }
   }
 
-  /** The attract-mode snapshot the shell saves while a game runs, if any. */
-  function screenImage(entry: GameEntry): Promise<HTMLImageElement | null> {
-    const snap = localStorage.getItem(SNAP_KEY(entry.game));
-    if (!snap) return Promise.resolve(null);
+  /**
+   * The permanent cover screenshot: run the game's own board for exactly
+   * COVER_FRAMES frames (chunked so the shelf stays responsive), rotate per
+   * the config, cache as a data URL. Same ROMs -> same frame, every visit.
+   */
+  const coverRuns = new Map<string, Promise<HTMLImageElement | null>>();
+  function coverShot(entry: GameEntry): Promise<HTMLImageElement | null> {
+    let run = coverRuns.get(entry.game);
+    if (!run) { run = makeCoverShot(entry); coverRuns.set(entry.game, run); }
+    return run;
+  }
+
+  async function makeCoverShot(entry: GameEntry): Promise<HTMLImageElement | null> {
+    const cached = localStorage.getItem(COVER_KEY(entry.game));
+    if (cached) return imageFrom(cached);
+    if (!entry.hasRom) return null;
+    try {
+      const cfg = await fetch(`/${encodeURIComponent(entry.game)}/config.json`).then(r => r.json()) as ShellCfg;
+      const regions = await loadRegions(cfg);
+      if (!regions) return null;
+      const ports = Object.fromEntries(cfg.ports.map(p => [p.tag, p.init]));
+      const board = createBoard(cfg.board, regions, { read: t => ports[t] ?? 0xff }, { soundWrite: () => { /* silent */ } });
+      const fb = new Uint32Array(board.fbWidth * board.fbHeight);
+      for (let f = 0; f < COVER_FRAMES; f += 30) {
+        for (let i = 0; i < 30; i++) board.frame(fb);
+        await new Promise(r => setTimeout(r)); // yield to keep the shelf responsive
+      }
+      const native = document.createElement('canvas');
+      native.width = board.fbWidth; native.height = board.fbHeight;
+      native.getContext('2d')!.putImageData(
+        new ImageData(new Uint8ClampedArray(fb.buffer), board.fbWidth, board.fbHeight), 0, 0);
+      const rotate = cfg.board.screen.rotate;
+      const rot = rotate === 90 || rotate === 270;
+      const shot = document.createElement('canvas');
+      shot.width = rot ? native.height : native.width;
+      shot.height = rot ? native.width : native.height;
+      const sctx = shot.getContext('2d')!;
+      if (rotate === 90) { sctx.translate(shot.width, 0); sctx.rotate(Math.PI / 2); }
+      else if (rotate === 270) { sctx.translate(0, shot.height); sctx.rotate(-Math.PI / 2); }
+      else if (rotate === 180) { sctx.translate(shot.width, shot.height); sctx.rotate(Math.PI); }
+      sctx.drawImage(native, 0, 0);
+      const url = shot.toDataURL('image/png');
+      try { localStorage.setItem(COVER_KEY(entry.game), url); } catch { /* storage full — regenerate next time */ }
+      return imageFrom(url);
+    } catch (err) {
+      console.warn(`cover emulation failed for ${entry.game}:`, err);
+      return null;
+    }
+  }
+
+  function imageFrom(url: string): Promise<HTMLImageElement | null> {
     return new Promise(res => {
       const img = new Image();
       img.onload = () => res(img);
       img.onerror = () => res(null);
-      img.src = snap;
+      img.src = url;
     });
+  }
+
+  interface ShellCfg {
+    board: Parameters<typeof createBoard>[0];
+    ports: { tag: string; init: number }[];
+    romUrl: string;
+    roms: { region: string; size: number; loads: { file: string; size: number; offset: number; crc: string }[] }[];
+  }
+
+  /** Assemble all ROM regions from the game's zip (name / dash-swap / CRC match). */
+  async function loadRegions(cfg: ShellCfg): Promise<Record<string, Uint8Array> | null> {
+    const res = await fetch(cfg.romUrl);
+    if (!res.ok) return null;
+    const files = await readZip(new Uint8Array(await res.arrayBuffer()));
+    const byCrc = new Map<number, Uint8Array>();
+    for (const b of files.values()) byCrc.set(crc32(b), b);
+    const regions: Record<string, Uint8Array> = {};
+    for (const spec of cfg.roms) {
+      const bytes = new Uint8Array(spec.size);
+      for (const load of spec.loads) {
+        const f = files.get(load.file.toLowerCase())
+          ?? files.get(load.file.toLowerCase().replace(/_/g, '-'))
+          ?? byCrc.get(parseInt(load.crc, 16) >>> 0);
+        if (f) bytes.set(f.subarray(0, load.size), load.offset);
+      }
+      regions[spec.region] = bytes;
+    }
+    return regions;
   }
 
   async function paintTileArt(entry: GameEntry, canvas: HTMLCanvasElement, ctx: CanvasRenderingContext2D): Promise<boolean> {
