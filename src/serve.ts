@@ -1,6 +1,8 @@
-// Tiny zero-dependency static file server for out/<game>/ (and roms/).
+// Tiny zero-dependency static file server for out/ (unified app + per-game
+// data) and roms/. Also serves /games.json — a live manifest of every
+// generated game, for the boot menu.
 import { createServer } from 'node:http';
-import { readFile, stat } from 'node:fs/promises';
+import { readFile, readdir, stat } from 'node:fs/promises';
 import { join, normalize, extname } from 'node:path';
 
 const MIME: Record<string, string> = {
@@ -15,12 +17,32 @@ const MIME: Record<string, string> = {
   '.cypher': 'text/plain; charset=utf-8',
 };
 
+/** Scan out/ for generated games (meta.json + config.json) and flag ROM/artwork availability. */
+async function gamesManifest(outRoot: string, romsDir: string, artDir: string): Promise<string> {
+  const games: unknown[] = [];
+  for (const entry of await readdir(outRoot).catch(() => [] as string[])) {
+    try {
+      const meta = JSON.parse(await readFile(join(outRoot, entry, 'meta.json'), 'utf8'));
+      await stat(join(outRoot, entry, 'config.json'));
+      meta.hasRom = await stat(join(romsDir, `${entry}.zip`)).then(() => true, () => false);
+      meta.hasArt = await stat(join(artDir, `${entry}.zip`)).then(() => true, () => false);
+      games.push(meta);
+    } catch { /* not a generated game dir */ }
+  }
+  return JSON.stringify(games);
+}
+
 export function serve(rootDirs: Record<string, string>, port: number): Promise<number> {
   const server = createServer(async (req, res) => {
     try {
       const url = new URL(req.url ?? '/', 'http://localhost');
       let path = normalize(decodeURIComponent(url.pathname)).replace(/^\/+/, '');
       if (path.includes('..')) { res.writeHead(403).end(); return; }
+      if (path === 'games.json') {
+        res.writeHead(200, { 'content-type': MIME['.json'], 'cache-control': 'no-store' });
+        res.end(await gamesManifest(rootDirs[''], rootDirs['roms'] ?? '', rootDirs['artwork'] ?? ''));
+        return;
+      }
       // route by first segment if it names a mount, else default mount ''
       const [head, ...rest] = path.split('/');
       let root = rootDirs[''];

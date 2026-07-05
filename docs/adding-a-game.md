@@ -1,8 +1,9 @@
 # Adding a game — the playbook
 
 The promise: **regeneration + missing devices only.** Here's the checklist,
-using what we learned from galaga. (Galaxian + Pac-Man are tracked in
-issue #1.)
+proven three times now (galaga, then pacman + galaxian in issue #1 — those
+two took: parser extensions, one board module, one video module, one sound
+core each, zero changes to existing engine modules beyond generalization).
 
 ## 1. Extract and inspect
 
@@ -59,8 +60,17 @@ Two designed failure points tell you the work list:
   60 fps, zero console errors. Use Playwright as in docs/testing.md — hold
   keys ≥200 ms so the I/O chip polling sees the edges.
 
-## 6. Keep the contract
+## 6. Register the board family
+
+`src/runtime/boards/index.ts` FAMILIES map: driver-file stem → board class.
+That's the only shared file a new game touches. (Board modules import
+helpers from `input.ts`/`types.ts`, never from the registry — cycle, see
+gotchas 0b.)
+
+## 7. Keep the contract
 
 If you catch yourself writing `if (game === 'digdug')` anywhere in
 src/runtime or src/gen — stop; that fact belongs in the graph (parser), the
-generated config, or a device/board module boundary.
+generated config, or a device/board module boundary. Same for input
+polarity, io maps, clocks: the graph knows; extend the parser if it
+doesn't.

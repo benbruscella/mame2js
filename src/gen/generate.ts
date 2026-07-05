@@ -4,7 +4,7 @@
 // the graph; everything behavioral comes from the shared runtime.
 
 import { mkdirSync, writeFileSync, cpSync, existsSync } from 'node:fs';
-import { join, resolve, dirname } from 'node:path';
+import { join, resolve, dirname, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import type { KnowledgeGraph, KGNode } from '../kg/types.ts';
@@ -24,8 +24,10 @@ const KEYMAP: Record<string, string[]> = {
   IPT_JOYSTICK_RIGHT: ['ArrowRight'],
   IPT_JOYSTICK_UP: ['ArrowUp'],
   IPT_JOYSTICK_DOWN: ['ArrowDown'],
-  IPT_BUTTON1: ['ControlLeft', 'Space'],
-  IPT_BUTTON2: ['AltLeft'],
+  // NOTE: never bind Ctrl — macOS eats Ctrl+Arrow (Mission Control), which
+  // force-releases left/right movement while firing (user directive)
+  IPT_BUTTON1: ['Space', 'KeyX'],
+  IPT_BUTTON2: ['KeyZ'],
   IPT_START1: ['Digit1'],
   IPT_START2: ['Digit2'],
   IPT_COIN1: ['Digit5'],
@@ -62,7 +64,20 @@ export async function generate(graph: KnowledgeGraph, opts: GenerateOptions): Pr
     throw new Error(`graph incomplete for ${opts.game}: machine=${!!machine} romset=${!!romset} inputs=${!!inputs}`);
   }
 
-  const devices = g.out(machine.id, 'HAS_DEVICE').map(d => d.node);
+  // machine configs compose via helper calls (galaxian(config) -> galaxian_base(config));
+  // walk the CALLS chain and collect devices from every config in it
+  const devices: KGNode[] = [];
+  {
+    const seen = new Set<string>();
+    const queue = [machine.id];
+    while (queue.length) {
+      const id = queue.shift()!;
+      if (seen.has(id)) continue;
+      seen.add(id);
+      devices.push(...g.out(id, 'HAS_DEVICE').map(d => d.node));
+      queue.push(...g.out(id, 'CALLS').map(c => c.node.id));
+    }
+  }
   const byTag = new Map(devices.map(d => [String(d.props.tag), d]));
 
   // --- cpus + address map ----------------------------------------------------
@@ -71,19 +86,27 @@ export async function generate(graph: KnowledgeGraph, opts: GenerateOptions): Pr
   const cpus = cpuDevs.map(d => ({
     tag: String(d.props.tag),
     clock: Number(d.props.clock),
-    region: String(d.props.tag), // galaga family: rom region tag == cpu tag
+    region: String(d.props.tag), // rom region tag == cpu tag across supported families
   }));
 
-  const mapRef = g.out(`device:${machine.props.name}/${cpus[0].tag}`, 'HAS_MAP')[0];
-  if (!mapRef) throw new Error(`no address map on ${cpus[0].tag}`);
-  const ranges = g.out(mapRef.node.id, 'HAS_RANGE').map(({ node: r }) => {
+  // address maps compose via helper calls too (galaxian_map = base + discrete);
+  // flatten ranges depth-first in statement order
+  const collectRanges = (mapId: string, seen = new Set<string>()): KGNode[] => {
+    if (seen.has(mapId)) return [];
+    seen.add(mapId);
+    const own = g.out(mapId, 'HAS_RANGE').map(r => r.node);
+    const called = g.out(mapId, 'INCLUDES_MAP').flatMap(m => collectRanges(m.node.id, seen));
+    return [...called, ...own];
+  };
+
+  const handlerKey = (h: { edge: { props?: Record<string, unknown> }; node: KGNode }) => {
+    const tag = h.edge.props?.deviceTag;
+    const owner = tag ?? String(h.node.props.ownerClass);
+    return `${owner}.${h.node.props.method}`;
+  };
+  const rangeSpec = (r: KGNode) => {
     const reads = g.out(r.id, 'READS');
     const writes = g.out(r.id, 'WRITES');
-    const handlerKey = (h: (typeof reads)[number]) => {
-      const tag = h.edge.props?.deviceTag;
-      const owner = tag ?? String(h.node.props.ownerClass);
-      return `${owner}.${h.node.props.method}`;
-    };
     const spec: Record<string, unknown> = {
       start: Number(r.props.start),
       end: Number(r.props.end),
@@ -93,30 +116,76 @@ export async function generate(graph: KnowledgeGraph, opts: GenerateOptions): Pr
     if (r.props.share) spec.share = String(r.props.share);
     if (reads[0]) spec.read = handlerKey(reads[0]);
     if (writes[0]) spec.write = handlerKey(writes[0]);
+    // .portr("IN0") -> read handler key "port.IN0" (boards register these from InputPorts)
+    if (r.props.portRead) spec.read = `port.${r.props.portRead}`;
+    if (r.props.portWrite) spec.write = `port.${r.props.portWrite}`;
     if (spec.kind === 'handler' && !spec.read && !spec.write) spec.kind = 'nop';
     return spec;
-  });
+  };
+
+  const cpuDevNode = cpuDevs[0];
+  const mapRefs = g.out(cpuDevNode.id, 'HAS_MAP');
+  const programMap = mapRefs.find(m => (m.edge.props?.space ?? 'AS_PROGRAM') === 'AS_PROGRAM');
+  if (!programMap) throw new Error(`no address map on ${cpus[0].tag}`);
+  const ranges = collectRanges(programMap.node.id).map(rangeSpec);
+
+  // io space (AS_IO): pacman writes its IM2 vector through an out port
+  const ioMapRef = mapRefs.find(m => m.edge.props?.space === 'AS_IO');
+  let io: Record<string, unknown> | undefined;
+  if (ioMapRef) {
+    io = { ranges: collectRanges(ioMapRef.node.id).map(rangeSpec) };
+    if (ioMapRef.node.props.globalMask !== undefined) io.globalMask = Number(ioMapRef.node.props.globalMask);
+  }
 
   // --- screen ------------------------------------------------------------------
   const screenDev = devices.find(d => d.props.type === 'SCREEN');
   const raw = screenDev?.props.screenRaw as number[] | undefined;
   if (!raw) throw new Error('screen raw params missing');
   const [pixclock, htotal, hbend, hbstart, vtotal, vbend, vbstart] = raw;
+
+  // the galaxian driver renders horizontally pre-scaled (GFXDECODE_SCALE
+  // xscale 3, h params scaled to match); divide back to native pixels
+  let xscale = 1;
+  {
+    const machineIds = new Set<string>();
+    const q = [machine.id];
+    while (q.length) {
+      const id = q.shift()!;
+      if (machineIds.has(id)) continue;
+      machineIds.add(id);
+      q.push(...g.out(id, 'CALLS').map(c => c.node.id));
+    }
+    for (const id of machineIds) {
+      for (const { node: dec } of g.out(id, 'DECODES')) {
+        for (const { node: e } of g.out(dec.id, 'HAS_ENTRY')) {
+          xscale = Math.max(xscale, Number(e.props.xscale ?? 1));
+        }
+      }
+    }
+  }
+
   const monitor = String(game.props.monitor);
   const screen = {
-    width: hbstart - hbend,
+    width: (hbstart - hbend) / xscale,
     height: vbstart - vbend,
     refresh: pixclock / (htotal * vtotal),
     vtotal,
     vbstart,
+    vbend,
     rotate: monitor === 'ROT90' ? 90 : monitor === 'ROT270' ? 270 : monitor === 'ROT180' ? 180 : 0,
   };
 
-  // --- clocks -------------------------------------------------------------------
+  // --- clocks + sound -------------------------------------------------------------
   const clocks = {
     namco06: Number(byTag.get('06xx')?.props.clock ?? 48000),
     wsg: Number(byTag.get('namco')?.props.clock ?? 96000),
   };
+  // sound device -> runtime SoundCore kind (device-library mapping, not game-specific)
+  const sound = devices.some(d => d.props.type === 'NAMCO_WSG' || d.props.type === 'NAMCO')
+    ? { kind: 'wsg', clock: Number(byTag.get('namco')?.props.clock ?? 96000), waveRegion: 'namco' }
+    : devices.some(d => d.props.type === 'GALAXIAN_SOUND')
+      ? { kind: 'galaxian', clock: cpus[0].clock }
+      : { kind: 'none' };
 
   // --- roms ----------------------------------------------------------------------
   const roms = g.out(romset.id, 'HAS_REGION').map(({ node: region }) => ({
@@ -132,68 +201,110 @@ export async function generate(graph: KnowledgeGraph, opts: GenerateOptions): Pr
   }));
 
   // --- inputs -----------------------------------------------------------------------
+  // Port polarity comes from the graph per field: galaga/pacman inputs are
+  // active-low, galaxian's are active-HIGH (coin bit 0 at rest) — the resting
+  // ("init") byte must be computed per port or galaxian sees a stuck coin switch.
   const ports = g.out(inputs.id, 'HAS_PORT').map(p => p.node);
-  const portTags = ports.map(p => String(p.props.tag));
+  const portSpecs: { tag: string; init: number }[] = [];
   const bindings: unknown[] = [];
   const dipDefaults: unknown[] = [];
   for (const port of ports) {
     const tag = String(port.props.tag);
+    let init = 0;
     for (const { node: f } of g.out(port.id, 'HAS_FIELD')) {
       const kind = f.props.kind;
+      const mask = Number(f.props.mask);
+      const activeLow = f.props.activeLow !== false; // default LOW (classic hardware)
       if (kind === 'dip') {
-        dipDefaults.push({
-          port: tag,
-          mask: Number(f.props.mask),
-          value: Number(f.props.defaultValue ?? f.props.mask), // unused dips default to off (active low)
-          name: String(f.props.name ?? ''),
-        });
+        const value = Number(f.props.defaultValue ?? mask); // unused dips default to off (active low)
+        init = (init & ~mask) | (value & mask);
+        dipDefaults.push({ port: tag, mask, value, name: String(f.props.name ?? '') });
       } else if (kind === 'service') {
-        dipDefaults.push({ port: tag, mask: Number(f.props.mask), value: Number(f.props.mask), name: 'Service Mode' });
+        // service switch at rest = released
+        if (activeLow) init |= mask;
+        dipDefaults.push({ port: tag, mask, value: activeLow ? mask : 0, name: 'Service Mode' });
       } else if (kind === 'bit') {
+        if (activeLow) init |= mask; // released = bit set; active-high released = bit clear
         const type = String(f.props.type ?? '');
         const mods = (f.props.modifiers as string[] | undefined) ?? [];
         if (mods.includes('PORT_COCKTAIL')) continue; // player-2 cocktail path: unbound
         const keys = KEYMAP[type];
-        if (keys) bindings.push({ port: tag, mask: Number(f.props.mask), keys, label: type });
+        if (keys) bindings.push({ port: tag, mask, keys, label: type, activeLow });
       }
     }
+    portSpecs.push({ tag, init });
   }
 
   // --- emit ---------------------------------------------------------------------------
-  const appDir = join(opts.outDir, 'app');
+  const title = `${game.props.fullname} (${game.props.company}, ${game.props.year})`;
+  // board family = driver file stem; selects the board module from the registry
+  const family = basename(String(graph.meta.driverFile)).replace(/\.cpp$/, '');
+  const config = {
+    game: opts.game,
+    title,
+    family,
+    board: { family, cpus, ranges, ...(io ? { io } : {}), screen, clocks },
+    sound,
+    roms,
+    bindings,
+    dipDefaults,
+    ports: portSpecs,
+    romUrl: `/roms/${opts.game}.zip`,
+    runtimeUrl: './dist/runtime/',
+    menuUrl: './',
+  };
+
+  // per-game metadata for the boot menu manifest
+  writeFileSync(join(opts.outDir, 'meta.json'), JSON.stringify({
+    game: opts.game,
+    title,
+    fullname: game.props.fullname,
+    year: game.props.year,
+    manufacturer: game.props.company,
+    family,
+  }, null, 2));
+
+  // the game itself is pure knowledge-graph data — the unified app at
+  // out/app loads it at runtime (no per-game compile)
+  writeFileSync(join(opts.outDir, 'config.json'), JSON.stringify(config, null, 2));
+  console.log(`\ngenerated ${join(opts.outDir, 'config.json')}`);
+  if (!existsSync(join(projectRoot, 'roms', `${opts.game}.zip`))) {
+    console.log(`note: put ${opts.game}.zip in ${join(projectRoot, 'roms')}/ to auto-load ROMs (or drop the zip onto the page)`);
+  }
+}
+
+/**
+ * Build the unified browser app at <outRoot>/app: one runtime compile shared
+ * by every generated game. /app/ is the boot menu; /app/?g=<game> boots a
+ * game from its /<game>/config.json.
+ */
+export function buildApp(outRoot: string): boolean {
+  const appDir = join(outRoot, 'app');
   const srcDir = join(appDir, 'src');
   mkdirSync(srcDir, { recursive: true });
 
   cpSync(join(projectRoot, 'src/runtime'), join(srcDir, 'runtime'), { recursive: true });
 
-  const title = `${game.props.fullname} (${game.props.company}, ${game.props.year})`;
-  const config = {
-    game: opts.game,
-    title,
-    board: { cpus, ranges, screen, clocks },
-    roms,
-    bindings,
-    dipDefaults,
-    ports: portTags,
-    romUrl: `/roms/${opts.game}.zip`,
-    workletUrl: './dist/runtime/wsg-worklet.js',
-  };
-
-  writeFileSync(join(srcDir, 'config.ts'), `// GENERATED by mame2js from ${graph.meta.driverFile} — do not edit.
-import type { ShellConfig } from './runtime/shell.ts';
-
-export const CONFIG: ShellConfig = ${JSON.stringify(config, null, 2)} as unknown as ShellConfig;
-`);
-
   writeFileSync(join(srcDir, 'main.ts'), `// GENERATED by mame2js — do not edit.
-import { runShell } from './runtime/shell.ts';
-import { CONFIG } from './config.ts';
+// Unified app: no ?g= -> boot menu; ?g=<game> -> load that game's generated
+// config (pure knowledge-graph data) and run it.
+import { runShell, type ShellConfig } from './runtime/shell.ts';
+import { runMenu } from './runtime/menu.ts';
 
-runShell(CONFIG).catch(err => {
+const game = new URLSearchParams(location.search).get('g');
+const fail = (err: unknown) => {
   console.error(err);
   document.body.insertAdjacentHTML('beforeend',
-    '<pre style="color:#f66;padding:12px">' + String(err?.stack ?? err) + '</pre>');
-});
+    '<pre style="color:#f66;padding:12px">' + String((err as Error)?.stack ?? err) + '</pre>');
+};
+if (game) {
+  fetch(\`/\${encodeURIComponent(game)}/config.json\`)
+    .then(r => { if (!r.ok) throw new Error(\`no generated config for "\${game}" — run: mame2js \${game}\`); return r.json(); })
+    .then(cfg => runShell(cfg as ShellConfig))
+    .catch(fail);
+} else {
+  runMenu().catch(fail);
+}
 `);
 
   writeFileSync(join(appDir, 'tsconfig.json'), JSON.stringify({
@@ -213,7 +324,7 @@ runShell(CONFIG).catch(err => {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>${title}</title>
+<title>mame2js</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='13' font-size='13'>👾</text></svg>">
 </head>
 <body>
@@ -223,18 +334,18 @@ runShell(CONFIG).catch(err => {
 </html>
 `);
 
-  console.log(`\ngenerated ${appDir}`);
-  console.log('compiling app with tsc...');
+  // root convenience redirect: / -> /app/
+  writeFileSync(join(outRoot, 'index.html'),
+    '<!doctype html><meta http-equiv="refresh" content="0;url=/app/">');
+
+  console.log('compiling unified app with tsc...');
   const tsc = spawnSync(process.execPath, [join(projectRoot, 'node_modules/typescript/bin/tsc'), '-p', appDir], {
     stdio: 'inherit',
   });
   if (tsc.status !== 0) {
     console.error('tsc failed — app emitted but not compiled');
-    process.exitCode = 1;
-    return;
+    return false;
   }
   console.log(`app ready: ${join(appDir, 'index.html')}`);
-  if (!existsSync(join(projectRoot, 'roms', `${opts.game}.zip`))) {
-    console.log(`note: put ${opts.game}.zip in ${join(projectRoot, 'roms')}/ to auto-load ROMs (or drop the zip onto the page)`);
-  }
+  return true;
 }

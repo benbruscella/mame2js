@@ -32,3 +32,42 @@ export interface InputPorts {
   /** read the current byte for a port tag ("IN0", "IN1", "DSWA", "DSWB") */
   read(tag: string): number;
 }
+
+// ---------------------------------------------------------------------------
+// board contracts (shared by the shell and every boards/<family> module)
+// ---------------------------------------------------------------------------
+
+import type { RangeSpec } from './bus.ts';
+
+export interface BoardConfig {
+  /** driver family from the graph (galaga, pacman, galaxian) — selects the board module */
+  family: string;
+  cpus: { tag: string; clock: number; region: string }[];
+  ranges: RangeSpec[];
+  /** Z80 io space (AS_IO), when the driver maps one (pacman IM2 vector port) */
+  io?: { ranges: RangeSpec[]; globalMask?: number };
+  screen: { width: number; height: number; refresh: number; vtotal: number; vbstart: number; vbend?: number; rotate: number };
+  clocks: { namco06: number; wsg: number };
+}
+
+export interface BoardSinks {
+  /** sound register write, forwarded to the audio worklet (offset space is per SoundCore) */
+  soundWrite: (offset: number, data: number) => void;
+}
+
+export interface BoardSnapshot {
+  frame: number;
+  cpus: { tag: string; pc: number; sp: number; halted: boolean; held?: boolean }[];
+  /** current credit count when the board tracks one (shown in the status line) */
+  credits?: number;
+  [extra: string]: unknown;
+}
+
+/** A composed machine: CPUs + devices + video, stepped one frame at a time. */
+export interface Board {
+  readonly fbWidth: number;
+  readonly fbHeight: number;
+  frame(fb: Uint32Array): void;
+  reset(): void;
+  snapshot(): BoardSnapshot;
+}

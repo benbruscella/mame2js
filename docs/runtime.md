@@ -3,7 +3,8 @@
 Everything under `src/runtime/`. All modules: strict TS, `erasableSyntaxOnly`
 (no enums / namespaces / constructor parameter properties), `.ts` import
 specifiers, zero dependencies. Node-runnable modules must not touch DOM;
-browser-only modules are `shell.ts`, `audio.ts`, `wsg-worklet.ts`.
+browser-only modules are `shell.ts`, `menu.ts`, `audio.ts`, and the
+`*-worklet.ts` wrappers.
 
 ## Contracts — `types.ts`
 
@@ -75,10 +76,18 @@ The classic HLE expects coins on ports 0/1. `Namco51` takes callbacks in
 **modern order** and reorders internally (`switchByte()` = in[2]|in[3]<<4).
 Do not "fix" this.
 
-## Namco 54xx — stubbed
+## Namco 54xx — `namco54.ts` (HLE)
 
-`boards/galaga.ts` slot 3 accepts writes and drops them. The user's romset
-includes `54xx.bin` (MB8844 program, CRC ee7357e0) — LLE is a TODO.
+Explosion/noise generator. `boards/galaga.ts` forwards the 06xx slot-3
+command bytes to sound-offset 0x40; `wsg-worklet.ts` hosts a `Namco54`
+beside the WSG and sums them (54xx relative gain 0.50/0.5625). Protocol per
+MAME namco54.cpp: `3x`/`4x`/`6x` program type A/B/C params, `1x`/`2x`/`5x`
+play them (galaga: A=[40 00 02 df], B=[30 30 03 df] at boot; death =
+`10 10 20 20`). Discrete side is a faithful port of galaga_a.cpp's
+band-pass/mixer network (centers 167/450/2500 Hz, MAME's clipped-feedback
+distortion included); the MB8844 program itself is approximated with LFSR
+noise + stepped envelopes (durations anchored to the real params). LLE with
+the user's `54xx.bin` dump remains a possible upgrade.
 
 ## WSG sound — `wsg.ts` + `wsg-worklet.ts` + `audio.ts` (agent-written)
 
@@ -121,6 +130,38 @@ it (ES module import).
   latched at `vblank()`, LFSR advances during `draw()` (pre-visible → visible
   → post-visible), matching MAME's split.
 
+## Galaxian sound — `galaxian-sound.ts` + `galaxian-worklet.ts`
+
+`GalaxianSound` (SoundCore), ported from classic MAME 0.121 audio/galaxian.c
+with register semantics cross-checked against modern galaxian_a.cpp. Native
+rate clock/32 (96 kHz @ 3.072 MHz). Register space (board contract):
+0x00-0x07 = sound_w latch (0-2 background voice enables, 3 HIT/noise,
+5 FIRE, 6-7 volume bits), 0x10-0x13 = lfo_freq_w, 0x20 = pitch_w.
+Background hum = 3 square voices from the pitch counter + LFO sweep; shoot =
+NE555 swept "pew" one-shot; explosion = 17-bit RNG noise through a decay
+envelope + ~400 Hz low-pass. Master gain 0.75 baked in; shell volume 1.0.
+
+## Pacman video/board — `video/pacman.ts`, `boards/pacman.ts`
+
+Single Z80 @ 3.072 MHz; io-space Bus for the IM2 vector write (port 0,
+global_mask from the graph); vblank IRQ at vbstart with HOLD_LINE modeled by
+instruction-stepping until acceptance; mainlatch Q0 irq enable, Q1 sound
+enable (volume-gated in the board), Q3 flip, Q7 coin counter. Video: native
+288×224, pacman_scan_rows 28×36 tilemap (injectivity-tested), 8 sprites with
+the 272−x / y−31 origin + first-three-sprites x-offset quirk, palette from
+the 0x20 PROM through the 0x100 LUT, sprite transparency = LUT nibble 0.
+
+## Galaxian video/board — `video/galaxian.ts`, `boards/galaxian.ts`
+
+Single Z80 @ 3.072 MHz, **active-high inputs** (see gotcha 0), NMI on vblank
+gated by irq_enable_w. Video: native 256×224; 32×32 tilemap with per-column
+scroll/color from objram 0x00-0x3f; 8 sprites at 0x40-0x5f (sprites 0-2 one
+pixel lower, line-buffer clip); bullets at 0x60-0x7f (white shells + yellow
+missile); the original 17-bit-LFSR starfield (feedback bit12^~bit0, enable
+mask 0x1fe01==0x1fe00, −1 px/frame scroll) — an 05xx ancestor but NOT the
+same LFSR as starfield05xx.ts. Palette: 32-entry PROM via resnet weights,
+star colors from the {0,194,214,255} map.
+
 ## Board — `boards/galaga.ts`
 
 Composition + interrupt wiring (hand-transpiled from galaga.cpp):
@@ -141,8 +182,37 @@ Composition + interrupt wiring (hand-transpiled from galaga.cpp):
   the hook for the future live KG viewer overlay. `shares` is public for the
   same reason.
 
-## Shell — `shell.ts`, `input.ts`, `zip.ts`
+## Shell — `shell.ts`, `input.ts`, `zip.ts` (+ `menu.ts`, `boards/index.ts`)
 
+- **Board registry** (`boards/index.ts`): `createBoard(config, …)` maps
+  `config.family` (driver stem from the graph) → board module; unknown family
+  throws with the known list. `portHandlers(ranges, inputs)` builds read
+  handlers for generated `port.<TAG>` keys. `registerBoard()` exists for
+  future dynamic registration.
+- **Sound dispatch**: `config.sound.kind` ('wsg' | 'galaxian' | 'none') picks
+  the worklet module `<runtimeUrl>/<kind>-worklet.js` and processor name;
+  boards forward register writes through `sinks.soundWrite`. WSG master
+  volume 0.5625 (MAME route gain), other cores bake their own scale.
+- **Esc → menu**: keydown Escape (capture phase, registered before ROM load)
+  navigates to `config.menuUrl`. Games start immediately on load — the menu
+  click that navigated counts as the user gesture; audio resumes on first
+  input if the browser held the context suspended.
+- **Cabinet view** (`artwork.ts`, shared with the menu): the game plays
+  inside the real cabinet — marquee scan above (`/artwork/media/marquees/`),
+  bezel around the screen (from `/artwork/<game>.zip`, screen window taken
+  from the zip's MAME `default.lay`, alpha flood-fill as fallback), control
+  panel scan below (`/artwork/media/cpanels/`). Media source pattern:
+  `adb.arcadeitalia.net/media/mame.current/<kind>/<game>.png` (kinds:
+  flyers, marquees, cpanels, cabinets, pcbs, decals, titles…). All
+  user-supplied + gitignored like roms/. Missing pieces degrade gracefully.
+- **Menu** (`menu.ts`, browser-only): the /app/ home screen — video-store
+  shelves (Netflix-scale tiles) from `/games.json`, live search, arrow-key +
+  Enter navigation. Cover priority: classic flyer
+  (`/artwork/covers/<game>.png`) → bezel composited with a DETERMINISTIC
+  emulated screenshot (the game's board run exactly COVER_FRAMES frames,
+  cached in localStorage — permanent across visits) → that screenshot alone
+  → 2bpp tile-sheet art from the user's gfx ROM → stylized placeholder.
+  `INSERT ROM` ribbon when no zip.
 - `runShell(config)`: fetch `/roms/<game>.zip` → else drag-drop/file-picker;
   `assembleRegions` matches zip entries by **name, then dash/underscore
   swapped, then CRC32** (romset filenames drift across MAME eras — the user's

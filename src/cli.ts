@@ -16,7 +16,8 @@ const here = dirname(fileURLToPath(import.meta.url));
 const projectRoot = resolve(here, '..');
 
 function usage(): never {
-  console.error('usage: mame2js [graph] <game> [--mame-src <path>] [--out <dir>]');
+  console.error('usage: mame2js [graph] <game> [--mame-src <path>] [--out <dir>] [--serve [port]]');
+  console.error('       mame2js --serve            serve the unified app + all generated games');
   process.exit(2);
 }
 
@@ -31,10 +32,11 @@ for (let i = 0; i < argv.length; i++) {
 
 const command = positional[0] === 'graph' ? 'graph' : 'run';
 const game = command === 'graph' ? positional[1] : positional[0];
-if (!game) usage();
+const serveOnly = !game && ('serve' in opts || argv.includes('--serve'));
+if (!game && !serveOnly) usage();
 
-const mameSrc = resolve(opts['mame-src'] ?? process.env.MAME_SRC ?? detectMameSrc());
 const outRoot = resolve(opts.out ?? join(projectRoot, 'out'));
+const mameSrc = serveOnly ? '' : resolve(opts['mame-src'] ?? process.env.MAME_SRC ?? detectMameSrc());
 
 function detectMameSrc(): string {
   // mame2js conventionally lives inside or next to a mame checkout
@@ -84,6 +86,20 @@ function findDriverFile(game: string): string {
 
 // ---------------------------------------------------------------------------
 
+if (serveOnly) {
+  const { buildApp } = await import('./gen/generate.ts');
+  buildApp(outRoot);
+  const { serve } = await import('./serve.ts');
+  const port = await serve(
+    { '': outRoot, roms: join(projectRoot, 'roms'), artwork: join(projectRoot, 'artwork') },
+    Number(opts.serve) || 8280,
+  );
+  console.log(`\nserving http://localhost:${port}/app/  (menu; games at /app/?g=<game>)`);
+} else {
+  await pipeline(game!);
+}
+
+async function pipeline(game: string): Promise<void> {
 console.log(`mame2js: searching MAME source at ${mameSrc}`);
 const driverFile = findDriverFile(game);
 console.log(`mame2js: driver for "${game}" -> ${driverFile.slice(mameSrc.length + 1)}`);
@@ -129,15 +145,17 @@ if (regions.length) {
 }
 
 if (command === 'run') {
-  const { generate } = await import('./gen/generate.ts');
+  const { generate, buildApp } = await import('./gen/generate.ts');
   await generate(sub, { mameSrc, outDir, game });
+  if (!buildApp(outRoot)) process.exitCode = 1;
 }
 
 if ('serve' in opts || argv.includes('--serve')) {
   const { serve } = await import('./serve.ts');
   const port = await serve(
-    { '': outDir, roms: join(projectRoot, 'roms') },
+    { '': outRoot, roms: join(projectRoot, 'roms'), artwork: join(projectRoot, 'artwork') },
     Number(opts.serve) || 8280,
   );
-  console.log(`\nserving http://localhost:${port}/  (viewer: /viewer.html, full driver: /viewer.full.html)`);
+  console.log(`\nserving http://localhost:${port}/app/  (game: /app/?g=${game}, viewer: /${game}/viewer.html)`);
+}
 }

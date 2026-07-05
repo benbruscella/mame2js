@@ -6,23 +6,31 @@ directly) that prints PASS/FAIL lines and sets `process.exitCode`.
 ## The suites
 
 ```
-node src/runtime/z80.spec.ts            # 266 checks: instruction battery, exhaustive
+node src/runtime/z80.spec.ts            # 266+ checks: instruction battery, exhaustive
                                         # DAA (vs independently-written reference),
                                         # ~70 cycle counts, EI delay, IM0/1/2, NMI/RETN,
                                         # HALT, R register
-node src/runtime/wsg.spec.ts            # 6 checks: silence@vol0, amplitude, frequency
-                                        # accuracy via zero-crossings (0.00% err), mix
-                                        # headroom, soundEnable mute
-node src/runtime/video/galaga.spec.ts   # 36 checks: exact-pixel gfx decode, RGN_FRAC,
-                                        # palette resistor weights, tilemap scan corner
-                                        # cases + injectivity (1008 cells), LFSR
-                                        # sequence/period, sprite/tilemap render+clip
+node src/runtime/wsg.spec.ts            # silence@vol0, amplitude, frequency accuracy,
+                                        # mix headroom, soundEnable mute
+node src/runtime/galaxian-sound.spec.ts # 20 checks: hum period, LFO sweep, tone pitch,
+                                        # volume monotonicity, fire envelope, noise decay
+node src/runtime/video/galaga.spec.ts   # 36 checks: gfx decode, RGN_FRAC, palette,
+                                        # tilemap scan injectivity, 05xx LFSR, sprites
+node src/runtime/video/pacman.spec.ts   # 35 checks: palette weights, pacman_scan_rows,
+                                        # sprite offsets/quirks, transparency rule
+node src/runtime/video/galaxian.spec.ts # 45 checks: palette+starmap, char/sprite decode,
+                                        # column scroll, bullets, 17-bit star LFSR
 node src/runtime/boards/galaga.spec.ts  # integration: synthetic ROMs w/ hand-assembled
-                                        # Z80 program through real bus/latch/IRQ path
+node src/runtime/boards/pacman.spec.ts  #   Z80 programs through the real bus/latch/IRQ
+node src/runtime/boards/galaxian.spec.ts#   paths of each board family
 npx tsc --noEmit                        # whole project, strict
 ```
 
-Run all of the above before committing runtime changes.
+Run all of the above before committing runtime changes. There are also
+headless whole-game repro harnesses (real ROMs through the real board in
+plain node — no browser) in the session scratchpads; the pattern is worth
+copying for regressions: load roms/<game>.zip with zip.ts, build the board,
+run frames, assert on shares/videoram/snapshot.
 
 ## The board smoke test pattern (works without ROMs)
 
@@ -37,7 +45,8 @@ IRQ/latch chain the real game uses — copy this pattern for every new board.
 ## Browser verification (the real bar)
 
 ```
-node bin/mame2js.js galaga --serve      # http://localhost:8280/app/
+node bin/mame2js.js galaga --serve      # menu: http://localhost:8280/app/
+                                        # game: http://localhost:8280/app/?g=galaga
 ```
 
 With Playwright (or by hand): page loads with zero console errors → press any

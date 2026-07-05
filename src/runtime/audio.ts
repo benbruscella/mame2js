@@ -39,13 +39,13 @@ export class AudioOutput {
    * relative to dist), wires node -> gain -> destination and sends the
    * init message.
    */
-  async start(core: WorkletCoreConfig, workletUrl: string): Promise<void> {
+  async start(core: WorkletCoreConfig, workletUrl: string, processorName = 'wsg'): Promise<void> {
     if (this.ctx) return; // already started
 
     const ctx = new AudioContext();
     await ctx.audioWorklet.addModule(workletUrl);
 
-    const node = new AudioWorkletNode(ctx, 'wsg', {
+    const node = new AudioWorkletNode(ctx, processorName, {
       numberOfInputs: 0,
       numberOfOutputs: 1,
       outputChannelCount: [1],

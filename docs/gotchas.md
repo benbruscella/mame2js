@@ -2,6 +2,28 @@
 
 Hard-won facts, roughly ordered by how expensive they were to learn.
 
+## 0. Input polarity is per-field, from the graph (galaxian!)
+Galaga/pacman inputs are classic active-low (released = 0xff). **Galaxian's
+are ACTIVE-HIGH** (`IP_ACTIVE_HIGH` in the driver): a port initialized to
+0xff reads as "coin switch permanently pressed" — the game boot-loops
+slamming coin sounds and never leaves the self-test screen. The generator
+computes each port's resting byte (`ports[].init`) and each binding's
+polarity from the graph's PortField `activeLow`; KeyboardInput restores
+init bits on keyup. Never assume 0xff = idle.
+
+## 0b. boards/index.ts must not be imported by board modules
+The registry imports every board module; if a board imports anything back
+from `boards/index.ts` (e.g. it used to host `portHandlers`), running that
+board's spec directly evaluates the registry mid-cycle and hits the class
+TDZ ("Cannot access 'PacmanBoard' before initialization"). Shared board
+helpers live in `input.ts` / `types.ts`, never in the registry.
+
+## 0c. The Playwright MCP browser is shared with subagents
+Parallel agents drive the SAME browser instance. If pages navigate
+themselves between your calls or console errors appear from URLs you never
+opened, another agent is testing — don't chase ghosts; verify after agents
+finish.
+
 ## 1. The 51xx port-order trap
 Modern MAME wires 51xx `input_callback<0..1>` = IN0 (joystick) and `<2..3>` =
 IN1 (coins/start/buttons) — true to the real MCU. The **classic HLE**
@@ -72,9 +94,12 @@ any future input-replay/test automation.
 
 ## 12. AudioWorklet serving
 The worklet is a separate compiled module (`dist/runtime/wsg-worklet.js`)
-that ES-imports `./wsg.js` — both must be served; a bundler-style inline
-would break. Audio requires a user gesture; `AudioOutput` buffers pre-start
-register writes and replays them.
+that ES-imports `./wsg.js` (and `./namco54.js`) — all must be served; a
+bundler-style inline would break. Audio needs user activation, but the menu
+click that navigated to the game normally satisfies it (same-origin
+carryover); the shell starts audio immediately and resumes on first input
+as fallback. `AudioOutput` buffers pre-start register writes and replays
+them.
 
 ## 13. Playwright MCP can't open file:// URLs
 Use the dev server (`--serve`, :8280). The KG viewer works from file:// for

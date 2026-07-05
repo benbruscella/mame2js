@@ -2,30 +2,57 @@
 // keyboard input, audio bring-up, and the fixed-timestep run loop.
 // Pure DOM — no libraries.
 
-import { GalagaBoard, type BoardConfig } from './boards/galaga.ts';
-import { KeyboardInput, type FieldBinding, type DipDefault } from './input.ts';
+import { createBoard } from './boards/index.ts';
+import { loadArtwork, type ArtWindow } from './artwork.ts';
+import { KeyboardInput, type FieldBinding, type DipDefault, type PortSpec } from './input.ts';
 import { AudioOutput } from './audio.ts';
 import { readZip, crc32 } from './zip.ts';
-import type { Regions } from './types.ts';
+import type { Regions, BoardConfig } from './types.ts';
 
 export interface RomLoad { file: string; offset: number; size: number; crc: string; reloadOffsets?: number[] }
 export interface RomRegionSpec { region: string; size: number; loads: RomLoad[] }
 
+export interface SoundSpec {
+  /** SoundCore/worklet kind: 'wsg' | 'galaxian' | 'none' */
+  kind: string;
+  clock?: number;
+  /** rom region holding the wavetable (wsg only) */
+  waveRegion?: string;
+}
+
 export interface ShellConfig {
   game: string;
   title: string;
+  family: string;
   board: BoardConfig;
+  sound: SoundSpec;
   roms: RomRegionSpec[];
   bindings: FieldBinding[];
   dipDefaults: DipDefault[];
-  ports: string[];
+  ports: PortSpec[];
   /** url of the zip to try first (e.g. "/roms/galaga.zip") */
   romUrl: string;
-  workletUrl: string;
+  /** base url of the compiled runtime dir (for worklet modules) */
+  runtimeUrl: string;
+  /** where Esc returns to (the boot menu) */
+  menuUrl?: string;
 }
 
 export async function runShell(cfg: ShellConfig): Promise<void> {
   const ui = buildDom(cfg);
+
+  // cabinet bezel surround: play inside the real artwork's CRT window
+  void loadArtwork(cfg.game, 'bezel').then(art => {
+    if (art?.window) ui.setBezel(art.bmp, art.window);
+  });
+
+  // Esc: back to the boot menu (registered first + capture so a single press
+  // always works, at any stage of loading)
+  addEventListener('keydown', ev => {
+    if (ev.code !== 'Escape') return;
+    ev.preventDefault();
+    location.href = cfg.menuUrl ?? './';
+  }, { capture: true });
 
   // --- ROM acquisition -------------------------------------------------------
   let files: Map<string, Uint8Array> | null = null;
@@ -43,24 +70,43 @@ export async function runShell(cfg: ShellConfig): Promise<void> {
 
   // --- machine ----------------------------------------------------------------
   const input = new KeyboardInput(cfg.bindings, cfg.dipDefaults, cfg.ports);
+  input.debug = new URLSearchParams(location.search).has('debug');
   input.attach(window);
+  if (input.debug) console.log('[input] debug on — bindings:', cfg.bindings, 'ports:', cfg.ports);
 
   const audio = new AudioOutput();
-  const board = new GalagaBoard(cfg.board, regions, input, {
-    wsgWrite: (offset, data) => audio.write(offset, data),
+  const board = createBoard(cfg.board, regions, input, {
+    soundWrite: (offset, data) => audio.write(offset, data),
   });
 
   const fb = new Uint32Array(board.fbWidth * board.fbHeight);
   const image = new ImageData(
     new Uint8ClampedArray(fb.buffer), board.fbWidth, board.fbHeight);
 
-  ui.status('Ready — click or press any key to start');
-  await userGesture(ui);
-  try {
-    await audio.start({ sampleRate: cfg.board.clocks.wsg, waveRom: regions['namco'] }, cfg.workletUrl);
-    audio.setVolume(0.5625); // MAME route gain 0.90 * 10/16
-  } catch (err) {
-    console.warn('audio unavailable:', err);
+  // debug/testing handle (also the hook for the future live KG-viewer overlay)
+  (window as unknown as Record<string, unknown>).mame2js = { board, input, config: cfg };
+
+  // Start immediately — the menu click that navigated here counts as the
+  // user gesture in same-origin sessions. Audio starts in parallel; if the
+  // browser still holds the AudioContext suspended, the first real input
+  // resumes it without ever blocking gameplay.
+  if (cfg.sound.kind !== 'none') {
+    const clock = cfg.sound.clock ?? 96000;
+    void audio.start(
+      {
+        sampleRate: clock,
+        clock,
+        waveRom: cfg.sound.waveRegion ? regions[cfg.sound.waveRegion] : undefined,
+      },
+      `${cfg.runtimeUrl}${cfg.sound.kind}-worklet.js`,
+      cfg.sound.kind,
+    ).then(() => {
+      // wsg: MAME route gain 0.90 * 10/16; other cores bake their own scale
+      audio.setVolume(cfg.sound.kind === 'wsg' ? 0.5625 : 1);
+    }).catch(err => console.warn('audio unavailable:', err));
+    const resumeAudio = () => audio.resume();
+    addEventListener('pointerdown', resumeAudio, { once: true });
+    addEventListener('keydown', resumeAudio, { once: true });
   }
   ui.overlayHide();
 
@@ -73,6 +119,9 @@ export async function runShell(cfg: ShellConfig): Promise<void> {
   let fpsWindowStart = last;
 
   const tick = (now: number) => {
+    if (input.debug && now - last > 50) {
+      console.log(`[stall] ${Math.round(now - last)}ms between frames at ${Math.round(now)}`);
+    }
     acc += now - last;
     last = now;
     if (acc > 5 * frameMs) acc = 5 * frameMs; // don't spiral after a tab pause
@@ -86,13 +135,19 @@ export async function runShell(cfg: ShellConfig): Promise<void> {
     if (ran) ui.blit(image);
     if (now - fpsWindowStart >= 1000) {
       const snap = board.snapshot();
-      ui.status(`${cfg.title} — ${frames} fps · main pc=${hex4(snap.cpus[0].pc)} sub=${snap.cpus[1].held ? 'held' : hex4(snap.cpus[1].pc)} credits=${snap.namco51.credits}`);
+      const parts = [`${frames} fps`, `pc=${hex4(snap.cpus[0].pc)}`];
+      if (snap.cpus.length > 1) parts.push(`sub=${snap.cpus[1].held ? 'held' : hex4(snap.cpus[1].pc)}`);
+      if (snap.credits !== undefined) parts.push(`credits=${snap.credits}`);
+      if (input.debug) parts.push(input.dump());
+      ui.status(`${cfg.title} — ${parts.join(' · ')}`);
       frames = 0;
       fpsWindowStart = now;
     }
     requestAnimationFrame(tick);
   };
   requestAnimationFrame(tick);
+  // NOTE: box-art snapshots are saved only on Esc — toDataURL+localStorage
+  // are synchronous and a periodic save visibly hitches the run loop.
 }
 
 function hex4(v: number): string { return v.toString(16).padStart(4, '0'); }
@@ -149,6 +204,12 @@ function buildDom(cfg: ShellConfig) {
   h1.style.cssText = 'font-size:15px;font-weight:600;margin:0';
   root.appendChild(h1);
 
+  // cabinet column: screen inside cropped bezel art — no banner/marquee or
+  // control panel, the screen is the star
+  const cab = document.createElement('div');
+  cab.style.cssText = 'display:flex;flex-direction:column;align-items:center;gap:0';
+  root.appendChild(cab);
+
   // native frame is rendered landscape; the cabinet monitor is rotated (ROT90)
   const rotated = cfg.board.screen.rotate === 90 || cfg.board.screen.rotate === 270;
   const w = cfg.board.screen.width, h = cfg.board.screen.height;
@@ -158,10 +219,38 @@ function buildDom(cfg: ShellConfig) {
   holder.style.cssText = 'position:relative';
   const canvas = document.createElement('canvas');
   canvas.width = dispW; canvas.height = dispH;
-  const displayScale = Math.max(1, Math.floor((innerHeight - 120) / dispH));
-  canvas.style.cssText = `width:${dispW * displayScale}px;height:${dispH * displayScale}px;image-rendering:pixelated;background:#000`;
+  canvas.style.cssText = 'image-rendering:pixelated;background:#000';
+
+  // optional cabinet bezel: the game canvas sits inside its transparent
+  // CRT window, the artwork drawn on top (pointer-events off)
+  let bezel: { w: number; h: number; win: ArtWindow } | null = null;
+  const bezelCanvas = document.createElement('canvas');
+  bezelCanvas.style.cssText = 'position:absolute;inset:0;pointer-events:none';
+
+  const fit = () => {
+    const availH = innerHeight - 150;
+    if (bezel) {
+      const { w, h, win } = bezel;
+      const s = Math.min((innerWidth - 40) / w, availH / h);
+      holder.style.width = bezelCanvas.style.width = `${w * s}px`;
+      holder.style.height = bezelCanvas.style.height = `${h * s}px`;
+      const winW = win.w * s, winH = win.h * s;
+      const gs = Math.min(winW / dispW, winH / dispH);
+      canvas.style.position = 'absolute';
+      canvas.style.left = `${win.x * s + (winW - dispW * gs) / 2}px`;
+      canvas.style.top = `${win.y * s + (winH - dispH * gs) / 2}px`;
+      canvas.style.width = `${dispW * gs}px`;
+      canvas.style.height = `${dispH * gs}px`;
+    } else {
+      const displayScale = Math.max(1, Math.floor(availH / dispH));
+      canvas.style.width = `${dispW * displayScale}px`;
+      canvas.style.height = `${dispH * displayScale}px`;
+    }
+  };
+  fit();
+  addEventListener('resize', fit);
   holder.appendChild(canvas);
-  root.appendChild(holder);
+  cab.appendChild(holder);
 
   const overlay = document.createElement('div');
   overlay.style.cssText = 'position:absolute;inset:0;display:flex;align-items:center;justify-content:center;text-align:center;background:rgba(0,0,0,.75);color:#fff;cursor:pointer;padding:20px';
@@ -175,7 +264,7 @@ function buildDom(cfg: ShellConfig) {
 
   const help = document.createElement('div');
   help.style.cssText = 'color:#666';
-  help.textContent = 'Arrows: move · Ctrl/Space: fire · 5: coin · 1: start 1P · 2: start 2P';
+  help.textContent = 'Arrows: move · Space or X: fire · 5: coin · 1: start 1P · 2: start 2P · Esc: menu';
   root.appendChild(help);
 
   const ctx = canvas.getContext('2d')!;
@@ -188,6 +277,13 @@ function buildDom(cfg: ShellConfig) {
     overlay,
     status: (text: string) => { statusEl.textContent = text; if (overlay.style.display !== 'none') overlay.textContent = text; },
     overlayHide: () => { overlay.style.display = 'none'; },
+    setBezel: (bmp: ImageBitmap, win: ArtWindow) => {
+      bezelCanvas.width = bmp.width; bezelCanvas.height = bmp.height;
+      bezelCanvas.getContext('2d')!.drawImage(bmp, 0, 0);
+      holder.insertBefore(bezelCanvas, overlay); // above the game, below the overlay
+      bezel = { w: bmp.width, h: bmp.height, win };
+      fit();
+    },
     blit: (image: ImageData) => {
       offCtx.putImageData(image, 0, 0);
       ctx.save();
@@ -222,10 +318,3 @@ function waitForZip(ui: ReturnType<typeof buildDom>): Promise<Map<string, Uint8A
   });
 }
 
-function userGesture(ui: ReturnType<typeof buildDom>): Promise<void> {
-  return new Promise(resolve => {
-    const done = () => { removeEventListener('keydown', done); ui.overlay.removeEventListener('click', done); resolve(); };
-    ui.overlay.addEventListener('click', done);
-    addEventListener('keydown', done);
-  });
-}

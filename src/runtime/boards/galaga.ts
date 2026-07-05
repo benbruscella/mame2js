@@ -1,5 +1,5 @@
 // Galaga board: 3x Z80 on a shared memory map, LS259 latches, Namco 06xx bus
-// interface with 51xx (I/O) and 54xx (noise, stubbed) customs, WSG sound,
+// interface with 51xx (I/O) and 54xx (noise, HLE in namco54.ts) customs, WSG sound,
 // tile/sprite/starfield video. Wiring facts (clocks, ranges, screen) come from
 // the generated config; behavior here is hand-transpiled from
 // src/mame/namco/galaga.cpp.
@@ -10,21 +10,11 @@ import { LS259 } from '../ls259.ts';
 import { Namco51 } from '../namco51.ts';
 import { Namco06 } from '../namco06.ts';
 import { GalagaVideo } from '../video/galaga.ts';
-import type { Regions, InputPorts, VideoRenderer } from '../types.ts';
+import type { Regions, InputPorts, VideoRenderer, Board, BoardConfig, BoardSinks } from '../types.ts';
 
-export interface BoardConfig {
-  cpus: { tag: string; clock: number; region: string }[];
-  ranges: RangeSpec[];
-  screen: { width: number; height: number; refresh: number; vtotal: number; vbstart: number; rotate: number };
-  clocks: { namco06: number; wsg: number };
-}
+export type { BoardConfig, BoardSinks } from '../types.ts';
 
-export interface BoardSinks {
-  /** WSG register write (forwarded to the audio worklet) */
-  wsgWrite: (offset: number, data: number) => void;
-}
-
-export class GalagaBoard {
+export class GalagaBoard implements Board {
   readonly video: VideoRenderer;
   readonly fbWidth: number;
   readonly fbHeight: number;
@@ -81,7 +71,10 @@ export class GalagaBoard {
       { read: () => this.n51.read(), write: d => this.n51.write(d), chipSelect: () => { /* level tracked in Namco06 */ } },
       null,
       null,
-      { write: () => { /* 54xx noise generator: not yet implemented */ } },
+      // 54xx noise generator: the command byte stream is forwarded to the
+      // audio worklet on sound-offset 0x40 (offsets 0x00-0x1f are WSG
+      // registers; >= 0x40 is the 54xx command channel — see wsg-worklet.ts).
+      { write: d => sinks.soundWrite(0x40, d) },
     ]);
 
     this.misclatch.onQ(0, s => {
@@ -111,7 +104,7 @@ export class GalagaBoard {
       },
       write: {
         'galaga_state.galaga_videoram_w': () => { /* bytes stored by bus; no dirty tracking */ },
-        'namco.pacman_sound_w': (_a, off, d) => sinks.wsgWrite(off, d),
+        'namco.pacman_sound_w': (_a, off, d) => sinks.soundWrite(off, d),
         'misclatch.write_d0': (_a, off, d) => this.misclatch.writeD0(off, d),
         'videolatch.write_d0': (_a, off, d) => this.videolatch.writeD0(off, d),
         'watchdog.reset_w': () => { /* watchdog not enforced */ },
@@ -185,6 +178,7 @@ export class GalagaBoard {
 
   /** debug snapshot (live KG viewer hook) */
   snapshot() {
+    const namco51 = this.n51.snapshot();
     return {
       frame: this.frameCount,
       cpus: this.cpus.map((c, i) => ({
@@ -192,9 +186,10 @@ export class GalagaBoard {
         pc: c.pc, sp: c.sp, a: c.a, halted: c.halted,
         held: i > 0 && this.subsHeld,
       })),
+      credits: namco51.credits as number,
       misclatch: this.misclatch.value,
       videolatch: this.videolatch.value,
-      namco51: this.n51.snapshot(),
+      namco51,
       namco06: this.n06.snapshot(),
     };
   }
