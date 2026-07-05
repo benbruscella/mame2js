@@ -4,7 +4,7 @@ import { GraphBuilder, type KnowledgeGraph, type PropValue } from './types.ts';
 import {
   stripComments, parseDefines, parseGames, parseRomSets, parseAddressMaps,
   parseMachineConfigs, parseMemberTags, parseInputPorts, parseGfxLayouts,
-  parseGfxDecodes, parseIncludes, parseDeviceTypeDecls,
+  parseGfxDecodes, parseIncludes, parseDeviceTypeDecls, parseTextMacros,
 } from './parse.ts';
 
 const VERSION = '0.1.0';
@@ -196,7 +196,7 @@ export function buildGraph(mameSrc: string, driverFile: string): KnowledgeGraph 
   }
 
   // --- inputs ---
-  for (const inp of parseInputPorts(combined)) {
+  for (const inp of parseInputPorts(combined, parseTextMacros(combined))) {
     const inpId = `inputs:${inp.name}`;
     g.node('InputPorts', inpId, { name: inp.name });
     g.edge(inpId, fileId, 'DEFINED_IN');
