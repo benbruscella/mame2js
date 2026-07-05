@@ -1,0 +1,2 @@
+- [mame2js project](mame2js-project.md) — KG-first MAME→TS transpiler; galaga plays
+- [mame2js user prefs](mame2js-user-prefs.md) — zero-dep DOM/canvas, KG-first, educational tooling
