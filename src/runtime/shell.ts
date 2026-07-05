@@ -13,11 +13,13 @@ export interface RomLoad { file: string; offset: number; size: number; crc: stri
 export interface RomRegionSpec { region: string; size: number; loads: RomLoad[] }
 
 export interface SoundSpec {
-  /** SoundCore/worklet kind: 'wsg' | 'galaxian' | 'none' */
+  /** SoundCore/worklet kind: 'wsg' | 'galaxian' | 'ay8910' | 'none' */
   kind: string;
   clock?: number;
   /** rom region holding the wavetable (wsg only) */
   waveRegion?: string;
+  /** number of sound chips (ay8910: gyruss has 5) */
+  chips?: number;
 }
 
 export interface ShellConfig {
@@ -66,7 +68,10 @@ export async function runShell(cfg: ShellConfig): Promise<void> {
     files = await waitForZip(ui);
   }
 
-  const regions = assembleRegions(cfg.roms, files, ui.status);
+  // only CPU code regions are boot-critical; other regions (e.g. undumped
+  // "unknown PROM" filler that newer MAME sets carry) warn and zero-fill
+  const critical = new Set(cfg.board.cpus.map(c => c.region));
+  const regions = assembleRegions(cfg.roms, files, ui.status, critical);
 
   // --- machine ----------------------------------------------------------------
   const input = new KeyboardInput(cfg.bindings, cfg.dipDefaults, cfg.ports);
@@ -97,12 +102,15 @@ export async function runShell(cfg: ShellConfig): Promise<void> {
         sampleRate: clock,
         clock,
         waveRom: cfg.sound.waveRegion ? regions[cfg.sound.waveRegion] : undefined,
+        chips: cfg.sound.chips,
       },
       `${cfg.runtimeUrl}${cfg.sound.kind}-worklet.js`,
       cfg.sound.kind,
     ).then(() => {
-      // wsg: MAME route gain 0.90 * 10/16; other cores bake their own scale
-      audio.setVolume(cfg.sound.kind === 'wsg' ? 0.5625 : 1);
+      // per-core master gains: wsg = MAME route gain 0.90*10/16; the AY bank
+      // runs hot against the others — tamed to sit level with them
+      const VOLUMES: Record<string, number> = { wsg: 0.5625, ay8910: 0.55 };
+      audio.setVolume(VOLUMES[cfg.sound.kind] ?? 1);
     }).catch(err => console.warn('audio unavailable:', err));
     const resumeAudio = () => audio.resume();
     addEventListener('pointerdown', resumeAudio, { once: true });
@@ -158,6 +166,7 @@ function assembleRegions(
   specs: RomRegionSpec[],
   files: Map<string, Uint8Array>,
   status: (s: string) => void,
+  critical: Set<string> = new Set(),
 ): Regions {
   // index by CRC too: romset file names drift across MAME versions
   // (gg1-1b.3p vs gg1_1b.3p), but the bytes are the identity
@@ -165,7 +174,8 @@ function assembleRegions(
   for (const bytes of files.values()) byCrc.set(crc32(bytes), bytes);
 
   const regions: Regions = {};
-  const missing: string[] = [];
+  const missingCritical: string[] = [];
+  const missingOther: string[] = [];
   for (const spec of specs) {
     const bytes = new Uint8Array(spec.size);
     for (const load of spec.loads) {
@@ -174,7 +184,10 @@ function assembleRegions(
       const f = files.get(load.file.toLowerCase())
         ?? files.get(load.file.toLowerCase().replace(/_/g, '-'))
         ?? byCrc.get(expected);
-      if (!f) { missing.push(load.file); continue; }
+      if (!f) {
+        (critical.has(spec.region) ? missingCritical : missingOther).push(load.file);
+        continue;
+      }
       if (crc32(f) !== expected) {
         console.warn(`CRC mismatch for ${load.file} (got ${crc32(f).toString(16)}, want ${load.crc}) — continuing`);
       }
@@ -183,9 +196,12 @@ function assembleRegions(
     }
     regions[spec.region] = bytes;
   }
-  if (missing.length) {
-    status(`Missing ROM files: ${missing.join(', ')}`);
-    throw new Error(`missing rom files: ${missing.join(', ')}`);
+  if (missingOther.length) {
+    console.warn(`missing non-critical ROM files (zero-filled): ${missingOther.join(', ')}`);
+  }
+  if (missingCritical.length) {
+    status(`Missing ROM files: ${missingCritical.join(', ')}`);
+    throw new Error(`missing rom files: ${missingCritical.join(', ')}`);
   }
   return regions;
 }
@@ -287,10 +303,17 @@ function buildDom(cfg: ShellConfig) {
     blit: (image: ImageData) => {
       offCtx.putImageData(image, 0, 0);
       ctx.save();
-      if (rotated) {
-        // ROT90: rotate the native landscape frame clockwise onto the portrait canvas
+      if (cfg.board.screen.rotate === 90) {
+        // rotate the native landscape frame clockwise onto the portrait canvas
         ctx.translate(dispW, 0);
         ctx.rotate(Math.PI / 2);
+      } else if (cfg.board.screen.rotate === 270) {
+        // counter-clockwise (Space Invaders cabinets)
+        ctx.translate(0, dispH);
+        ctx.rotate(-Math.PI / 2);
+      } else if (cfg.board.screen.rotate === 180) {
+        ctx.translate(dispW, dispH);
+        ctx.rotate(Math.PI);
       }
       ctx.drawImage(off, 0, 0);
       ctx.restore();

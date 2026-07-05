@@ -67,6 +67,8 @@ export async function generate(graph: KnowledgeGraph, opts: GenerateOptions): Pr
   // machine configs compose via helper calls (galaxian(config) -> galaxian_base(config));
   // walk the CALLS chain and collect devices from every config in it
   const devices: KGNode[] = [];
+  /** set_addrmap patches in chain order (most-derived config first) */
+  const mapPatches: { space: string; tag: string; mapId: string }[] = [];
   {
     const seen = new Set<string>();
     const queue = [machine.id];
@@ -74,20 +76,29 @@ export async function generate(graph: KnowledgeGraph, opts: GenerateOptions): Pr
       const id = queue.shift()!;
       if (seen.has(id)) continue;
       seen.add(id);
-      devices.push(...g.out(id, 'HAS_DEVICE').map(d => d.node));
+      for (const d of g.out(id, 'HAS_DEVICE')) {
+        devices.push(d.node);
+        // board-style devices carry a sub-machine (device_add_mconfig)
+        queue.push(...g.out(d.node.id, 'CALLS').map(c => c.node.id));
+      }
+      for (const p of g.out(id, 'PATCHES_MAP')) {
+        mapPatches.push({
+          space: String(p.edge.props?.space),
+          tag: String(p.edge.props?.deviceTag),
+          mapId: p.node.id,
+        });
+      }
       queue.push(...g.out(id, 'CALLS').map(c => c.node.id));
     }
   }
   const byTag = new Map(devices.map(d => [String(d.props.tag), d]));
 
-  // --- cpus + address map ----------------------------------------------------
-  const cpuDevs = devices.filter(d => d.props.type === 'Z80');
-  if (cpuDevs.length === 0) throw new Error('no Z80 devices found in machine config');
-  const cpus = cpuDevs.map(d => ({
-    tag: String(d.props.tag),
-    clock: Number(d.props.clock),
-    region: String(d.props.tag), // rom region tag == cpu tag across supported families
-  }));
+  // --- cpus + address maps ----------------------------------------------------
+  // Every CPU carries its own program map (and io map when the driver has
+  // one). Device type -> runtime core is a device-library mapping.
+  const CPU_TYPES: Record<string, string> = { Z80: 'z80', KONAMI1: 'konami1', I8039: 'i8039', I8080: 'i8080', M6803: 'm6803' };
+  const cpuDevs = devices.filter(d => String(d.props.type) in CPU_TYPES);
+  if (cpuDevs.length === 0) throw new Error('no supported CPU devices found in machine config');
 
   // address maps compose via helper calls too (galaxian_map = base + discrete);
   // flatten ranges depth-first in statement order
@@ -123,19 +134,39 @@ export async function generate(graph: KnowledgeGraph, opts: GenerateOptions): Pr
     return spec;
   };
 
-  const cpuDevNode = cpuDevs[0];
-  const mapRefs = g.out(cpuDevNode.id, 'HAS_MAP');
-  const programMap = mapRefs.find(m => (m.edge.props?.space ?? 'AS_PROGRAM') === 'AS_PROGRAM');
-  if (!programMap) throw new Error(`no address map on ${cpus[0].tag}`);
-  const ranges = collectRanges(programMap.node.id).map(rangeSpec);
+  const cpuMaps = (dev: KGNode) => {
+    // a set_addrmap patch from the game's config chain (most-derived first)
+    // overrides the map set at device instantiation
+    const mapRefs = g.out(dev.id, 'HAS_MAP');
+    const forSpace = (space: string): KGNode | undefined => {
+      const patch = mapPatches.find(p => p.tag === String(dev.props.tag) && p.space === space);
+      if (patch) return g.node(patch.mapId);
+      return mapRefs.find(m => (m.edge.props?.space ?? 'AS_PROGRAM') === space)?.node;
+    };
+    const programMap = forSpace('AS_PROGRAM');
+    if (!programMap) throw new Error(`no address map on ${dev.props.tag}`);
+    const ranges = collectRanges(programMap.id).map(rangeSpec);
+    const ioMap = forSpace('AS_IO');
+    let io: Record<string, unknown> | undefined;
+    if (ioMap) {
+      io = { ranges: collectRanges(ioMap.id).map(rangeSpec) };
+      if (ioMap.props.globalMask !== undefined) io.globalMask = Number(ioMap.props.globalMask);
+    }
+    return { ranges, io };
+  };
 
-  // io space (AS_IO): pacman writes its IM2 vector through an out port
-  const ioMapRef = mapRefs.find(m => m.edge.props?.space === 'AS_IO');
-  let io: Record<string, unknown> | undefined;
-  if (ioMapRef) {
-    io = { ranges: collectRanges(ioMapRef.node.id).map(rangeSpec) };
-    if (ioMapRef.node.props.globalMask !== undefined) io.globalMask = Number(ioMapRef.node.props.globalMask);
-  }
+  const cpus = cpuDevs.map(d => ({
+    tag: String(d.props.tag),
+    type: CPU_TYPES[String(d.props.type)],
+    clock: Number(d.props.clock),
+    region: String(d.props.tag), // rom region tag == cpu tag across supported families
+    ...cpuMaps(d),
+  }));
+
+  // legacy alias: boards for single-map families read cpus[n].ranges; the
+  // shared `ranges` field mirrors cpu[0] for the galaga family's shared map
+  const ranges = cpus[0].ranges;
+  const io = cpus[0].io;
 
   // --- screen ------------------------------------------------------------------
   const screenDev = devices.find(d => d.props.type === 'SCREEN');
@@ -181,11 +212,16 @@ export async function generate(graph: KnowledgeGraph, opts: GenerateOptions): Pr
     wsg: Number(byTag.get('namco')?.props.clock ?? 96000),
   };
   // sound device -> runtime SoundCore kind (device-library mapping, not game-specific)
+  const ayChips = devices.filter(d => d.props.type === 'AY8910');
   const sound = devices.some(d => d.props.type === 'NAMCO_WSG' || d.props.type === 'NAMCO')
     ? { kind: 'wsg', clock: Number(byTag.get('namco')?.props.clock ?? 96000), waveRegion: 'namco' }
     : devices.some(d => d.props.type === 'GALAXIAN_SOUND')
       ? { kind: 'galaxian', clock: cpus[0].clock }
-      : { kind: 'none' };
+      : devices.some(d => d.props.type === 'INVADERS_AUDIO')
+        ? { kind: 'invaders', clock: cpus[0].clock }
+        : ayChips.length
+          ? { kind: 'ay8910', clock: Number(ayChips[0].props.clock), chips: ayChips.length }
+          : { kind: 'none' };
 
   // --- roms ----------------------------------------------------------------------
   const roms = g.out(romset.id, 'HAS_REGION').map(({ node: region }) => ({

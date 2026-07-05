@@ -461,6 +461,13 @@ export interface MachineConfigDef {
   devices: DeviceDef[];
   /** calls to other config helpers on the same class, e.g. galagab() calls galaga() */
   calls: string[];
+  /**
+   * statements addressing a device instantiated in a CALLED config
+   * (invaders(config) calls mw8080bw_root(config) then does
+   * m_maincpu->set_addrmap(AS_IO, ...)) — resolved to the owning device at
+   * graph-build time
+   */
+  patches: { tag: string; addrMaps: Record<string, string>; raw: string }[];
   raw: string;
 }
 
@@ -482,7 +489,7 @@ export function parseMachineConfigs(
 ): MachineConfigDef[] {
   const fns = extractFunctionBody(src, /void\s+(\w+)::(\w+)\(machine_config\s*&\s*config\)/g);
   return fns.map(({ cls, name, body }) => {
-    const cfg: MachineConfigDef = { cls, name, devices: [], calls: [], raw: body.trim() };
+    const cfg: MachineConfigDef = { cls, name, devices: [], calls: [], patches: [], raw: body.trim() };
     const byRef = new Map<string, DeviceDef>(); // m_member, "tag", or localVar -> device
     const resolveTag = (ref: string): string => {
       const r = ref.trim();
@@ -529,6 +536,15 @@ export function parseMachineConfigs(
       if (mc) {
         const [, refRaw, method] = mc;
         const dev = byRef.get(refRaw) ?? byRef.get(resolveTag(refRaw));
+        if (!dev && method === 'set_addrmap' && refRaw.startsWith('m_')) {
+          // device lives in a CALLED config — record as a patch by tag
+          const open = s.indexOf('(', s.indexOf(method));
+          const close = matchParen(s, open);
+          const [space, mapRef] = splitArgs(s.slice(open + 1, close));
+          const mm = /&\s*\w+::(\w+)/.exec(mapRef ?? '');
+          if (mm) cfg.patches.push({ tag: resolveTag(refRaw), addrMaps: { [space.trim()]: mm[1] }, raw: s });
+          continue;
+        }
         if (dev) {
           dev.config.push(s);
           if (method === 'set_addrmap') {
@@ -765,4 +781,11 @@ export function parseGfxDecodes(src: string, consts: Record<string, number> = {}
 
 export function parseIncludes(src: string): string[] {
   return [...src.matchAll(/^#include\s+"([^"]+)"/gm)].map(m => m[1]);
+}
+
+/** DECLARE_DEVICE_TYPE(IREM_M52_SOUNDC_AUDIO, m52_soundc_audio_device) -> macro name to class. */
+export function parseDeviceTypeDecls(src: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const m of src.matchAll(/DECLARE_DEVICE_TYPE\(\s*(\w+)\s*,\s*(\w+)\s*\)/g)) out[m[1]] = m[2];
+  return out;
 }

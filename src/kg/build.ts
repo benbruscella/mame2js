@@ -4,7 +4,7 @@ import { GraphBuilder, type KnowledgeGraph, type PropValue } from './types.ts';
 import {
   stripComments, parseDefines, parseGames, parseRomSets, parseAddressMaps,
   parseMachineConfigs, parseMemberTags, parseInputPorts, parseGfxLayouts,
-  parseGfxDecodes, parseIncludes,
+  parseGfxDecodes, parseIncludes, parseDeviceTypeDecls,
 } from './parse.ts';
 
 const VERSION = '0.1.0';
@@ -18,11 +18,23 @@ export function buildGraph(mameSrc: string, driverFile: string): KnowledgeGraph 
   const driverBase = basename(driverFile); // e.g. galaga.cpp
   const dir = dirname(driverFile);
 
-  // gather the compilation-unit family: galaga.cpp, galaga.h, galaga_v.cpp, galaga_a.cpp
+  // gather the compilation-unit family: galaga.cpp, galaga.h, galaga_v.cpp,
+  // galaga_a.cpp — plus same-directory includes and their .cpp twins
+  // (m52.cpp includes irem.h; irem.cpp holds the audio-board device's
+  // device_add_mconfig with the M6803 + AY8910s + MSM5205)
   const stem = driverBase.replace(/\.cpp$/, '');
   const family = [driverBase, `${stem}.h`, `${stem}_v.cpp`, `${stem}_a.cpp`]
     .map(f => join(dir, f))
     .filter(f => existsSync(f));
+
+  for (const file of [...family]) {
+    for (const inc of parseIncludes(readFileSync(file, 'utf8'))) {
+      if (inc.includes('/')) continue; // same-directory includes only
+      for (const extra of [join(dir, inc), join(dir, inc.replace(/\.h$/, '.cpp'))]) {
+        if (existsSync(extra) && !family.includes(extra)) family.push(extra);
+      }
+    }
+  }
 
   let combined = '';
   for (const file of family) {
@@ -40,6 +52,7 @@ export function buildGraph(mameSrc: string, driverFile: string): KnowledgeGraph 
 
   const consts = parseDefines(combined);
   const memberTags = parseMemberTags(combined);
+  const deviceTypes = parseDeviceTypeDecls(combined);
 
   // --- games ---
   const games = parseGames(combined);
@@ -66,7 +79,9 @@ export function buildGraph(mameSrc: string, driverFile: string): KnowledgeGraph 
       g.node('RomRegion', regId, { tag: region.tag, size: region.size, flags: region.flags });
       g.edge(setId, regId, 'HAS_REGION');
       for (const load of region.loads) {
-        const romId = `rom:${set.name}/${load.file}`;
+        // region-scoped: the same FILE NAME can be two different ROMs in two
+        // regions (gyruss has two distinct "gyrussk.4" chips)
+        const romId = `rom:${set.name}/${region.tag}/${load.file}`;
         const props: Record<string, PropValue> = {
           file: load.file, offset: load.offset, size: load.size, crc: load.crc, sha1: load.sha1,
         };
@@ -132,8 +147,23 @@ export function buildGraph(mameSrc: string, driverFile: string): KnowledgeGraph 
       const target = cfgByName.get(callee);
       if (target) g.edge(cfgId, `machine:${target.cls}.${target.name}`, 'CALLS');
     }
+    // patches: set_addrmap on devices instantiated in a CALLED config. The
+    // edge lives on the PATCHING config (not the shared device node —
+    // attaching there would leak one game's map into every other game that
+    // calls the same base config, e.g. cannonbp's protection map into
+    // pacman). The generator resolves patches along the game's CALLS chain.
+    for (const patch of cfg.patches) {
+      for (const [space, mapName] of Object.entries(patch.addrMaps)) {
+        const target = mapByName.get(mapName);
+        if (!target) continue;
+        g.edge(cfgId, `map:${target.cls}.${target.name}`, 'PATCHES_MAP', { space, deviceTag: patch.tag });
+      }
+    }
     for (const dev of cfg.devices) {
-      const devId = `device:${cfg.name}/${dev.tag}`;
+      // namespaced by class AND config name: every device-board class has a
+      // config called device_add_mconfig, and different classes reuse tags
+      // (m52/m62 audio boards both have an "iremsound" cpu)
+      const devId = `device:${cfg.cls}.${cfg.name}/${dev.tag}`;
       const props: Record<string, PropValue> = {
         type: dev.type, tag: dev.tag, clock: dev.clock, config: dev.config,
       };
@@ -146,8 +176,20 @@ export function buildGraph(mameSrc: string, driverFile: string): KnowledgeGraph 
       }
       g.node('Device', devId, props);
       g.edge(cfgId, devId, 'HAS_DEVICE');
+      // board-style devices (IREM_M52_SOUNDC_AUDIO...) carry their own
+      // sub-machine in device_add_mconfig — link so the subgraph walk
+      // reaches the M6803/AY8910s/MSM5205 inside
+      const devCls = deviceTypes[dev.type];
+      if (devCls) {
+        const sub = machineConfigs.find(c => c.cls === devCls && c.name === 'device_add_mconfig');
+        if (sub) g.edge(devId, `machine:${sub.cls}.${sub.name}`, 'CALLS');
+      }
       for (const [space, mapName] of Object.entries(dev.addrMaps)) {
-        g.edge(devId, `map:${cfg.cls}.${mapName}`, 'HAS_MAP', { space });
+        // resolve by map NAME: set_addrmap may reference the map through a
+        // derived class while the function is defined on the base
+        // (m52_soundc_audio_device -> irem_audio_device::m52_small_sound_map)
+        const target = mapByName.get(mapName);
+        g.edge(devId, target ? `map:${target.cls}.${target.name}` : `map:${cfg.cls}.${mapName}`, 'HAS_MAP', { space });
       }
       if (dev.gfxDecodeName) g.edge(cfgId, `gfxdecode:${dev.gfxDecodeName}`, 'DECODES');
     }

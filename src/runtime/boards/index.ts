@@ -5,6 +5,8 @@ import type { Board, BoardConfig, BoardSinks, InputPorts, Regions } from '../typ
 import { GalagaBoard } from './galaga.ts';
 import { PacmanBoard } from './pacman.ts';
 import { GalaxianBoard } from './galaxian.ts';
+import { GyrussBoard } from './gyruss.ts';
+import { Mw8080bwBoard } from './mw8080bw.ts';
 
 type BoardCtor = new (config: BoardConfig, regions: Regions, inputs: InputPorts, sinks: BoardSinks) => Board;
 
@@ -12,6 +14,8 @@ const FAMILIES: Record<string, BoardCtor> = {
   galaga: GalagaBoard,
   pacman: PacmanBoard,
   galaxian: GalaxianBoard,
+  gyruss: GyrussBoard,
+  mw8080bw: Mw8080bwBoard,
 };
 
 export function registerBoard(family: string, ctor: BoardCtor): void {

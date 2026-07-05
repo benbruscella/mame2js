@@ -61,7 +61,8 @@ function findDriverFile(game: string): string {
   }
   if (cache[game] && existsSync(join(mameSrc, cache[game]))) return join(mameSrc, cache[game]);
 
-  const gameRe = new RegExp(`^\\s*GAME[XL]?\\(\\s*\\d{4},\\s*${game}\\s*,`, 'm');
+  // rows may carry a leading /* NNN */ index comment (mw8080bw.cpp style)
+  const gameRe = new RegExp(`^\\s*(?:/\\*[^*]*\\*/\\s*)?GAME[XL]?\\(\\s*\\d{4},\\s*${game}\\s*,`, 'm');
   const root = join(mameSrc, 'src/mame');
   const stack = [root];
   while (stack.length) {

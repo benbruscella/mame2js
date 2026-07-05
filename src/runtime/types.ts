@@ -39,12 +39,25 @@ export interface InputPorts {
 
 import type { RangeSpec } from './bus.ts';
 
+export interface CpuSpec {
+  tag: string;
+  /** runtime core: 'z80' | 'konami1' | 'i8039' (from the device type in the graph) */
+  type?: string;
+  clock: number;
+  region: string;
+  /** this CPU's own program map (multi-CPU boards; galaga-family boards may use the shared top-level `ranges`) */
+  ranges?: RangeSpec[];
+  /** this CPU's io space (AS_IO) when the driver maps one */
+  io?: { ranges: RangeSpec[]; globalMask?: number };
+}
+
 export interface BoardConfig {
-  /** driver family from the graph (galaga, pacman, galaxian) — selects the board module */
+  /** driver family from the graph (galaga, pacman, galaxian, gyruss) — selects the board module */
   family: string;
-  cpus: { tag: string; clock: number; region: string }[];
+  cpus: CpuSpec[];
+  /** cpu[0]'s program map (legacy shared-map alias for the galaga family) */
   ranges: RangeSpec[];
-  /** Z80 io space (AS_IO), when the driver maps one (pacman IM2 vector port) */
+  /** cpu[0]'s io space (pacman IM2 vector port) */
   io?: { ranges: RangeSpec[]; globalMask?: number };
   screen: { width: number; height: number; refresh: number; vtotal: number; vbstart: number; vbend?: number; rotate: number };
   clocks: { namco06: number; wsg: number };
