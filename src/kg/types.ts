@@ -39,6 +39,8 @@ export type RelType =
   | 'HAS_PORT'        // InputPorts -> Port
   | 'HAS_FIELD'       // Port -> PortField
   | 'INCLUDES_PORTS'  // InputPorts -> InputPorts (PORT_INCLUDE)
+  | 'INCLUDES_MAP'    // AddressMap -> AddressMap (helper composition: galaxian_map -> galaxian_map_base)
+  | 'CALLS'           // MachineConfig -> MachineConfig (helper chaining: galaxian -> galaxian_base)
   | 'DECODES'         // MachineConfig -> GfxDecode
   | 'HAS_ENTRY'       // GfxDecode -> GfxDecodeEntry
   | 'USES_LAYOUT'     // GfxDecodeEntry -> GfxLayout

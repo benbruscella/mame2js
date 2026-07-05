@@ -2,26 +2,39 @@
 // keyboard input, audio bring-up, and the fixed-timestep run loop.
 // Pure DOM — no libraries.
 
-import { GalagaBoard, type BoardConfig } from './boards/galaga.ts';
+import { createBoard } from './boards/index.ts';
 import { KeyboardInput, type FieldBinding, type DipDefault } from './input.ts';
 import { AudioOutput } from './audio.ts';
 import { readZip, crc32 } from './zip.ts';
-import type { Regions } from './types.ts';
+import type { Regions, BoardConfig } from './types.ts';
 
 export interface RomLoad { file: string; offset: number; size: number; crc: string; reloadOffsets?: number[] }
 export interface RomRegionSpec { region: string; size: number; loads: RomLoad[] }
 
+export interface SoundSpec {
+  /** SoundCore/worklet kind: 'wsg' | 'galaxian' | 'none' */
+  kind: string;
+  clock?: number;
+  /** rom region holding the wavetable (wsg only) */
+  waveRegion?: string;
+}
+
 export interface ShellConfig {
   game: string;
   title: string;
+  family: string;
   board: BoardConfig;
+  sound: SoundSpec;
   roms: RomRegionSpec[];
   bindings: FieldBinding[];
   dipDefaults: DipDefault[];
   ports: string[];
   /** url of the zip to try first (e.g. "/roms/galaga.zip") */
   romUrl: string;
-  workletUrl: string;
+  /** base url of the compiled runtime dir (for worklet modules) */
+  runtimeUrl: string;
+  /** where Esc returns to (the boot menu) */
+  menuUrl?: string;
 }
 
 export async function runShell(cfg: ShellConfig): Promise<void> {
@@ -46,8 +59,8 @@ export async function runShell(cfg: ShellConfig): Promise<void> {
   input.attach(window);
 
   const audio = new AudioOutput();
-  const board = new GalagaBoard(cfg.board, regions, input, {
-    wsgWrite: (offset, data) => audio.write(offset, data),
+  const board = createBoard(cfg.board, regions, input, {
+    soundWrite: (offset, data) => audio.write(offset, data),
   });
 
   const fb = new Uint32Array(board.fbWidth * board.fbHeight);
@@ -56,13 +69,32 @@ export async function runShell(cfg: ShellConfig): Promise<void> {
 
   ui.status('Ready — click or press any key to start');
   await userGesture(ui);
-  try {
-    await audio.start({ sampleRate: cfg.board.clocks.wsg, waveRom: regions['namco'] }, cfg.workletUrl);
-    audio.setVolume(0.5625); // MAME route gain 0.90 * 10/16
-  } catch (err) {
-    console.warn('audio unavailable:', err);
+  if (cfg.sound.kind !== 'none') {
+    try {
+      const clock = cfg.sound.clock ?? 96000;
+      await audio.start(
+        {
+          sampleRate: clock,
+          clock,
+          waveRom: cfg.sound.waveRegion ? regions[cfg.sound.waveRegion] : undefined,
+        },
+        `${cfg.runtimeUrl}${cfg.sound.kind}-worklet.js`,
+        cfg.sound.kind,
+      );
+      // wsg: MAME route gain 0.90 * 10/16; other cores bake their own scale
+      audio.setVolume(cfg.sound.kind === 'wsg' ? 0.5625 : 1);
+    } catch (err) {
+      console.warn('audio unavailable:', err);
+    }
   }
   ui.overlayHide();
+
+  // Esc: capture a box-art snapshot for the boot menu, then go back to it
+  addEventListener('keydown', ev => {
+    if (ev.code !== 'Escape') return;
+    ui.saveSnapshot(cfg.game);
+    location.href = cfg.menuUrl ?? '/';
+  });
 
   // --- run loop: fixed timestep at the board's refresh rate --------------------
   const refresh = cfg.board.screen.refresh;
@@ -86,13 +118,19 @@ export async function runShell(cfg: ShellConfig): Promise<void> {
     if (ran) ui.blit(image);
     if (now - fpsWindowStart >= 1000) {
       const snap = board.snapshot();
-      ui.status(`${cfg.title} — ${frames} fps · main pc=${hex4(snap.cpus[0].pc)} sub=${snap.cpus[1].held ? 'held' : hex4(snap.cpus[1].pc)} credits=${snap.namco51.credits}`);
+      const parts = [`${frames} fps`, `pc=${hex4(snap.cpus[0].pc)}`];
+      if (snap.cpus.length > 1) parts.push(`sub=${snap.cpus[1].held ? 'held' : hex4(snap.cpus[1].pc)}`);
+      if (snap.credits !== undefined) parts.push(`credits=${snap.credits}`);
+      ui.status(`${cfg.title} — ${parts.join(' · ')}`);
       frames = 0;
       fpsWindowStart = now;
     }
     requestAnimationFrame(tick);
   };
   requestAnimationFrame(tick);
+
+  // periodic box-art snapshot for the boot menu shelves
+  setInterval(() => ui.saveSnapshot(cfg.game), 5000);
 }
 
 function hex4(v: number): string { return v.toString(16).padStart(4, '0'); }
@@ -175,7 +213,7 @@ function buildDom(cfg: ShellConfig) {
 
   const help = document.createElement('div');
   help.style.cssText = 'color:#666';
-  help.textContent = 'Arrows: move · Ctrl/Space: fire · 5: coin · 1: start 1P · 2: start 2P';
+  help.textContent = 'Arrows: move · Ctrl/Space: fire · 5: coin · 1: start 1P · 2: start 2P · Esc: menu';
   root.appendChild(help);
 
   const ctx = canvas.getContext('2d')!;
@@ -198,6 +236,11 @@ function buildDom(cfg: ShellConfig) {
       }
       ctx.drawImage(off, 0, 0);
       ctx.restore();
+    },
+    /** persist the current (rotated) frame as menu box art */
+    saveSnapshot: (game: string) => {
+      try { localStorage.setItem(`mame2js:snap:${game}`, canvas.toDataURL('image/png')); }
+      catch { /* storage full/disabled — menu falls back to tile art */ }
     },
   };
 }

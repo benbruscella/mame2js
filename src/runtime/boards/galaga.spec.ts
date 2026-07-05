@@ -28,6 +28,7 @@ const RANGES: BoardConfig['ranges'] = [
 ];
 
 const CONFIG: BoardConfig = {
+  family: 'galaga',
   cpus: [
     { tag: 'maincpu', clock: 3072000, region: 'maincpu' },
     { tag: 'sub', clock: 3072000, region: 'sub' },
@@ -81,7 +82,7 @@ const regions: Regions = {
 const inputs: InputPorts = { read: () => 0xff };
 const wsgWrites: number[] = [];
 const board = new GalagaBoard(CONFIG, regions, inputs, {
-  wsgWrite: (off, d) => wsgWrites.push((off << 8) | d),
+  soundWrite: (off: number, d: number) => wsgWrites.push((off << 8) | d),
 });
 
 const fb = new Uint32Array(288 * 224);

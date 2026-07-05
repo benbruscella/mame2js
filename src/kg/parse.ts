@@ -115,6 +115,10 @@ function extractFunctionBody(src: string, headerRe: RegExp): { cls: string; name
  */
 export function evalExpr(expr: string, consts: Record<string, number> = {}): number | null {
   let s = expr.replace(/'/g, '');
+  // frequency user-defined literals: 18.432_MHz_XTAL, 32.768_kHz_XTAL, 100_Hz_XTAL
+  s = s.replace(/([0-9]+(?:\.[0-9]+)?)_MHz_XTAL/g, (_, n) => String(Math.round(Number(n) * 1e6)));
+  s = s.replace(/([0-9]+(?:\.[0-9]+)?)_kHz_XTAL/g, (_, n) => String(Math.round(Number(n) * 1e3)));
+  s = s.replace(/([0-9]+(?:\.[0-9]+)?)_Hz_XTAL/g, (_, n) => String(Math.round(Number(n))));
   s = s.replace(/XTAL\s*\(\s*([0-9]+)\s*\)/g, '$1');
   for (const [name, val] of Object.entries(consts)) {
     s = s.replace(new RegExp(`\\b${name}\\b`, 'g'), String(val));
@@ -133,7 +137,7 @@ export function evalExpr(expr: string, consts: Record<string, number> = {}): num
       return v;
     }
     if (c === '-') { pos++; const v = parsePrimary(); return v === null ? null : -v; }
-    const m = /^(0[xX][0-9a-fA-F]+|[0-9]+)/.exec(s.slice(pos));
+    const m = /^(0[xX][0-9a-fA-F]+|[0-9]+(?:\.[0-9]+)?)/.exec(s.slice(pos));
     if (!m) return null;
     pos += m[0].length;
     return Number(m[0]);
@@ -169,14 +173,21 @@ export function evalExpr(expr: string, consts: Record<string, number> = {}): num
   return pos >= s.length && v !== null && Number.isFinite(v) ? v : null;
 }
 
-/** Collect `#define NAME (expr)` numeric constants (e.g. MASTER_CLOCK). */
+/**
+ * Collect numeric constants: `#define NAME (expr)` plus the modern
+ * `static constexpr XTAL NAME(expr);` / `static constexpr int NAME = expr;`
+ * forms (the galaxian driver uses the latter exclusively).
+ */
 export function parseDefines(src: string): Record<string, number> {
   const out: Record<string, number> = {};
-  const re = /^#define\s+(\w+)\s+(.+)$/gm;
+  const re = /^#define\s+(\w+)\s+(.+)$|(?:static\s+)?constexpr\s+(?:XTAL|int|unsigned|double|u?int\d+_t)\s+(\w+)\s*(?:\(([^;]*)\)|=\s*([^;]*))\s*;/gm;
   let m: RegExpExecArray | null;
   while ((m = re.exec(src)) !== null) {
-    const v = evalExpr(m[2].trim(), out);
-    if (v !== null) out[m[1]] = v;
+    const name = m[1] ?? m[3];
+    const expr = (m[2] ?? m[4] ?? m[5] ?? '').trim();
+    if (!name || !expr) continue;
+    const v = evalExpr(expr, out);
+    if (v !== null) out[name] = v;
   }
   return out;
 }
@@ -299,18 +310,38 @@ export interface AddressRangeDef {
   start: number; end: number; mirror?: number;
   rom?: boolean; ram?: boolean; writeonly?: boolean; nopw?: boolean; nopr?: boolean;
   read?: HandlerRef; write?: HandlerRef;
+  /** input-port tag from .portr("IN0") / .portw(...) */
+  portRead?: string; portWrite?: string;
   share?: string;
   raw: string;
 }
 
-export interface AddressMapDef { cls: string; name: string; ranges: AddressRangeDef[]; }
+export interface AddressMapDef {
+  cls: string; name: string; ranges: AddressRangeDef[];
+  /** helper maps composed in via `other_map(map);` calls, in statement order */
+  calls: string[];
+  globalMask?: number;
+  unmapHigh?: boolean;
+}
 
 export function parseAddressMaps(src: string): AddressMapDef[] {
   const fns = extractFunctionBody(src, /void\s+(\w+)::(\w+)\(address_map\s*&\s*map\)/g);
   return fns.map(({ cls, name, body }) => {
     const ranges: AddressRangeDef[] = [];
+    const calls: string[] = [];
+    let globalMask: number | undefined;
+    let unmapHigh: boolean | undefined;
     for (const stmt of splitStatements(body)) {
       const s = stmt.trim();
+      // composition: galaxian_map(address_map &map) { galaxian_map_base(map); ... }
+      const call = /^(\w+)\(\s*map\s*\)$/.exec(s);
+      if (call) { calls.push(call[1]); continue; }
+      const mapProp = /^map\.(\w+)\s*\(([^)]*)\)$/.exec(s);
+      if (mapProp) {
+        if (mapProp[1] === 'global_mask') globalMask = evalExpr(mapProp[2]) ?? undefined;
+        if (mapProp[1] === 'unmap_value_high') unmapHigh = true;
+        continue;
+      }
       if (!s.startsWith('map(')) continue;
       const open = 3;
       const close = matchParen(s, open);
@@ -329,6 +360,8 @@ export function parseAddressMaps(src: string): AddressMapDef[] {
           case 'nopr': range.nopr = true; break;
           case 'mirror': range.mirror = evalExpr(args[0]) ?? undefined; break;
           case 'share': range.share = unquote(args[0]); break;
+          case 'portr': range.portRead = unquote(args[0]); break;
+          case 'portw': range.portWrite = unquote(args[0]); break;
           case 'r': range.read = parseHandlerArgs(args); break;
           case 'w': range.write = parseHandlerArgs(args); break;
           case 'rw': {
@@ -347,7 +380,7 @@ export function parseAddressMaps(src: string): AddressMapDef[] {
       }
       ranges.push(range);
     }
-    return { cls, name, ranges };
+    return { cls, name, ranges, calls, globalMask, unmapHigh };
   });
 }
 
@@ -695,24 +728,28 @@ function parseOffsetList(s: string): (number | string)[] {
 
 export interface GfxDecodeEntryDef {
   region: string; offset: number; layout: string; colorBase: number; colorCount: number;
+  /** GFXDECODE_SCALE render scale (galaxian renders 3x wide); 1 for plain entries */
+  xscale: number; yscale: number;
 }
 export interface GfxDecodeDef { name: string; entries: GfxDecodeEntryDef[]; }
 
-export function parseGfxDecodes(src: string): GfxDecodeDef[] {
+export function parseGfxDecodes(src: string, consts: Record<string, number> = {}): GfxDecodeDef[] {
   const out: GfxDecodeDef[] = [];
   const re = /GFXDECODE_START\(\s*(\w+)\s*\)([\s\S]*?)GFXDECODE_END/g;
   let m: RegExpExecArray | null;
   while ((m = re.exec(src)) !== null) {
     const entries: GfxDecodeEntryDef[] = [];
-    const em = m[2].matchAll(/GFXDECODE_ENTRY\(\s*([^)]*)\)/g);
+    const em = m[2].matchAll(/GFXDECODE_(ENTRY|SCALE)\(\s*([^)]*)\)/g);
     for (const e of em) {
-      const args = splitArgs(e[1]);
+      const args = splitArgs(e[2]);
       entries.push({
         region: unquote(args[0]),
-        offset: evalExpr(args[1]) ?? 0,
+        offset: evalExpr(args[1], consts) ?? 0,
         layout: args[2].trim(),
-        colorBase: evalExpr(args[3]) ?? 0,
-        colorCount: evalExpr(args[4]) ?? 0,
+        colorBase: evalExpr(args[3], consts) ?? 0,
+        colorCount: evalExpr(args[4], consts) ?? 0,
+        xscale: e[1] === 'SCALE' ? (evalExpr(args[5], consts) ?? 1) : 1,
+        yscale: e[1] === 'SCALE' ? (evalExpr(args[6], consts) ?? 1) : 1,
       });
     }
     out.push({ name: m[1], entries });

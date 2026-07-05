@@ -3,7 +3,8 @@
 Everything under `src/runtime/`. All modules: strict TS, `erasableSyntaxOnly`
 (no enums / namespaces / constructor parameter properties), `.ts` import
 specifiers, zero dependencies. Node-runnable modules must not touch DOM;
-browser-only modules are `shell.ts`, `audio.ts`, `wsg-worklet.ts`.
+browser-only modules are `shell.ts`, `menu.ts`, `audio.ts`, and the
+`*-worklet.ts` wrappers.
 
 ## Contracts — `types.ts`
 
@@ -141,8 +142,26 @@ Composition + interrupt wiring (hand-transpiled from galaga.cpp):
   the hook for the future live KG viewer overlay. `shares` is public for the
   same reason.
 
-## Shell — `shell.ts`, `input.ts`, `zip.ts`
+## Shell — `shell.ts`, `input.ts`, `zip.ts` (+ `menu.ts`, `boards/index.ts`)
 
+- **Board registry** (`boards/index.ts`): `createBoard(config, …)` maps
+  `config.family` (driver stem from the graph) → board module; unknown family
+  throws with the known list. `portHandlers(ranges, inputs)` builds read
+  handlers for generated `port.<TAG>` keys. `registerBoard()` exists for
+  future dynamic registration.
+- **Sound dispatch**: `config.sound.kind` ('wsg' | 'galaxian' | 'none') picks
+  the worklet module `<runtimeUrl>/<kind>-worklet.js` and processor name;
+  boards forward register writes through `sinks.soundWrite`. WSG master
+  volume 0.5625 (MAME route gain), other cores bake their own scale.
+- **Esc → menu**: keydown Escape saves a box-art snapshot
+  (localStorage `mame2js:snap:<game>`, also refreshed every 5 s) and
+  navigates to `config.menuUrl` (the boot menu). Documented in the help line.
+- **Menu** (`menu.ts`, browser-only): the /app/ home screen — video-store
+  shelves of game boxes from `/games.json`, live search (title/maker/year),
+  arrow-key + Enter navigation. Box cover priority: MAME artwork zip from
+  `/artwork/<game>.zip` (marquee > upright bezel > largest PNG, user-supplied,
+  gitignored like roms/) → shell snapshot → 2bpp tile-sheet art decoded from
+  the user's gfx ROM → stylized placeholder. `INSERT ROM` ribbon when no zip.
 - `runShell(config)`: fetch `/roms/<game>.zip` → else drag-drop/file-picker;
   `assembleRegions` matches zip entries by **name, then dash/underscore
   swapped, then CRC32** (romset filenames drift across MAME eras — the user's

@@ -20,17 +20,20 @@ Knowledge graph                   out/<game>/graph.json (full driver: graph.full
 Game subgraph                     ~116 nodes for galaga
         │
         │  PHASE 3: GENERATE (src/gen/generate.ts)
-        │  Graph -> ShellConfig literal: cpus+clocks, RangeSpec[] memory map,
-        │  screen timing (from set_raw), ROM manifest with CRCs, DIP defaults,
-        │  keyboard bindings. Unknown handler names -> loud failure.
+        │  Graph -> ShellConfig JSON: family, cpus+clocks, RangeSpec[] memory
+        │  map (+io map), screen timing (from set_raw), sound kind, ROM
+        │  manifest with CRCs, DIP defaults, keyboard bindings.
+        │  Unknown handler names -> loud failure.
         ▼
-Generated app                     out/<game>/app/{index.html, tsconfig.json,
-        │                                        src/{config.ts, main.ts, runtime/ (copy)}}
+Game data                         out/<game>/{config.json, meta.json}   (pure data, no compile)
         │
-        │  PHASE 4: COMPILE + SERVE
-        │  tsc -p app  ->  app/dist ES modules;  src/serve.ts (zero-dep http)
+        │  PHASE 4: UNIFIED APP + SERVE (generate.ts buildApp, src/serve.ts)
+        │  ONE app at out/app (runtime copy + tsc) hosts every generated game;
+        │  /games.json manifest is served live from out/*/meta.json
         ▼
-Browser                           /app/ = the game, /viewer.html = the graph
+Browser                           /app/ = boot menu (shelves + search),
+                                  /app/?g=<game> = that game (Esc -> menu),
+                                  /<game>/viewer.html = the graph
 ```
 
 At runtime the **original Z80 machine code from the ROMs** is what executes;
@@ -66,15 +69,17 @@ MAME entirely is on the TODO list.)
 ### The reuse contract (user requirement)
 `src/runtime/` is an **engine + device library** and must stay game-agnostic:
 
-- engine: `bus.ts`, `shell.ts`, `input.ts`, `zip.ts`, `audio.ts`, `types.ts`
+- engine: `bus.ts`, `shell.ts`, `menu.ts`, `input.ts`, `zip.ts`, `audio.ts`,
+  `types.ts`
 - devices: `z80.ts`, `ls259.ts`, `namco06.ts`, `namco51.ts`, `wsg.ts`,
-  `starfield05xx.ts`, `gfx.ts`
-- board composition: `boards/galaga.ts` (per board *family*, not per game),
-  `video/galaga.ts`
+  `starfield05xx.ts`, `gfx.ts` (+ per-family sound cores like
+  `galaxian-sound.ts`)
+- board composition: `boards/<family>.ts` (per board *family*, not per game)
+  selected via the `boards/index.ts` registry, `video/<family>.ts`
 
-Game-specific data lives ONLY in generated `config.ts`. When a new game needs
-behavior we don't have, add a new **device** or **board** module — never
-special-case an existing one with game names.
+Game-specific data lives ONLY in generated `config.json`. When a new game
+needs behavior we don't have, add a new **device** or **board** module —
+never special-case an existing one with game names.
 
 ### Zero dependencies (user requirement)
 Browser: canvas 2D, Web Audio (AudioWorklet), `DecompressionStream('deflate-raw')`
@@ -89,10 +94,10 @@ mame2js/
 ├── bin/mame2js.js          CLI entry (imports src/cli.ts — Node runs TS natively)
 ├── src/
 │   ├── cli.ts              arg parsing, driver discovery (cached), orchestration
-│   ├── serve.ts            zero-dep static server ('' -> out/<game>, /roms -> roms/)
+│   ├── serve.ts            zero-dep static server ('' -> out/, /roms -> roms/, /games.json manifest)
 │   ├── kg/                 phase 1+2: types, parse, build, cypher, viewer
-│   ├── gen/generate.ts     phase 3: graph -> app
-│   └── runtime/            the engine + device library (copied into each app)
+│   ├── gen/generate.ts     phase 3: graph -> config.json; buildApp() -> out/app
+│   └── runtime/            the engine + device library (copied into the unified app)
 ├── docs/                   you are here
 ├── roms/                   gitignored; galaga.zip lives here locally
 └── out/                    gitignored; per-game artifacts + generated app

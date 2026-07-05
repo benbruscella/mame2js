@@ -25,11 +25,14 @@ mame2js galaga --serve
    `../mame` or parent; override with `--mame-src` / `$MAME_SRC`).
 2. Parses the driver's macro DSLs into a **knowledge graph**
    (`out/galaga/graph.json`, `.cypher`, interactive `viewer.html`).
-3. **Generates** `out/galaga/app/src/config.ts` (ROM manifest, memory map,
-   clocks, screen, DIPs, key bindings) from the graph.
-4. Copies the game-agnostic runtime (`src/runtime/`) next to it, compiles with
-   `tsc`, serves on **http://localhost:8280/app/**.
-5. ROMs: `roms/galaga.zip` auto-loads (or drag-and-drop). Never committed.
+3. **Generates** `out/galaga/config.json` (ROM manifest, memory map, clocks,
+   screen, sound kind, DIPs, key bindings) — pure data, no per-game compile.
+4. (Re)builds the **unified app** at `out/app/` (one runtime compile hosting
+   every generated game) and serves on **http://localhost:8280/app/** —
+   the boot menu ("video-store shelves" + search). `/app/?g=galaga` boots the
+   game; Esc returns to the menu. `mame2js --serve` alone serves everything
+   without needing the MAME tree.
+5. ROMs: `roms/<game>.zip` auto-loads (or drag-and-drop). Never committed.
 
 State as of 2026-07-05: **Galaga boots and plays** — attract mode, coin-up,
 gameplay, scoring, results screen, 60 fps, sound core spec-verified (not yet

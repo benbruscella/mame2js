@@ -11,8 +11,8 @@ Schema: `src/kg/types.ts`. Builders: `src/kg/parse.ts` (DSL parsers),
 | `Game` | `game:galaga` | name, year, company, fullname, monitor (ROT90), cls, init, flags |
 | `MachineConfig` | `machine:galaga_state.galaga` | cls, name, calls (helper configs it invokes) |
 | `Device` | `device:<cfgname>/<tag>` e.g. `device:galaga/maincpu` | type (Z80/LS259/NAMCO_51XX/...), tag, clock (Hz, evaluated), config (raw C++ statements), screenRaw [pixclock,htotal,hbend,hbstart,vtotal,vbend,vbstart], gfxDecodeName |
-| `AddressMap` | `map:galaga_state.galaga_map` | cls, name |
-| `AddressRange` | `<mapId>/range<N>` | start, end, mirror?, rom/ram/writeonly/nopw/nopr flags, share?, raw |
+| `AddressMap` | `map:galaga_state.galaga_map` | cls, name, calls (composed helper maps), globalMask?, unmapHigh? |
+| `AddressRange` | `<mapId>/range<N>` | start, end, mirror?, rom/ram/writeonly/nopw/nopr flags, share?, portRead/portWrite (from .portr/.portw, port tag), raw |
 | `Handler` | `handler:<ownerClass>.<method>` | method, ownerClass. **Shared across uses** — per-use device tag lives on the READS/WRITES edge props (`deviceTag`), NOT here (two LS259s share `ls259_device.write_d0`) |
 | `RomSet` / `RomRegion` / `Rom` | `romset:galaga`, `region:galaga/gfx1`, `rom:galaga/gg1_1b.3p` | region: tag,size,flags; rom: file, offset, size, crc, sha1, reloadOffsets |
 | `InputPorts` / `Port` / `PortField` | `inputs:galaga`, `.../IN0`, `.../f<N>` | field: kind (bit/dip/service), mask, activeLow, type (IPT_*), modifiers (PORT_COCKTAIL...), name, defaultValue, location, settings |
@@ -26,7 +26,10 @@ Schema: `src/kg/types.ts`. Builders: `src/kg/parse.ts` (DSL parsers),
 `HAS_RANGE`, `READS`/`WRITES` (props: deviceTag when the handler is on a
 device), `HAS_REGION`, `LOADS`, `HAS_PORT`, `HAS_FIELD`, `INCLUDES_PORTS`
 (PORT_INCLUDE), `DECODES`, `HAS_ENTRY`, `USES_LAYOUT`, `READS_REGION`,
-`ON_DEVICE`.
+`ON_DEVICE`, `INCLUDES_MAP` (address-map composition:
+`galaxian_map -> galaxian_map_base`), `CALLS` (machine-config helper
+chaining: `galaxian -> galaxian_base` — the generator collects devices
+across this chain).
 
 ## What the parsers handle (and don't)
 
@@ -35,9 +38,20 @@ device), `HAS_REGION`, `LOADS`, `HAS_PORT`, `HAS_FIELD`, `INCLUDES_PORTS`
 `FUNC(...)` args.
 
 - **Expressions**: `evalExpr` evaluates clock/size arithmetic
-  (`MASTER_CLOCK/6/2`, `XTAL(18'432'000)`, hex, digit separators, + - * / and
-  parens) with `#define` constants collected first. Returns null on anything
-  else — callers keep the raw string (`clockExpr`).
+  (`MASTER_CLOCK/6/2`, `XTAL(18'432'000)`, `18.432_MHz_XTAL` /
+  `_kHz_XTAL` / `_Hz_XTAL` literals, hex, digit separators, decimals,
+  + - * / and parens) with constants collected first — both classic
+  `#define NAME expr` and modern
+  `static constexpr XTAL/int NAME(expr)` / `= expr` (galaxian.h style).
+  Returns null on anything else — callers keep the raw string (`clockExpr`).
+- **Address-map composition**: `helper_map(map);` statements become `calls`
+  + `INCLUDES_MAP` edges; `map.global_mask(...)`/`map.unmap_value_high()`
+  become map props; `.portr("IN0")`/`.portw` become range `portRead`/
+  `portWrite` props. Machine-config helper calls (`galaxian_base(config);`)
+  become `CALLS` edges.
+- **GFXDECODE_SCALE** entries parse like GFXDECODE_ENTRY with extra
+  xscale/yscale props (galaxian renders 3× wide in MAME; the generator
+  divides screen h-params back to native).
 - **Device instantiation forms**: `Z80(config, m_maincpu, CLK)`,
   wrapped `ls259_device &misclatch(LS259(config, "misclatch"))` (the `&` cost
   us a bug once — see gotchas), chained `WATCHDOG_TIMER(config, "watchdog").set_vblank_count(...)`.

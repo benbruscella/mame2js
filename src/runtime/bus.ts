@@ -41,7 +41,8 @@ export class Bus {
       let write: WriteHandler | null = null;
 
       if (r.kind === 'rom') {
-        read = (addr) => rom[addr];
+        // offset-based so mirror images read the same region bytes
+        read = (_a, off) => rom[r.start + off];
       } else if (r.kind === 'ram') {
         const bytes = r.share
           ? (this.shares[r.share] ??= new Uint8Array(size))
@@ -73,12 +74,14 @@ export class Bus {
       if (readIdx > 255 || writeIdx > 255) throw new Error('too many bus handlers');
 
       const mirror = r.mirror ?? 0;
-      // apply the range at each mirror image
+      // apply the range at each mirror image; the stored base includes the
+      // mirror bits so handler offsets are always relative to the range start
       for (let m = 0; ; m = (m - mirror) & mirror) {
+        const base = (r.start | m) & 0xffff;
         for (let a = r.start; a <= r.end; a++) {
           const ea = (a | m) & 0xffff;
-          if (read) { this.readId[ea] = readIdx; this.base[ea] = (this.base[ea] & 0xffff0000) | r.start; }
-          if (write) { this.writeId[ea] = writeIdx; this.base[ea] = (this.base[ea] & 0x0000ffff) | (r.start << 16); }
+          if (read) { this.readId[ea] = readIdx; this.base[ea] = (this.base[ea] & 0xffff0000) | base; }
+          if (write) { this.writeId[ea] = writeIdx; this.base[ea] = (this.base[ea] & 0x0000ffff) | (base << 16); }
         }
         if (mirror === 0 || m === mirror) break;
       }

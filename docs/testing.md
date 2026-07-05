@@ -37,7 +37,8 @@ IRQ/latch chain the real game uses — copy this pattern for every new board.
 ## Browser verification (the real bar)
 
 ```
-node bin/mame2js.js galaga --serve      # http://localhost:8280/app/
+node bin/mame2js.js galaga --serve      # menu: http://localhost:8280/app/
+                                        # game: http://localhost:8280/app/?g=galaga
 ```
 
 With Playwright (or by hand): page loads with zero console errors → press any

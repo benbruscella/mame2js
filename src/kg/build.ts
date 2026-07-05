@@ -78,10 +78,20 @@ export function buildGraph(mameSrc: string, driverFile: string): KnowledgeGraph 
   }
 
   // --- address maps ---
-  for (const map of parseAddressMaps(combined)) {
+  const maps = parseAddressMaps(combined);
+  const mapByName = new Map(maps.map(m => [m.name, m]));
+  for (const map of maps) {
     const mapId = `map:${map.cls}.${map.name}`;
-    g.node('AddressMap', mapId, { cls: map.cls, name: map.name });
+    const mapProps: Record<string, PropValue> = { cls: map.cls, name: map.name };
+    if (map.calls.length) mapProps.calls = map.calls;
+    if (map.globalMask !== undefined) mapProps.globalMask = map.globalMask;
+    if (map.unmapHigh) mapProps.unmapHigh = true;
+    g.node('AddressMap', mapId, mapProps);
     g.edge(mapId, fileId, 'DEFINED_IN');
+    for (const callee of map.calls) {
+      const target = mapByName.get(callee);
+      if (target) g.edge(mapId, `map:${target.cls}.${target.name}`, 'INCLUDES_MAP');
+    }
     map.ranges.forEach((r, i) => {
       const rangeId = `${mapId}/range${i}`;
       const props: Record<string, PropValue> = { start: r.start, end: r.end, raw: r.raw };
@@ -90,6 +100,8 @@ export function buildGraph(mameSrc: string, driverFile: string): KnowledgeGraph 
         if (r[flag]) props[flag] = true;
       }
       if (r.share) props.share = r.share;
+      if (r.portRead) props.portRead = r.portRead;
+      if (r.portWrite) props.portWrite = r.portWrite;
       g.node('AddressRange', rangeId, props);
       g.edge(mapId, rangeId, 'HAS_RANGE');
       for (const dir of ['read', 'write'] as const) {
@@ -109,11 +121,17 @@ export function buildGraph(mameSrc: string, driverFile: string): KnowledgeGraph 
   }
 
   // --- machine configs ---
-  const gfxDecodes = parseGfxDecodes(combined);
-  for (const cfg of parseMachineConfigs(combined, memberTags, consts)) {
+  const gfxDecodes = parseGfxDecodes(combined, consts);
+  const machineConfigs = parseMachineConfigs(combined, memberTags, consts);
+  const cfgByName = new Map(machineConfigs.map(c => [c.name, c]));
+  for (const cfg of machineConfigs) {
     const cfgId = `machine:${cfg.cls}.${cfg.name}`;
     g.node('MachineConfig', cfgId, { cls: cfg.cls, name: cfg.name, calls: cfg.calls });
     g.edge(cfgId, fileId, 'DEFINED_IN');
+    for (const callee of cfg.calls) {
+      const target = cfgByName.get(callee);
+      if (target) g.edge(cfgId, `machine:${target.cls}.${target.name}`, 'CALLS');
+    }
     for (const dev of cfg.devices) {
       const devId = `device:${cfg.name}/${dev.tag}`;
       const props: Record<string, PropValue> = {
@@ -182,6 +200,7 @@ export function buildGraph(mameSrc: string, driverFile: string): KnowledgeGraph 
       g.node('GfxDecodeEntry', eid, {
         region: e.region, offset: e.offset, layout: e.layout,
         colorBase: e.colorBase, colorCount: e.colorCount,
+        xscale: e.xscale, yscale: e.yscale,
       });
       g.edge(decId, eid, 'HAS_ENTRY');
       g.edge(eid, `gfxlayout:${e.layout}`, 'USES_LAYOUT');

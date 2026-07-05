@@ -2,6 +2,22 @@
 // matching the raw hardware values the 51xx / DSW handlers expect.
 
 import type { InputPorts } from './types.ts';
+import type { RangeSpec, ReadHandler } from './bus.ts';
+
+/**
+ * Build read handlers for the generated "port.<TAG>" keys (from .portr()
+ * entries in the address map): each returns the live active-low port byte.
+ */
+export function portHandlers(ranges: RangeSpec[], inputs: InputPorts): Record<string, ReadHandler> {
+  const out: Record<string, ReadHandler> = {};
+  for (const r of ranges) {
+    if (r.read?.startsWith('port.')) {
+      const tag = r.read.slice('port.'.length);
+      out[r.read] = () => inputs.read(tag);
+    }
+  }
+  return out;
+}
 
 export interface FieldBinding {
   port: string;   // "IN0", "IN1", ...
@@ -35,6 +51,16 @@ export class KeyboardInput implements InputPorts {
   attach(target: EventTarget): void {
     target.addEventListener('keydown', ev => this.onKey(ev as KeyboardEvent, true));
     target.addEventListener('keyup', ev => this.onKey(ev as KeyboardEvent, false));
+    // keyup events are lost when focus leaves (OS shortcuts — notably
+    // Ctrl+Arrow on macOS — tab switches, screenshots): release everything
+    // or keys stay latched ("sticky" input)
+    target.addEventListener('blur', () => this.releaseAll());
+    target.addEventListener('visibilitychange', () => { if (document.hidden) this.releaseAll(); });
+  }
+
+  /** release every non-DIP input (active low ⇒ all bits set) */
+  releaseAll(): void {
+    for (const port of Object.keys(this.state)) this.state[port] = 0xff;
   }
 
   private onKey(ev: KeyboardEvent, down: boolean): void {
