@@ -15,7 +15,7 @@ Schema: `src/kg/types.ts`. Builders: `src/kg/parse.ts` (DSL parsers),
 | `AddressRange` | `<mapId>/range<N>` | start, end, mirror?, rom/ram/writeonly/nopw/nopr flags, share?, portRead/portWrite (from .portr/.portw, port tag), raw |
 | `Handler` | `handler:<ownerClass>.<method>` | method, ownerClass. **Shared across uses** — per-use device tag lives on the READS/WRITES edge props (`deviceTag`), NOT here (two LS259s share `ls259_device.write_d0`) |
 | `RomSet` / `RomRegion` / `Rom` | `romset:galaga`, `region:galaga/gfx1`, `rom:galaga/gg1_1b.3p` | region: tag,size,flags; rom: file, offset, size, crc, sha1, reloadOffsets |
-| `InputPorts` / `Port` / `PortField` | `inputs:galaga`, `.../IN0`, `.../f<N>` | field: kind (bit/dip/service), mask, activeLow, type (IPT_*), modifiers (PORT_COCKTAIL...), name, defaultValue, location, settings |
+| `InputPorts` / `Port` / `PortField` | `inputs:galaga`, `.../IN0`, `.../f<N>` | field: kind (bit/dip/service), mask, activeLow, type (IPT_*), modifiers (PORT_COCKTAIL...), name, defaultValue, location, settings. PORT_CONFNAME/CONFSETTING parse as dip (bit-identical semantics — pacman's Ghost Names/Cabinet bits; dropping them silently flips config bits to active) |
 | `GfxLayout` / `GfxDecode` / `GfxDecodeEntry` | `gfxlayout:spritelayout_galaga` etc. | layout: width,height,total (number or "RGN_FRAC(a,b)"), planes, planeOffsets/xOffsets/yOffsets (numbers; STEPn expanded; RGN_FRAC kept symbolic), charIncrement (bits) |
 | `SourceFile` | `file:src/mame/namco/galaga.cpp` | path, external? |
 

@@ -10,14 +10,20 @@ export interface ArtWindow { x: number; y: number; w: number; h: number }
 export interface Artwork { bmp: ImageBitmap; window: ArtWindow | null }
 
 /**
- * Load a game's artwork PNG. `prefer` biases the pick: menu covers like
- * marquees; in-game surrounds need a bezel (and a transparent window).
+ * Load a game's artwork. The zip's MAME `default.lay` layout is the source
+ * of truth when present (which PNG is the bezel + the exact screen bounds,
+ * same data MAME renders from); the filename heuristic + alpha flood fill
+ * are only the fallback for lay-less zips.
  */
 export async function loadArtwork(game: string, prefer: 'marquee' | 'bezel'): Promise<Artwork | null> {
   try {
     const res = await fetch(`/artwork/${encodeURIComponent(game)}.zip`);
     if (!res.ok) return null;
     const files = await readZip(new Uint8Array(await res.arrayBuffer()));
+
+    const fromLay = await layArtwork(files);
+    if (fromLay) return fromLay;
+
     const pngs = [...files.entries()].filter(([n]) => n.endsWith('.png'));
     if (!pngs.length) return null;
     const score = (n: string) => {
@@ -31,6 +37,60 @@ export async function loadArtwork(game: string, prefer: 'marquee' | 'bezel'): Pr
   } catch {
     return null;
   }
+}
+
+/** Parse MAME default.lay: pick the upright view, resolve its art PNG + screen bounds. */
+async function layArtwork(files: Map<string, Uint8Array>): Promise<Artwork | null> {
+  const layBytes = files.get('default.lay');
+  if (!layBytes) return null;
+  const lay = new TextDecoder().decode(layBytes).replace(/<!--[\s\S]*?-->/g, '');
+
+  // element name -> image file
+  const images = new Map<string, string>();
+  for (const m of lay.matchAll(/<element name="([^"]+)"[^>]*>\s*<image file="([^"]+)"/g)) {
+    images.set(m[1], m[2]);
+  }
+
+  const bounds = (tag: string) => {
+    const b = /<bounds\s+([^/]*)\/>/.exec(tag);
+    if (!b) return null;
+    const attrs: Record<string, number> = {};
+    for (const a of b[1].matchAll(/(\w+)="([\d.]+)"/g)) attrs[a[1]] = Number(a[2]);
+    return { x: attrs.x ?? 0, y: attrs.y ?? 0, w: attrs.width, h: attrs.height };
+  };
+
+  interface View { name: string; screen: NonNullable<ReturnType<typeof bounds>>; art: NonNullable<ReturnType<typeof bounds>>; file: string }
+  const views: View[] = [];
+  for (const v of lay.matchAll(/<view name="([^"]+)">([\s\S]*?)<\/view>/g)) {
+    const body = v[2];
+    const sm = /<screen[^>]*>[\s\S]*?<\/screen>|<screen[^>]*>\s*<bounds[^/]*\/>/.exec(body);
+    const am = /<(?:bezel|backdrop|overlay)\s+element="([^"]+)"[^>]*>[\s\S]*?<\/(?:bezel|backdrop|overlay)>/.exec(body);
+    if (!sm || !am) continue;
+    const screen = bounds(sm[0]);
+    const art = bounds(am[0]);
+    const file = images.get(am[1]);
+    if (screen && art && art.w && art.h && file) views.push({ name: v[1], screen, art, file });
+  }
+  if (!views.length) return null;
+  // prefer the real cabinet view
+  views.sort((a, b) => Number(/upright/i.test(b.name)) - Number(/upright/i.test(a.name)));
+  const view = views[0];
+
+  const findFile = (name: string) => files.get(name) ?? files.get(name.toLowerCase());
+  const png = findFile(view.file);
+  if (!png) return null;
+  const bmp = await createImageBitmap(new Blob([png.slice().buffer], { type: 'image/png' }));
+  // screen bounds are in view coordinates; map into bitmap pixels
+  const sx = bmp.width / view.art.w, sy = bmp.height / view.art.h;
+  return {
+    bmp,
+    window: {
+      x: (view.screen.x - view.art.x) * sx,
+      y: (view.screen.y - view.art.y) * sy,
+      w: view.screen.w * sx,
+      h: view.screen.h * sy,
+    },
+  };
 }
 
 /** Bounding box of the transparent CRT cut-out, found by flood fill from the center. */

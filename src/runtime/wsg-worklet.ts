@@ -1,18 +1,31 @@
-// AudioWorklet module hosting the Namco WSG DSP off the main thread.
+// AudioWorklet module hosting the Namco WSG DSP off the main thread,
+// plus the Namco 54xx noise HLE (explosions) on Galaga-class boards.
 // Compiled output (dist/runtime/wsg-worklet.js) is loaded via
 // audioContext.audioWorklet.addModule(url); worklet module scopes support
-// ES imports, so wsg.js is fetched relative to this module's URL.
+// ES imports, so wsg.js / namco54.js are fetched relative to this module's
+// URL.
 //
 // Protocol (port.onmessage):
 //   { type: 'init',  waveRom: Uint8Array, clock: number, voices?: number }
 //   { type: 'write', offset: number, data: number }
 //   { type: 'enable', on: boolean }
 //
-// The core renders at its native rate (clock, 96000 for Galaga) and is
-// linearly resampled here to the AudioContext rate (the worklet-global
-// `sampleRate`).
+// Write offsets 0x00-0x1f are WSG registers (pacman_sound_w space);
+// offsets >= 0x40 carry the 54xx command byte stream (the 06xx slot-3
+// writes forwarded by the board — see boards/galaga.ts).
+//
+// Both cores render at the same native rate (clock, 96000 for Galaga),
+// are summed here, and the sum is linearly resampled to the AudioContext
+// rate (the worklet-global `sampleRate`).
 
 import { NamcoWSG } from './wsg.ts';
+import { Namco54 } from './namco54.ts';
+
+// Relative 54xx gain. The shell applies the WSG route gain as the node
+// master volume (0.90 * 10/16 = 0.5625, see audio.ts/shell), so the WSG
+// renders here at 1.0 and the 54xx at its target effective route gain
+// (~0.50) divided by that master: 0.50 / 0.5625.
+const N54_GAIN = 0.50 / 0.5625;
 
 // --- AudioWorklet global scope declarations -------------------------------
 // These globals exist only inside AudioWorkletGlobalScope and are not part
@@ -50,6 +63,8 @@ const CHUNK = 256;
 
 class WsgProcessor extends AudioWorkletProcessor {
   private core: NamcoWSG | null = null;
+  private n54: Namco54 | null = null;
+  private n54Buf: Float32Array = new Float32Array(CHUNK);
   /** native samples advanced per output sample (e.g. 96000 / 48000 = 2). */
   private step: number = 1;
 
@@ -70,6 +85,7 @@ class WsgProcessor extends AudioWorkletProcessor {
       switch (msg.type) {
         case 'init': {
           this.core = new NamcoWSG(msg.waveRom, msg.clock, msg.voices);
+          this.n54 = new Namco54(msg.clock); // same native rate as the WSG
           this.step = msg.clock / sampleRate;
           this.frac = 0;
           this.s0 = 0;
@@ -78,7 +94,8 @@ class WsgProcessor extends AudioWorkletProcessor {
           break;
         }
         case 'write':
-          this.core?.write(msg.offset, msg.data);
+          if (msg.offset >= 0x40) this.n54?.write(msg.data);
+          else this.core?.write(msg.offset, msg.data);
           break;
         case 'enable':
           this.core?.soundEnable(msg.on);
@@ -89,8 +106,17 @@ class WsgProcessor extends AudioWorkletProcessor {
 
   private nextNativeSample(): number {
     if (this.nativePos >= this.nativeBuf.length) {
-      // core is non-null whenever this is reached (checked in process())
+      // cores are non-null whenever this is reached (checked in process())
       (this.core as NamcoWSG).render(this.nativeBuf);
+      (this.n54 as Namco54).render(this.n54Buf);
+      // sum WSG + 54xx, hard-limited to [-1, 1] (WSG alone peaks ~0.94;
+      // simultaneous full-scale boom + 3 voices can exceed 1)
+      const buf = this.nativeBuf;
+      const n54 = this.n54Buf;
+      for (let i = 0; i < buf.length; i++) {
+        const s = buf[i] + n54[i] * N54_GAIN;
+        buf[i] = s > 1 ? 1 : s < -1 ? -1 : s;
+      }
       this.nativePos = 0;
     }
     return this.nativeBuf[this.nativePos++];

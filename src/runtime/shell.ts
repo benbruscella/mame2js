@@ -256,7 +256,7 @@ function buildDom(cfg: ShellConfig) {
 
   const help = document.createElement('div');
   help.style.cssText = 'color:#666';
-  help.textContent = 'Arrows: move · Space or X: fire (avoid Ctrl on macOS — the OS grabs Ctrl+arrows) · 5: coin · 1: start 1P · 2: start 2P · Esc: menu';
+  help.textContent = 'Arrows: move · Space or X: fire · 5: coin · 1: start 1P · 2: start 2P · Esc: menu';
   root.appendChild(help);
 
   const ctx = canvas.getContext('2d')!;

@@ -76,10 +76,18 @@ The classic HLE expects coins on ports 0/1. `Namco51` takes callbacks in
 **modern order** and reorders internally (`switchByte()` = in[2]|in[3]<<4).
 Do not "fix" this.
 
-## Namco 54xx — stubbed
+## Namco 54xx — `namco54.ts` (HLE)
 
-`boards/galaga.ts` slot 3 accepts writes and drops them. The user's romset
-includes `54xx.bin` (MB8844 program, CRC ee7357e0) — LLE is a TODO.
+Explosion/noise generator. `boards/galaga.ts` forwards the 06xx slot-3
+command bytes to sound-offset 0x40; `wsg-worklet.ts` hosts a `Namco54`
+beside the WSG and sums them (54xx relative gain 0.50/0.5625). Protocol per
+MAME namco54.cpp: `3x`/`4x`/`6x` program type A/B/C params, `1x`/`2x`/`5x`
+play them (galaga: A=[40 00 02 df], B=[30 30 03 df] at boot; death =
+`10 10 20 20`). Discrete side is a faithful port of galaga_a.cpp's
+band-pass/mixer network (centers 167/450/2500 Hz, MAME's clipped-feedback
+distortion included); the MB8844 program itself is approximated with LFSR
+noise + stepped envelopes (durations anchored to the real params). LLE with
+the user's `54xx.bin` dump remains a possible upgrade.
 
 ## WSG sound — `wsg.ts` + `wsg-worklet.ts` + `audio.ts` (agent-written)
 
@@ -185,9 +193,14 @@ Composition + interrupt wiring (hand-transpiled from galaga.cpp):
   the worklet module `<runtimeUrl>/<kind>-worklet.js` and processor name;
   boards forward register writes through `sinks.soundWrite`. WSG master
   volume 0.5625 (MAME route gain), other cores bake their own scale.
-- **Esc → menu**: keydown Escape saves a box-art snapshot
-  (localStorage `mame2js:snap:<game>`, also refreshed every 5 s) and
-  navigates to `config.menuUrl` (the boot menu). Documented in the help line.
+- **Esc → menu**: keydown Escape (capture phase, registered before ROM load)
+  saves a box-art snapshot (localStorage `mame2js:snap:<game>`) and navigates
+  to `config.menuUrl`. Snapshots save ONLY on Esc — toDataURL+localStorage
+  are synchronous and a periodic save hitches the run loop.
+- **Cabinet bezel** (`artwork.ts`, shared with the menu): if
+  `/artwork/<game>.zip` has a bezel PNG with a transparent CRT window
+  (flood-fill detected), the game canvas is positioned inside the window and
+  the artwork drawn over it; falls back to the plain integer-scaled canvas.
 - **Menu** (`menu.ts`, browser-only): the /app/ home screen — video-store
   shelves of game boxes from `/games.json`, live search (title/maker/year),
   arrow-key + Enter navigation. Box cover priority: MAME artwork zip from

@@ -24,10 +24,10 @@ const KEYMAP: Record<string, string[]> = {
   IPT_JOYSTICK_RIGHT: ['ArrowRight'],
   IPT_JOYSTICK_UP: ['ArrowUp'],
   IPT_JOYSTICK_DOWN: ['ArrowDown'],
-  // NOTE: Ctrl is deliberately NOT first — macOS eats Ctrl+Arrow (Mission
-  // Control), which kills left/right movement while firing
-  IPT_BUTTON1: ['Space', 'KeyX', 'ControlLeft'],
-  IPT_BUTTON2: ['KeyZ', 'AltLeft'],
+  // NOTE: never bind Ctrl — macOS eats Ctrl+Arrow (Mission Control), which
+  // force-releases left/right movement while firing (user directive)
+  IPT_BUTTON1: ['Space', 'KeyX'],
+  IPT_BUTTON2: ['KeyZ'],
   IPT_START1: ['Digit1'],
   IPT_START2: ['Digit2'],
   IPT_COIN1: ['Digit5'],
