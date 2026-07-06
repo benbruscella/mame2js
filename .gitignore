@@ -1,5 +1,7 @@
-# ROMs are copyrighted — never commit them
+# ROMs are copyrighted — never commit them (any variant of the dir name)
 /roms/
+/_roms/
+*.zip
 
 /node_modules/
 /out/

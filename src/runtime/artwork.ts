@@ -7,7 +7,8 @@
 import { readZip } from './zip.ts';
 
 export interface ArtWindow { x: number; y: number; w: number; h: number }
-export interface Artwork { bmp: ImageBitmap; window: ArtWindow | null }
+/** bmp is pre-rotated per the lay's <orientation> (canvas when rotated) */
+export interface Artwork { bmp: ImageBitmap | HTMLCanvasElement; window: ArtWindow | null }
 
 /**
  * Load a game's artwork. The zip's MAME `default.lay` layout is the source
@@ -59,7 +60,7 @@ async function layArtwork(files: Map<string, Uint8Array>): Promise<Artwork | nul
     return { x: attrs.x ?? 0, y: attrs.y ?? 0, w: attrs.width, h: attrs.height };
   };
 
-  interface View { name: string; screen: NonNullable<ReturnType<typeof bounds>>; art: NonNullable<ReturnType<typeof bounds>>; file: string }
+  interface View { name: string; screen: NonNullable<ReturnType<typeof bounds>>; art: NonNullable<ReturnType<typeof bounds>>; file: string; rotate: number }
   const views: View[] = [];
   for (const v of lay.matchAll(/<view name="([^"]+)">([\s\S]*?)<\/view>/g)) {
     const body = v[2];
@@ -69,7 +70,8 @@ async function layArtwork(files: Map<string, Uint8Array>): Promise<Artwork | nul
     const screen = bounds(sm[0]);
     const art = bounds(am[0]);
     const file = images.get(am[1]);
-    if (screen && art && art.w && art.h && file) views.push({ name: v[1], screen, art, file });
+    const rotate = Number(/<orientation\s+rotate="(\d+)"/.exec(am[0])?.[1] ?? 0);
+    if (screen && art && art.w && art.h && file) views.push({ name: v[1], screen, art, file, rotate });
   }
   if (!views.length) return null;
   // prefer the real cabinet view
@@ -79,7 +81,18 @@ async function layArtwork(files: Map<string, Uint8Array>): Promise<Artwork | nul
   const findFile = (name: string) => files.get(name) ?? files.get(name.toLowerCase());
   const png = findFile(view.file);
   if (!png) return null;
-  const bmp = await createImageBitmap(new Blob([png.slice().buffer], { type: 'image/png' }));
+  let bmp: ImageBitmap | HTMLCanvasElement = await createImageBitmap(new Blob([png.slice().buffer], { type: 'image/png' }));
+  // honor <orientation rotate="180"> (gyruss ships its bezel upside down):
+  // view coords assume the rotated image, so rotate the pixels to match
+  if (view.rotate === 180) {
+    const c = document.createElement('canvas');
+    c.width = bmp.width; c.height = bmp.height;
+    const cx = c.getContext('2d')!;
+    cx.translate(c.width, c.height);
+    cx.rotate(Math.PI);
+    cx.drawImage(bmp, 0, 0);
+    bmp = c;
+  }
   // screen bounds are in view coordinates; map into bitmap pixels
   const sx = bmp.width / view.art.w, sy = bmp.height / view.art.h;
   return {

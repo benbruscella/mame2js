@@ -11,7 +11,7 @@ MAME C++ driver source            e.g. <mame>/src/mame/namco/galaga.cpp (+ .h, _
         │  machine_config functions, INPUT_PORTS blocks, gfx_layout structs,
         │  GFXDECODE tables, #defines (clock constants), constructor member->tag maps
         ▼
-Knowledge graph                   out/<game>/graph.json (full driver: graph.full.json)
+Knowledge graph                   dist/<game>/graph.json (full driver: graph.full.json)
         │                         + graph.cypher (Neo4J) + viewer.html / viewer.full.html
         │
         │  PHASE 2: RESOLVE (src/kg/build.ts gameSubgraph)
@@ -25,11 +25,11 @@ Game subgraph                     ~116 nodes for galaga
         │  manifest with CRCs, DIP defaults, keyboard bindings.
         │  Unknown handler names -> loud failure.
         ▼
-Game data                         out/<game>/{config.json, meta.json}   (pure data, no compile)
+Game data                         dist/<game>/{config.json, meta.json}   (pure data, no compile)
         │
         │  PHASE 4: UNIFIED APP + SERVE (generate.ts buildApp, src/serve.ts)
-        │  ONE app at out/app (runtime copy + tsc) hosts every generated game;
-        │  /games.json manifest is served live from out/*/meta.json
+        │  ONE app at dist/app (runtime copy + tsc) hosts every generated game;
+        │  /games.json manifest is served live from dist/*/meta.json
         ▼
 Browser                           /app/ = boot menu (shelves + search),
                                   /app/?g=<game> = that game (Esc -> menu),
@@ -44,7 +44,7 @@ the C++ was never translated line-by-line (see "role of the C++ source" below).
 ### Knowledge graph first (user decision, 2026-07-05)
 The graph (`src/kg/types.ts`) is the single contract between extraction and
 generation. Native store is dependency-free JSON; Cypher is an *export*, not a
-dependency (`cypher-shell < out/galaga/graph.cypher` if you want Neo4J).
+dependency (`cypher-shell < dist/galaga/graph.cypher` if you want Neo4J).
 Rationale: makes game #2 cheap, makes the extracted facts inspectable and
 teachable (viewer), and decouples parser improvements from runtime work.
 
@@ -94,13 +94,13 @@ mame2js/
 ├── bin/mame2js.js          CLI entry (imports src/cli.ts — Node runs TS natively)
 ├── src/
 │   ├── cli.ts              arg parsing, driver discovery (cached), orchestration
-│   ├── serve.ts            zero-dep static server ('' -> out/, /roms -> roms/, /games.json manifest)
+│   ├── serve.ts            zero-dep static server ('' -> dist/, /roms -> roms/, /games.json manifest)
 │   ├── kg/                 phase 1+2: types, parse, build, cypher, viewer
-│   ├── gen/generate.ts     phase 3: graph -> config.json; buildApp() -> out/app
+│   ├── gen/generate.ts     phase 3: graph -> config.json; buildApp() -> dist/app
 │   └── runtime/            the engine + device library (copied into the unified app)
 ├── docs/                   you are here
 ├── roms/                   gitignored; galaga.zip lives here locally
-└── out/                    gitignored; per-game artifacts + generated app
+└── dist/                    gitignored; per-game artifacts + generated app
 ```
 
 The repo lives at `~/Projects/Github/mame2js` (github.com/benbruscella/mame2js)

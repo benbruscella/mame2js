@@ -83,7 +83,7 @@ Prioritized. Each item has enough context to start cold. Check
 - Generator + shell + zip(CRC match) + serve
 - Galaga verified playing in-browser at 60fps
 - Repo split to github.com/benbruscella/mame2js, symlink at <mame>/mame2js
-- Issue #1 (2026-07-05): unified app (out/app + per-game config.json),
+- Issue #1 (2026-07-05): unified app (dist/app + per-game config.json),
   Blockbuster-shelf boot menu (artwork/snapshot/tile covers + search),
   Esc-to-menu, galaxian board/video/sound (plays in-browser), pacman
   board/video (boots; start-stall under debug), parser support for modern

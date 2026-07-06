@@ -9,7 +9,7 @@ core each, zero changes to existing engine modules beyond generalization).
 
 ```
 node bin/mame2js.js graph <game>
-open out/<game>/viewer.html      # or read graph.json
+open dist/<game>/viewer.html      # or read graph.json
 ```
 
 Check the CLI digest: devices + clocks, rom regions. Open the viewer and eyeball

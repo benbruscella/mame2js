@@ -41,6 +41,7 @@ export type RelType =
   | 'INCLUDES_PORTS'  // InputPorts -> InputPorts (PORT_INCLUDE)
   | 'INCLUDES_MAP'    // AddressMap -> AddressMap (helper composition: galaxian_map -> galaxian_map_base)
   | 'CALLS'           // MachineConfig -> MachineConfig (helper chaining: galaxian -> galaxian_base)
+  | 'PATCHES_MAP'     // MachineConfig -> AddressMap (set_addrmap on a device from a called config; props: space, deviceTag)
   | 'DECODES'         // MachineConfig -> GfxDecode
   | 'HAS_ENTRY'       // GfxDecode -> GfxDecodeEntry
   | 'USES_LAYOUT'     // GfxDecodeEntry -> GfxLayout
@@ -68,6 +69,9 @@ export interface KnowledgeGraph {
     mameSrc: string;
     driverFile: string;
     generatedAt: string;
+    /** driver header credits: // license: and // copyright-holders: lines */
+    license?: string;
+    copyrightHolders?: string;
   };
   nodes: KGNode[];
   edges: KGEdge[];

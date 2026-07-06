@@ -16,6 +16,8 @@ export interface WorkletCoreConfig {
   readonly waveRom?: Uint8Array;
   readonly clock?: number;
   readonly voices?: number;
+  /** number of chip instances the worklet should host (ay8910 bank) */
+  readonly chips?: number;
 }
 
 interface PendingWrite {
@@ -60,6 +62,7 @@ export class AudioOutput {
       waveRom: core.waveRom ?? new Uint8Array(0x100),
       clock: core.clock ?? core.sampleRate,
       voices: core.voices,
+      chips: core.chips,
     });
 
     this.ctx = ctx;

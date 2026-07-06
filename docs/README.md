@@ -24,10 +24,10 @@ mame2js galaga --serve
 1. Finds `GAME(..., galaga, ...)` in the MAME source tree (auto-detected at
    `../mame` or parent; override with `--mame-src` / `$MAME_SRC`).
 2. Parses the driver's macro DSLs into a **knowledge graph**
-   (`out/galaga/graph.json`, `.cypher`, interactive `viewer.html`).
-3. **Generates** `out/galaga/config.json` (ROM manifest, memory map, clocks,
+   (`dist/galaga/graph.json`, `.cypher`, interactive `viewer.html`).
+3. **Generates** `dist/galaga/config.json` (ROM manifest, memory map, clocks,
    screen, sound kind, DIPs, key bindings) — pure data, no per-game compile.
-4. (Re)builds the **unified app** at `out/app/` (one runtime compile hosting
+4. (Re)builds the **unified app** at `dist/app/` (one runtime compile hosting
    every generated game) and serves on **http://localhost:8280/app/** —
    the boot menu ("video-store shelves" + search). `/app/?g=galaga` boots the
    game; Esc returns to the menu. `mame2js --serve` alone serves everything

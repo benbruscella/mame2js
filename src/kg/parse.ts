@@ -420,13 +420,14 @@ function parseChain(s: string): { method: string; args: string[] }[] {
   return out;
 }
 
-/** args like [FUNC(cls::meth)] or [m_dev, FUNC(dev_class::meth)] or ["tag", FUNC(...)] */
+/** args like [FUNC(cls::meth)] or [m_dev, FUNC(dev_class::meth)] or ["tag", FUNC(...)];
+ *  templated members (FUNC(m52_state::bgxpos_w<0>)) become method "bgxpos_w_0" */
 function parseHandlerArgs(args: string[]): HandlerRef | undefined {
   const funcArg = args.find(a => a.includes('FUNC('));
   if (!funcArg) return undefined;
-  const fm = /FUNC\(\s*(?:(\w+)::)?(\w+)\s*\)/.exec(funcArg);
+  const fm = /FUNC\(\s*(?:(\w+)::)?(\w+(?:<\d+>)?)\s*\)/.exec(funcArg);
   if (!fm) return undefined;
-  const ref: HandlerRef = { method: fm[2] };
+  const ref: HandlerRef = { method: fm[2].replace(/<(\d+)>/, '_$1') };
   if (fm[1]) ref.deviceClass = fm[1];
   const devArg = args.find(a => !a.includes('FUNC('));
   if (devArg) ref.deviceRef = unquote(devArg.trim());
@@ -461,6 +462,13 @@ export interface MachineConfigDef {
   devices: DeviceDef[];
   /** calls to other config helpers on the same class, e.g. galagab() calls galaga() */
   calls: string[];
+  /**
+   * statements addressing a device instantiated in a CALLED config
+   * (invaders(config) calls mw8080bw_root(config) then does
+   * m_maincpu->set_addrmap(AS_IO, ...)) — resolved to the owning device at
+   * graph-build time
+   */
+  patches: { tag: string; addrMaps: Record<string, string>; raw: string }[];
   raw: string;
 }
 
@@ -482,7 +490,7 @@ export function parseMachineConfigs(
 ): MachineConfigDef[] {
   const fns = extractFunctionBody(src, /void\s+(\w+)::(\w+)\(machine_config\s*&\s*config\)/g);
   return fns.map(({ cls, name, body }) => {
-    const cfg: MachineConfigDef = { cls, name, devices: [], calls: [], raw: body.trim() };
+    const cfg: MachineConfigDef = { cls, name, devices: [], calls: [], patches: [], raw: body.trim() };
     const byRef = new Map<string, DeviceDef>(); // m_member, "tag", or localVar -> device
     const resolveTag = (ref: string): string => {
       const r = ref.trim();
@@ -501,7 +509,14 @@ export function parseMachineConfigs(
       // device instantiation, possibly wrapped: type_device &var(TYPE(config, ref[, clock]));
       const dm = DEVICE_MACRO_RE.exec(s);
       if (dm && dm[2] !== 'FUNC' && dm[2] !== 'AS_PROGRAM') {
-        const [, localVar, type, refRaw, clockRaw] = dm;
+        const [, localVar, type] = dm;
+        // re-derive the args with balanced parens: the regex's lazy capture
+        // truncates clocks like XTAL(3'579'545) at the inner ')'
+        const open = s.indexOf('(', s.indexOf(type) + type.length - 1);
+        const close = matchParen(s, open);
+        const args = splitArgs(s.slice(open + 1, close)); // [config, ref, ...rest]
+        const refRaw = args[1] ?? dm[3];
+        const clockRaw = args.length > 2 ? args.slice(2).join(', ') : undefined;
         const ref = refRaw.trim();
         const dev: DeviceDef = {
           type,
@@ -529,6 +544,15 @@ export function parseMachineConfigs(
       if (mc) {
         const [, refRaw, method] = mc;
         const dev = byRef.get(refRaw) ?? byRef.get(resolveTag(refRaw));
+        if (!dev && method === 'set_addrmap' && refRaw.startsWith('m_')) {
+          // device lives in a CALLED config — record as a patch by tag
+          const open = s.indexOf('(', s.indexOf(method));
+          const close = matchParen(s, open);
+          const [space, mapRef] = splitArgs(s.slice(open + 1, close));
+          const mm = /&\s*\w+::(\w+)/.exec(mapRef ?? '');
+          if (mm) cfg.patches.push({ tag: resolveTag(refRaw), addrMaps: { [space.trim()]: mm[1] }, raw: s });
+          continue;
+        }
         if (dev) {
           dev.config.push(s);
           if (method === 'set_addrmap') {
@@ -580,16 +604,71 @@ export interface PortFieldDef {
 export interface PortDef { tag: string; modify?: boolean; fields: PortFieldDef[]; }
 export interface InputPortsDef { name: string; include?: string; ports: PortDef[]; }
 
-export function parseInputPorts(src: string): InputPortsDef[] {
+/**
+ * Collect #define text macros used inside INPUT_PORTS blocks:
+ * - port macros (multi-line bodies of PORT_* tokens, optionally with
+ *   parameters — mw8080bw's INVADERS_CONTROL_PORT_PLAYER(player))
+ * - string constants (#define INVADERS_P1_CONTROL_PORT_TAG ("CONTP1"))
+ */
+export interface TextMacros {
+  ports: Record<string, { params: string[]; body: string }>;
+  strings: Record<string, string>;
+}
+
+export function parseTextMacros(src: string): TextMacros {
+  const out: TextMacros = { ports: {}, strings: {} };
+  const re = /^[ \t]*#define\s+(\w+)(\(([^)]*)\))?[ \t]*((?:[^\n]*\\\r?\n)*[^\n]*)/gm;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(src)) !== null) {
+    const name = m[1];
+    const params = m[3] ? m[3].split(',').map(p => p.trim()).filter(Boolean) : [];
+    const body = m[4].replace(/\\\r?\n/g, '\n').trim();
+    const str = /^\(?\s*("(?:[^"\\]|\\.)*")\s*\)?$/.exec(body);
+    if (str) out.strings[name] = str[1].slice(1, -1);
+    else if (/PORT_[A-Z]/.test(body)) out.ports[name] = { params, body };
+  }
+  return out;
+}
+
+/** Expand port macros (with positional params) inside an INPUT_PORTS body. */
+function expandPortMacros(body: string, macros: TextMacros): string {
+  for (let pass = 0; pass < 5; pass++) {
+    let changed = false;
+    for (const [name, mac] of Object.entries(macros.ports)) {
+      // args may nest one paren level: KONAMI_COINAGE_LOC(DEF_STR( 1C_1C ), ...)
+      const re = new RegExp(`\\b${name}\\b(?:\\s*\\(((?:[^()]|\\([^()]*\\))*)\\))?`, 'g');
+      body = body.replace(re, (whole, argsRaw: string | undefined) => {
+        if (mac.params.length && argsRaw === undefined) return whole; // param macro without args: leave
+        changed = true;
+        let expansion = mac.body;
+        if (mac.params.length) {
+          const args = splitArgs(argsRaw ?? '');
+          mac.params.forEach((p, i) => {
+            expansion = expansion.replace(new RegExp(`\\b${p}\\b`, 'g'), args[i] ?? '');
+          });
+        }
+        return expansion;
+      });
+    }
+    if (!changed) break;
+  }
+  return body;
+}
+
+export function parseInputPorts(src: string, macros: TextMacros = { ports: {}, strings: {} }): InputPortsDef[] {
   const out: InputPortsDef[] = [];
+  const resolveStr = (s: string): string => {
+    const t = unquote(s.trim().replace(/^\(/, '').replace(/\)$/, '').trim());
+    return macros.strings[t] ?? unquote(t);
+  };
   const re = /INPUT_PORTS_START\(\s*(\w+)\s*\)([\s\S]*?)INPUT_PORTS_END/g;
   let m: RegExpExecArray | null;
   while ((m = re.exec(src)) !== null) {
     const def: InputPortsDef = { name: m[1], ports: [] };
-    const body = m[2];
+    const body = expandPortMacros(m[2], macros);
     let port: PortDef | null = null;
     let dip: PortFieldDef | null = null;
-    const tokRe = /(PORT_START|PORT_MODIFY|PORT_INCLUDE|PORT_BIT|PORT_DIPNAME|PORT_DIPSETTING|PORT_SERVICE|PORT_DIPLOCATION|PORT_DIPUNUSED_DIPLOC|PORT_CONDITION|PORT_CONFNAME|PORT_CONFSETTING)\s*\(/g;
+    const tokRe = /(PORT_START|PORT_MODIFY|PORT_INCLUDE|PORT_BIT|PORT_DIPNAME|PORT_DIPSETTING|PORT_SERVICE_DIPLOC|PORT_SERVICE|PORT_DIPLOCATION|PORT_DIPUNUSED_DIPLOC|PORT_CONDITION|PORT_CONFNAME|PORT_CONFSETTING)\s*\(/g;
     let tm: RegExpExecArray | null;
     while ((tm = tokRe.exec(body)) !== null) {
       const open = body.indexOf('(', tm.index + tm[1].length - 1);
@@ -599,8 +678,8 @@ export function parseInputPorts(src: string): InputPortsDef[] {
       const trailing = body.slice(close + 1, body.indexOf('\n', close) === -1 ? body.length : body.indexOf('\n', close));
       switch (tm[1]) {
         case 'PORT_INCLUDE': def.include = args[0].trim(); break;
-        case 'PORT_START': port = { tag: unquote(args[0]), fields: [] }; def.ports.push(port); dip = null; break;
-        case 'PORT_MODIFY': port = { tag: unquote(args[0]), modify: true, fields: [] }; def.ports.push(port); dip = null; break;
+        case 'PORT_START': port = { tag: resolveStr(args[0]), fields: [] }; def.ports.push(port); dip = null; break;
+        case 'PORT_MODIFY': port = { tag: resolveStr(args[0]), modify: true, fields: [] }; def.ports.push(port); dip = null; break;
         case 'PORT_BIT': {
           if (!port) break;
           const mods = [...trailing.matchAll(/PORT_\w+(?:\([^)]*\))?/g)].map(x => x[0]);
@@ -614,6 +693,7 @@ export function parseInputPorts(src: string): InputPortsDef[] {
           dip = null;
           break;
         }
+        case 'PORT_SERVICE_DIPLOC': // service dip with a DIPLOC arg — same semantics
         case 'PORT_SERVICE': {
           if (!port) break;
           port.fields.push({ kind: 'service', mask: evalExpr(args[0]) ?? 0, activeLow: args[1].includes('LOW') });
@@ -765,4 +845,11 @@ export function parseGfxDecodes(src: string, consts: Record<string, number> = {}
 
 export function parseIncludes(src: string): string[] {
   return [...src.matchAll(/^#include\s+"([^"]+)"/gm)].map(m => m[1]);
+}
+
+/** DECLARE_DEVICE_TYPE(IREM_M52_SOUNDC_AUDIO, m52_soundc_audio_device) -> macro name to class. */
+export function parseDeviceTypeDecls(src: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const m of src.matchAll(/DECLARE_DEVICE_TYPE\(\s*(\w+)\s*,\s*(\w+)\s*\)/g)) out[m[1]] = m[2];
+  return out;
 }

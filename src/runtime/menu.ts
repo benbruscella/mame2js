@@ -27,6 +27,12 @@ interface GameEntry {
   family: string;
   hasRom: boolean;
   hasArt: boolean;
+  // "learn" modal facts (from the driver header + MAME git history)
+  driverFile?: string;
+  license?: string;
+  copyrightHolders?: string;
+  gitHistory?: { firstCommit: string; lastCommit: string; commits: number; contributors: number; topAuthors: string[] };
+  hasHistory?: boolean;
 }
 
 // Deterministic covers: emulate exactly COVER_FRAMES frames (deep into
@@ -79,7 +85,7 @@ export async function runMenu(): Promise<void> {
   wall.appendChild(empty);
 
   const hint = el('div', 'text-align:center;color:#4b5384;padding:28px;font-size:12px');
-  hint.textContent = '↑↓←→ browse · Enter play · type to search · in-game: Esc returns here';
+  hint.textContent = '↑↓←→ browse · Enter/click: the story of the game (then Play) · type to search · in-game: Esc returns here';
   root.appendChild(hint);
 
   interface BoxRef { entry: GameEntry; box: HTMLElement; visible: boolean }
@@ -124,7 +130,7 @@ export async function runMenu(): Promise<void> {
 
   const launch = () => {
     const vis = boxes.filter(b => b.visible);
-    if (vis[selected]) location.href = `?g=${encodeURIComponent(vis[selected].entry.game)}`;
+    if (vis[selected]) void openLearnModal(vis[selected].entry);
   };
 
   addEventListener('keydown', ev => {
@@ -181,7 +187,8 @@ export async function runMenu(): Promise<void> {
 
     box.addEventListener('mouseenter', () => { box.style.transform = 'translateY(-12px) scale(1.04)'; });
     box.addEventListener('mouseleave', () => { box.style.transform = ''; box.style.outline = 'none'; });
-    box.addEventListener('click', () => { location.href = `?g=${encodeURIComponent(entry.game)}`; });
+    // education first: the box opens the game's history card; Play lives inside
+    box.addEventListener('click', () => { void openLearnModal(entry); });
 
     // shelf plank under each box — planks in a row join into one shelf
     const plank = el('div', `width:350px;height:16px;margin-top:0;border-radius:2px;
@@ -190,6 +197,179 @@ export async function runMenu(): Promise<void> {
 
     item.append(box, plank);
     return item;
+  }
+
+  // --- "learn about this MAME game" modal ---------------------------------------
+
+  async function openLearnModal(entry: GameEntry): Promise<void> {
+    const game = encodeURIComponent(entry.game);
+    const backdrop = el('div', `position:fixed;inset:0;z-index:50;background:rgba(3,4,10,.86);
+      display:flex;align-items:center;justify-content:center;padding:24px`);
+    const card = el('div', `max-width:880px;width:100%;max-height:92vh;border-radius:12px;
+      background:linear-gradient(#141838,#0c0f24);border:2px solid #f2c200;
+      box-shadow:0 24px 80px rgba(0,0,0,.8);font-size:14px;line-height:1.55;
+      display:flex;flex-direction:column;overflow:hidden`);
+    backdrop.appendChild(card);
+    // everything scrolls inside this; the CTA footer below stays pinned
+    const scroller = el('div', 'overflow:auto;flex:1;min-height:0');
+    card.appendChild(scroller);
+
+    const img = (src: string, css: string): HTMLImageElement => {
+      const i = document.createElement('img');
+      i.src = src;
+      i.style.cssText = `display:block;${css}`;
+      i.addEventListener('error', () => i.remove());
+      return i;
+    };
+
+    // marquee light-box across the top — the sign that pulled you across the arcade
+    scroller.appendChild(img(`/artwork/media/marquees/${game}.png`,
+      `width:100%;max-height:140px;object-fit:contain;border-radius:10px 10px 0 0;
+       background:radial-gradient(ellipse at center,#1c2150,#0a0c1e);
+       box-shadow:inset 0 -12px 24px rgba(0,0,0,.5)`));
+
+    const inner = el('div', 'padding:22px 30px 26px');
+    scroller.appendChild(inner);
+
+    // hero spread: flyer · title/facts · cabinet
+    const hero = el('div', 'display:flex;gap:22px;align-items:flex-start;margin-bottom:18px');
+    const flyer = img(`/artwork/covers/${game}.png`,
+      'width:170px;border-radius:6px;box-shadow:0 10px 30px rgba(0,0,0,.65);flex-shrink:0;transform:rotate(-1.5deg)');
+    hero.appendChild(flyer);
+    const heroText = el('div', 'flex:1;min-width:220px');
+    const h = el('div', 'font-size:30px;font-weight:800;color:#f2c200;line-height:1.15;margin-bottom:2px');
+    h.textContent = entry.fullname;
+    const subh = el('div', 'color:#7f8ac9;font-size:15px;margin-bottom:10px');
+    subh.textContent = `${entry.manufacturer} · ${entry.year}`;
+    heroText.append(h, subh);
+    hero.appendChild(heroText);
+    const cab = img(`/artwork/media/cabinets/${game}.png`,
+      'width:120px;border-radius:6px;box-shadow:0 10px 30px rgba(0,0,0,.65);flex-shrink:0;transform:rotate(1.5deg)');
+    hero.appendChild(cab);
+    inner.appendChild(hero);
+
+    // "running in your browser" — the deterministic emulated screenshot
+    const snap = localStorage.getItem(COVER_KEY(entry.game));
+    if (snap) {
+      const wrap = el('div', 'flex-shrink:0;text-align:center');
+      wrap.appendChild(img(snap,
+        'width:120px;image-rendering:pixelated;border:2px solid #2a3160;border-radius:4px'));
+      const cap = el('div', 'color:#4b5384;font-size:9px;letter-spacing:1.2px;margin-top:4px');
+      cap.textContent = 'LIVE FROM YOUR BROWSER';
+      wrap.appendChild(cap);
+      hero.insertBefore(wrap, cab);
+    }
+
+    const section = (title: string, host: HTMLElement = inner): HTMLElement => {
+      const s = el('div', 'margin-bottom:14px');
+      const t = el('div', `font-weight:700;color:#9fb0ff;letter-spacing:1.5px;font-size:11px;
+        margin-bottom:6px;border-bottom:1px solid #232a58;padding-bottom:4px`);
+      t.textContent = title.toUpperCase();
+      s.appendChild(t);
+      host.appendChild(s);
+      return s;
+    };
+    const row = (parent: HTMLElement, label: string, value: string) => {
+      const r = el('div', 'display:flex;gap:10px;margin:2px 0');
+      const l = el('span', 'color:#6b76b8;min-width:120px;flex-shrink:0');
+      l.textContent = label;
+      const v = el('span', 'color:#e8eaf6');
+      v.textContent = value;
+      r.append(l, v);
+      parent.appendChild(r);
+    };
+
+    // machine + people side by side — the tech spec panel of the magazine spread
+    const cols = el('div', 'display:flex;gap:26px;flex-wrap:wrap;margin-bottom:4px');
+    inner.appendChild(cols);
+    const colA = el('div', 'flex:1;min-width:280px');
+    const colB = el('div', 'flex:1;min-width:280px');
+    cols.append(colA, colB);
+
+    // The machine — real facts from the generated config (the knowledge graph)
+    const hw = section('The machine (extracted from the MAME driver)', colA);
+    try {
+      const cfg = await fetch(`/${game}/config.json`).then(r => r.json());
+      for (const cpu of cfg.board.cpus) {
+        row(hw, cpu === cfg.board.cpus[0] ? 'Processors' : '', `${(cpu.type ?? 'z80').toUpperCase()} "${cpu.tag}" @ ${(cpu.clock / 1e6).toFixed(3)} MHz`);
+      }
+      const s = cfg.sound ?? {};
+      row(hw, 'Sound', s.kind === 'none' ? 'discrete analog board' : `${s.kind}${s.chips ? ` × ${s.chips}` : ''}${s.clock ? ` @ ${(s.clock / 1e6).toFixed(3)} MHz` : ''}`);
+      const sc = cfg.board.screen;
+      row(hw, 'Screen', `${sc.width}×${sc.height} @ ${sc.refresh.toFixed(2)} Hz${sc.rotate ? ` · rotated ${sc.rotate}°` : ''}`);
+      row(hw, 'ROM chips', `${cfg.roms.reduce((n: number, r: { loads: unknown[] }) => n + r.loads.length, 0)} across ${cfg.roms.length} regions`);
+    } catch { row(hw, 'Machine', 'config not generated yet'); }
+
+    // The people — driver credits + git history
+    const ppl = section('The MAME driver — the people who reverse-engineered it', colB);
+    if (entry.driverFile) row(ppl, 'Driver source', entry.driverFile);
+    if (entry.copyrightHolders) row(ppl, 'Written by', entry.copyrightHolders);
+    if (entry.license) row(ppl, 'License', entry.license);
+    if (entry.gitHistory) {
+      const gh = entry.gitHistory;
+      row(ppl, 'History', `${gh.commits} commits by ${gh.contributors} contributors, ${gh.firstCommit.slice(0, 4)}–${gh.lastCommit.slice(0, 4)}`);
+      row(ppl, 'Top contributors', gh.topAuthors.join(', '));
+    }
+
+    // The story — Gaming History write-up (arcade-history.com, attributed),
+    // split on its own "- TRIVIA -" style delimiters into a readable spread:
+    // the intro shows in full, each named chapter folds open on click.
+    if (entry.hasHistory) {
+      const story = section('The story');
+      void fetch(`/${game}/history.txt`).then(r => r.ok ? r.text() : '').then(t => {
+        if (!t) { story.remove(); return; }
+        const parts = t.split(/^- ([A-Z][A-Z0-9 .&''/-]{2,}) -\s*$/m);
+        const intro = el('div', 'white-space:pre-wrap;color:#c9cde8;font-size:14.5px');
+        // drop the "arcade video game published NN years ago" boilerplate line
+        intro.textContent = parts[0].trim().replace(/^.*?\n\n/s, m => /published \d+ years ago/.test(m) ? '' : m);
+        story.appendChild(intro);
+        for (let i = 1; i < parts.length; i += 2) {
+          const name = parts[i].trim();
+          const text = (parts[i + 1] ?? '').trim();
+          if (!text) continue;
+          const chap = el('details', 'margin-top:10px;border:1px solid #232a58;border-radius:8px;overflow:hidden');
+          const sum = document.createElement('summary');
+          sum.style.cssText = `cursor:pointer;padding:8px 14px;font-weight:700;letter-spacing:1.5px;
+            font-size:11px;color:#f2c200;background:#171c40;list-style:none;user-select:none`;
+          sum.textContent = `◆ ${name}`;
+          const bd = el('div', 'white-space:pre-wrap;color:#c9cde8;padding:10px 14px');
+          bd.textContent = text;
+          chap.append(sum, bd);
+          story.appendChild(chap);
+        }
+        const attr = el('div', 'color:#4b5384;font-size:11px;margin-top:8px');
+        attr.textContent = 'Story courtesy of Gaming History (arcade-history.com)';
+        story.appendChild(attr);
+      });
+    }
+
+    // CTA footer — pinned below the scroller so Play is always one click away
+    const links = el('div', `display:flex;gap:12px;flex-wrap:wrap;align-items:center;flex-shrink:0;
+      padding:14px 30px;border-top:1px solid #232a58;background:rgba(10,12,30,.92);
+      border-radius:0 0 10px 10px;box-shadow:0 -8px 24px rgba(0,0,0,.35)`);
+    const mkBtn = (text: string, href: string, solid: boolean) => {
+      const a = document.createElement('a');
+      a.href = href;
+      a.textContent = text;
+      a.style.cssText = `padding:9px 18px;border-radius:8px;font-weight:700;text-decoration:none;
+        ${solid ? 'background:#f2c200;color:#1b1b1b' : 'border:2px solid #2a3160;color:#9fb0ff'}`;
+      return a;
+    };
+    links.appendChild(mkBtn('▶ Play', `?g=${game}`, true));
+    const viewer = mkBtn('Explore the knowledge graph', `/${game}/viewer.html`, false);
+    viewer.target = '_blank';
+    links.appendChild(viewer);
+    const dossier = mkBtn('Full dossier (markdown)', `/${game}/README.md`, false);
+    dossier.target = '_blank';
+    links.appendChild(dossier);
+    card.appendChild(links);
+
+    const close = () => { backdrop.remove(); removeEventListener('keydown', onKey, true); };
+    const onKey = (ev: KeyboardEvent) => { if (ev.key === 'Escape') { ev.stopPropagation(); close(); } };
+    backdrop.addEventListener('click', ev => { if (ev.target === backdrop) close(); });
+    addEventListener('keydown', onKey, true);
+    document.body.appendChild(backdrop);
+    (links.firstChild as HTMLElement | null)?.focus?.(); // Enter = Play
   }
 
   // --- cover art -----------------------------------------------------------------

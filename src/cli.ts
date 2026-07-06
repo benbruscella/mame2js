@@ -35,7 +35,7 @@ const game = command === 'graph' ? positional[1] : positional[0];
 const serveOnly = !game && ('serve' in opts || argv.includes('--serve'));
 if (!game && !serveOnly) usage();
 
-const outRoot = resolve(opts.out ?? join(projectRoot, 'out'));
+const outRoot = resolve(opts.out ?? join(projectRoot, 'dist'));
 const mameSrc = serveOnly ? '' : resolve(opts['mame-src'] ?? process.env.MAME_SRC ?? detectMameSrc());
 
 function detectMameSrc(): string {
@@ -61,7 +61,8 @@ function findDriverFile(game: string): string {
   }
   if (cache[game] && existsSync(join(mameSrc, cache[game]))) return join(mameSrc, cache[game]);
 
-  const gameRe = new RegExp(`^\\s*GAME[XL]?\\(\\s*\\d{4},\\s*${game}\\s*,`, 'm');
+  // rows may carry a leading /* NNN */ index comment (mw8080bw.cpp style)
+  const gameRe = new RegExp(`^\\s*(?:/\\*[^*]*\\*/\\s*)?GAME[XL]?\\(\\s*\\d{4},\\s*${game}\\s*,`, 'm');
   const root = join(mameSrc, 'src/mame');
   const stack = [root];
   while (stack.length) {
