@@ -4,7 +4,17 @@
 // References: MAME src/devices/sound/ay8910.cpp/.h (modern, AY type) and
 // the classic MAME 0.121 ay8910.c volume table — see ay8910.ts header.
 
-import { AY8910, AY8910_VOL_TABLE, renderBank } from './ay8910.ts';
+import {
+  AY8910,
+  AY8910_VOL_TABLE,
+  renderBank,
+  konamiFilterCaps,
+  lowpass3RCoeff,
+  rcLowPass,
+  KONAMI_FILTER_R1,
+  KONAMI_FILTER_R2,
+  KONAMI_FILTER_R3,
+} from './ay8910.ts';
 
 // Gyruss: XTAL(14'318'181) / 8 ≈ 1.789772 MHz per chip (five chips).
 const CLOCK = 1789772;
@@ -625,6 +635,183 @@ function maxAbs(out: Float32Array): number {
   let unchanged = true;
   for (const s of out) if (Math.abs(s - expected) > 1e-6) unchanged = false;
   check('bank: offsets beyond the last chip are ignored', unchanged);
+}
+
+// ---------------------------------------------------------------------------
+// (w) renderChannels: per-channel rendering (worklet RC-filter path)
+{
+  // channel isolation: tone programmed on A only appears on channel 0
+  const chip = new AY8910(CLOCK);
+  chip.writeReg(7, 0x3e); // tone A enabled only, noise off everywhere
+  setTonePeriod(chip, 0, 100);
+  chip.writeReg(8, 0x0f);
+  const o0 = new Float32Array(8192);
+  const o1 = new Float32Array(8192);
+  const o2 = new Float32Array(8192);
+  chip.renderChannels(o0, o1, o2);
+  check('renderChannels: tone on A appears on channel 0 (full scale square)',
+    Math.abs(maxAbs(o0) - 1) < 1e-6 && Math.abs(measurePeriod(o0) - 200) < 0.5,
+    `maxAbs=${maxAbs(o0).toFixed(6)}, period=${measurePeriod(o0).toFixed(2)}`);
+  // B/C are gated high (tone+noise disabled) at volume 0 -> exactly 0
+  check('renderChannels: channels 1/2 silent (volume 0)',
+    maxAbs(o1) === 0 && maxAbs(o2) === 0,
+    `maxAbs1=${maxAbs(o1)}, maxAbs2=${maxAbs(o2)}`);
+
+  // same for B and C
+  for (const [ch, enableMask, volReg] of [[1, 0x3d, 9], [2, 0x3b, 10]] as const) {
+    const c = new AY8910(CLOCK);
+    c.writeReg(7, enableMask);
+    setTonePeriod(c, ch, 100);
+    c.writeReg(volReg, 0x0f);
+    const outs = [new Float32Array(8192), new Float32Array(8192), new Float32Array(8192)];
+    c.renderChannels(outs[0], outs[1], outs[2]);
+    const others = [0, 1, 2].filter(x => x !== ch);
+    check(`renderChannels: tone on ${'ABC'[ch]} isolated to channel ${ch}`,
+      Math.abs(measurePeriod(outs[ch]) - 200) < 0.5 &&
+        maxAbs(outs[others[0]]) === 0 && maxAbs(outs[others[1]]) === 0,
+      `period=${measurePeriod(outs[ch]).toFixed(2)}`);
+  }
+}
+
+// (x) renderChannels sums to exactly what render() produces (bit-identical
+// generator state advance; render() == (ch0 + ch1 + ch2) / 3)
+{
+  const program = (chip: AY8910) => {
+    chip.writeReg(7, 0x30); // tones on, noise A on
+    chip.writeReg(6, 3);
+    setTonePeriod(chip, 0, 123);
+    setTonePeriod(chip, 1, 217);
+    setTonePeriod(chip, 2, 71);
+    chip.writeReg(8, 0x0d);
+    chip.writeReg(9, 0x10); // envelope mode
+    chip.writeReg(10, 0x0a);
+    chip.writeReg(11, 0x40);
+    chip.writeReg(13, 0x0e);
+  };
+  const cMono = new AY8910(CLOCK);
+  const cSplit = new AY8910(CLOCK);
+  program(cMono);
+  program(cSplit);
+  const mono = new Float32Array(8192);
+  cMono.render(mono);
+  const s0 = new Float32Array(8192);
+  const s1 = new Float32Array(8192);
+  const s2 = new Float32Array(8192);
+  cSplit.renderChannels(s0, s1, s2);
+  let same = true;
+  for (let i = 0; i < mono.length; i++) {
+    if (Math.fround((s0[i] + s1[i] + s2[i]) * (1 / 3)) !== mono[i]) same = false;
+  }
+  check('renderChannels channels sum (1/3) bit-matches render()', same);
+}
+
+// ---------------------------------------------------------------------------
+// (y) Konami RC filter select decode (junofrst.cpp portB_w: two bits per
+// channel, bit0 = 47000 pF, bit1 = 220000 pF, summed)
+{
+  const eq = (a: number[], b: number[]) => a.every((v, i) => v === b[i]);
+  check('filter caps 0x00 -> all bypass', eq(konamiFilterCaps(0x00), [0, 0, 0]));
+  check('filter caps 0x15 -> 47000 pF on all channels',
+    eq(konamiFilterCaps(0x15), [47000, 47000, 47000]));
+  check('filter caps 0x2a -> 220000 pF on all channels',
+    eq(konamiFilterCaps(0x2a), [220000, 220000, 220000]));
+  check('filter caps 0x3f -> 267000 pF (both) on all channels',
+    eq(konamiFilterCaps(0x3f), [267000, 267000, 267000]));
+  check('filter caps 0x39 -> per-channel 47000/220000/267000',
+    eq(konamiFilterCaps(0x39), [47000, 220000, 267000]),
+    `[${konamiFilterCaps(0x39).join(',')}]`);
+  check('filter caps ignore bits 6-7', eq(konamiFilterCaps(0xc0), [0, 0, 0]));
+}
+
+// (z) LOWPASS_3R coefficient (flt_rc.cpp recalc):
+// Req = R1*(R2+R3)/(R1+R2+R3); k = 1 - exp(-1/(Req*C)/rate); C=0 -> 1
+{
+  const rate = CLOCK / 8;
+  check('lowpass3RCoeff C=0 is exactly 1 (bypass)',
+    lowpass3RCoeff(KONAMI_FILTER_R1, KONAMI_FILTER_R2, KONAMI_FILTER_R3, 0, rate) === 1);
+
+  const req = (1000 * (2200 + 200)) / (1000 + 2200 + 200); // 705.882... ohm
+  for (const pf of [47000, 220000, 267000]) {
+    const expect = 1 - Math.exp(-1 / (req * pf * 1e-12) / rate);
+    const got = lowpass3RCoeff(KONAMI_FILTER_R1, KONAMI_FILTER_R2, KONAMI_FILTER_R3, pf, rate);
+    check(`lowpass3RCoeff ${pf} pF matches flt_rc formula`,
+      Math.abs(got - expect) < 1e-12 && got > 0 && got < 1,
+      `k=${got.toFixed(6)}`);
+  }
+  const k47 = lowpass3RCoeff(KONAMI_FILTER_R1, KONAMI_FILTER_R2, KONAMI_FILTER_R3, 47000, rate);
+  const k220 = lowpass3RCoeff(KONAMI_FILTER_R1, KONAMI_FILTER_R2, KONAMI_FILTER_R3, 220000, rate);
+  check('bigger cap -> smaller k (lower cutoff)', k220 < k47,
+    `k47=${k47.toFixed(4)}, k220=${k220.toFixed(4)}`);
+}
+
+// (aa) filter attenuation, end to end on a chip channel: a high-frequency
+// square through the 0.22 uF selection loses measurably more amplitude than
+// through 0.047 uF; bypass is bit-identical to the unfiltered channel
+{
+  const rate = CLOCK / 8;
+  const renderTone = () => {
+    const chip = new AY8910(CLOCK);
+    chip.writeReg(7, 0x3e);
+    setTonePeriod(chip, 0, 5); // clock/(16*5) ~ 22.4 kHz square
+    chip.writeReg(8, 0x0f);
+    const o0 = new Float32Array(16384);
+    const o1 = new Float32Array(16384);
+    const o2 = new Float32Array(16384);
+    chip.renderChannels(o0, o1, o2);
+    return o0;
+  };
+  const settledAmp = (buf: Float32Array) => {
+    let m = 0;
+    for (let i = buf.length >> 1; i < buf.length; i++) m = Math.max(m, Math.abs(buf[i]));
+    return m;
+  };
+
+  const raw = renderTone();
+
+  const via = (pf: number) => {
+    const buf = renderTone();
+    const k = lowpass3RCoeff(KONAMI_FILTER_R1, KONAMI_FILTER_R2, KONAMI_FILTER_R3, pf, rate);
+    rcLowPass(buf, k, 0);
+    return buf;
+  };
+  const f47 = via(47000);   // cutoff ~4.8 kHz
+  const f220 = via(220000); // cutoff ~1.0 kHz
+
+  const a0 = settledAmp(raw);
+  const a47 = settledAmp(f47);
+  const a220 = settledAmp(f220);
+  check('0.047 uF attenuates a 22 kHz square', a47 < a0 * 0.5,
+    `raw=${a0.toFixed(3)}, 47nF=${a47.toFixed(3)}`);
+  check('0.22 uF attenuates much more than 0.047 uF', a220 < a47 * 0.5,
+    `47nF=${a47.toFixed(3)}, 220nF=${a220.toFixed(3)}`);
+
+  // bypass (C=0 -> k=1, filter skipped) leaves the channel bit-identical
+  const bypass = renderTone();
+  const kBypass = lowpass3RCoeff(KONAMI_FILTER_R1, KONAMI_FILTER_R2, KONAMI_FILTER_R3, 0, rate);
+  if (kBypass < 1) rcLowPass(bypass, kBypass, 0); // worklet path: k=1 skips
+  let identical = true;
+  for (let i = 0; i < raw.length; i++) if (bypass[i] !== raw[i]) identical = false;
+  check('bypass (C=0) leaves the channel bit-identical', identical);
+}
+
+// (ab) rcLowPass streaming: memory carried across blocks == one long block
+{
+  const rate = CLOCK / 8;
+  const k = lowpass3RCoeff(KONAMI_FILTER_R1, KONAMI_FILTER_R2, KONAMI_FILTER_R3, 220000, rate);
+  const src = new Float32Array(4096);
+  for (let i = 0; i < src.length; i++) src[i] = ((i >> 6) & 1) ? 1 : -1;
+
+  const whole = src.slice();
+  rcLowPass(whole, k, 0);
+
+  const chunked = src.slice();
+  let mem = 0;
+  for (let off = 0; off < chunked.length; off += 256) {
+    mem = rcLowPass(chunked.subarray(off, off + 256), k, mem);
+  }
+  let same = true;
+  for (let i = 0; i < whole.length; i++) if (whole[i] !== chunked[i]) same = false;
+  check('rcLowPass chunked blocks match one long block', same);
 }
 
 // ---------------------------------------------------------------------------

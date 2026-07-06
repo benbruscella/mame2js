@@ -10,7 +10,9 @@
 //  - porta_r (AY3 port A): timer[(audioCycles / 1024) % 10] with the
 //    gyruss.cpp:338 table
 //  - mainlatch: Q0 nmi mask, Q2/Q3 coin counters, Q5 flip screen
-//  - AY1/AY2 port B write = RC filter switching (accepted, not modeled)
+//  - AY1/AY2 port B write (reg 15) = per-channel RC filter switching
+//    (gyruss.cpp:753/761 wire port_b_write_callback to filter_w<0>/<1> on
+//    ay1/ay2 only), forwarded to the worklet as offsets 0x90/0x91
 
 import { Z80 } from '../z80.ts';
 import { Konami1 } from '../konami1.ts';
@@ -96,6 +98,10 @@ export class GyrussBoard implements Board {
       registry.write[`ay${i + 1}.data_w`] = (_a, _o, d) => {
         this.ays[chip].writeReg(this.ayAddr[chip], d);
         sinks.soundWrite(chip * 16 + this.ayAddr[chip], d);
+        // reg 15 = port B: on ay1/ay2 (chips 0/1) the port drives the
+        // switchable RC low-pass net (gyruss.cpp filter_w<0>/<1>); tell the
+        // worklet to reprogram that chip's filters (offset 0x90 + chip)
+        if (this.ayAddr[chip] === 15 && chip < 2) sinks.soundWrite(0x90 + chip, d);
       };
       registry.read[`ay${i + 1}.data_r`] = () => this.ays[chip].readReg(this.ayAddr[chip]);
     }
@@ -136,9 +142,9 @@ export class GyrussBoard implements Board {
     this.fbHeight = config.screen.height;
     this.video = new GyrussVideo({
       regions,
-      videoram: shares['m_videoram'] ?? new Uint8Array(0x400),
-      colorram: shares['m_colorram'] ?? new Uint8Array(0x400),
-      spriteram: shares['m_spriteram'] ?? new Uint8Array(0xc0),
+      videoram: shares['videoram'] ?? shares['m_videoram'] ?? new Uint8Array(0x400),
+      colorram: shares['colorram'] ?? shares['m_colorram'] ?? new Uint8Array(0x400),
+      spriteram: shares['spriteram'] ?? shares['m_spriteram'] ?? new Uint8Array(0xc0),
     });
 
     this.reset();

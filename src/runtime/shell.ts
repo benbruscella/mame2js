@@ -181,7 +181,7 @@ export async function runShell(cfg: ShellConfig): Promise<void> {
     ).then(() => {
       // per-core master gains: wsg = MAME route gain 0.90*10/16; the AY bank
       // runs hot against the others — tamed to sit level with them
-      const VOLUMES: Record<string, number> = { wsg: 0.5625, ay8910: 0.55 };
+      const VOLUMES: Record<string, number> = { wsg: 0.5625, ay8910: 0.7 };
       audio.setVolume(VOLUMES[cfg.sound.kind] ?? 1);
     }).catch(err => console.warn('audio unavailable:', err));
     const resumeAudio = () => audio.resume();

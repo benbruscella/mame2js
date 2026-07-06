@@ -11,7 +11,8 @@
 //    VRAM, triggered by the 4th byte; bit0 of the source = copy/clear
 //  - sh_irqtrigger_w: 0→1 edge = HOLD_LINE IM1 IRQ to the sound Z80
 //  - AY port A read: audio-cycle timer (cycles/512 & 0x0f) << 4 | i8039
-//    status nibble; port B write = RC filter select (accepted, not modeled)
+//    status nibble; port B write (AY reg 15) = per-channel RC filter select
+//    (junofrst.cpp portB_w), forwarded to the ay8910 worklet as offset 0x90
 //  - audio 0x6000 asserts the i8039 INT line; the MCU's P2 write clears it
 //    (bit 7 low) and publishes the status nibble; P1 = DAC sample, sent to
 //    the worklet as offset 0x80
@@ -113,6 +114,10 @@ export class JunofrstBoard implements Board {
         'aysnd.data_w': (_a, _o, d) => {
           this.ay.writeReg(this.ayAddr, d);
           sinks.soundWrite(this.ayAddr, d);
+          // reg 15 = port B = RC filter select (junofrst.cpp wires portB_w
+          // to the AY's IOB output): tell the worklet to reprogram chip 0's
+          // per-channel low-pass (protocol offset 0x90 + chip)
+          if (this.ayAddr === 15) sinks.soundWrite(0x90, d);
         },
         'soundlatch2.write': (_a, _o, d) => { this.soundlatch2 = d; },
         'junofrst_state.i8039_irq_w': () => this.mcu.setIrqLine(true),

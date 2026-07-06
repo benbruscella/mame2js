@@ -227,78 +227,176 @@ export class AY8910 {
     return this.regs[reg] & READ_MASK[reg];
   }
 
+  // per-sample channel outputs produced by tick() (±volTable[level] each)
+  private ch0 = 0;
+  private ch1 = 0;
+  private ch2 = 0;
+
   /**
-   * Fill `out` with the next out.length mono samples in [-1, 1] at the
-   * native rate. Direct port of ay8910_device::sound_stream_update
-   * (ay8910.cpp ~1057-1200), non-expanded AY path, with the mono mix and
-   * per-channel DC centering described in the header.
+   * Advance all generators by one native sample and latch the three
+   * channel outputs (±volTable[level] each, full per-channel scale) into
+   * ch0/ch1/ch2. Direct port of ay8910_device::sound_stream_update
+   * (ay8910.cpp ~1057-1200), non-expanded AY path, with the per-channel
+   * DC centering described in the header.
    */
-  render(out: Float32Array): void {
-    const n = out.length;
+  private tick(): void {
     const tones = this.tones;
     const table = AY8910_VOL_TABLE;
+    const enable = this.regs[AY_ENABLE];
+    const noisePeriod = this.regs[6] & 0x1f;
 
-    for (let i = 0; i < n; i++) {
-      const enable = this.regs[AY_ENABLE];
-      const noisePeriod = this.regs[6] & 0x1f;
-
-      // --- tone generators (half-period toggle via 5-bit duty counter) ---
-      for (let ch = 0; ch < 3; ch++) {
-        const tone = tones[ch];
-        const period = tone.period < 1 ? 1 : tone.period; // period 0 == 1
-        tone.count++;
-        while (tone.count >= period) {
-          tone.dutyCycle = (tone.dutyCycle - 1) & 0x1f;
-          tone.output = tone.dutyCycle & 1;
-          tone.count -= period;
-        }
+    // --- tone generators (half-period toggle via 5-bit duty counter) ---
+    for (let ch = 0; ch < 3; ch++) {
+      const tone = tones[ch];
+      const period = tone.period < 1 ? 1 : tone.period; // period 0 == 1
+      tone.count++;
+      while (tone.count >= period) {
+        tone.dutyCycle = (tone.dutyCycle - 1) & 0x1f;
+        tone.output = tone.dutyCycle & 1;
+        tone.count -= period;
       }
+    }
 
-      // --- noise: prescaler halves the rate, then the 17-bit LFSR shifts ---
-      if (++this.countNoise >= noisePeriod) {
-        this.countNoise = 0;
-        this.prescaleNoise ^= 1;
-        if (!this.prescaleNoise) {
-          // noise_rng_tick: input = bit0 ^ bit3, shifted in at bit 16
-          const r = this.rng;
-          this.rng = (r >>> 1) | (((r ^ (r >>> 3)) & 1) << 16);
-        }
+    // --- noise: prescaler halves the rate, then the 17-bit LFSR shifts ---
+    if (++this.countNoise >= noisePeriod) {
+      this.countNoise = 0;
+      this.prescaleNoise ^= 1;
+      if (!this.prescaleNoise) {
+        // noise_rng_tick: input = bit0 ^ bit3, shifted in at bit 16
+        const r = this.rng;
+        this.rng = (r >>> 1) | (((r ^ (r >>> 3)) & 1) << 16);
       }
-      const noiseBit = this.rng & 1;
+    }
+    const noiseBit = this.rng & 1;
 
-      // --- envelope (AY: 16 steps, period counted x2 via m_step = 2) ---
-      if (!this.envHolding) {
-        if (++this.envCount >= this.envPeriod * 2) {
-          this.envCount = 0;
-          this.envStep--;
-          if (this.envStep < 0) {
-            if (this.envHold) {
-              if (this.envAlternate) this.envAttack ^= 0x0f;
-              this.envHolding = 1;
-              this.envStep = 0;
-            } else {
-              // looped an odd number of times: invert the output
-              if (this.envAlternate && (this.envStep & 0x10)) this.envAttack ^= 0x0f;
-              this.envStep &= 0x0f;
-            }
+    // --- envelope (AY: 16 steps, period counted x2 via m_step = 2) ---
+    if (!this.envHolding) {
+      if (++this.envCount >= this.envPeriod * 2) {
+        this.envCount = 0;
+        this.envStep--;
+        if (this.envStep < 0) {
+          if (this.envHold) {
+            if (this.envAlternate) this.envAttack ^= 0x0f;
+            this.envHolding = 1;
+            this.envStep = 0;
+          } else {
+            // looped an odd number of times: invert the output
+            if (this.envAlternate && (this.envStep & 0x10)) this.envAttack ^= 0x0f;
+            this.envStep &= 0x0f;
           }
         }
       }
-      const envVolume = this.envStep ^ this.envAttack;
+    }
+    const envVolume = this.envStep ^ this.envAttack;
 
-      // --- mix: gate = (tone | toneDisable) & (noise | noiseDisable) ---
-      let acc = 0;
-      for (let ch = 0; ch < 3; ch++) {
-        const tone = tones[ch];
-        const gate =
-          (tone.output | ((enable >> ch) & 1)) &
-          (noiseBit | ((enable >> (3 + ch)) & 1));
-        const level = tone.envMode ? envVolume : tone.volume;
-        acc += gate ? table[level] : -table[level];
-      }
-      out[i] = acc * (1 / 3);
+    // --- mix: gate = (tone | toneDisable) & (noise | noiseDisable) ---
+    for (let ch = 0; ch < 3; ch++) {
+      const tone = tones[ch];
+      const gate =
+        (tone.output | ((enable >> ch) & 1)) &
+        (noiseBit | ((enable >> (3 + ch)) & 1));
+      const level = tone.envMode ? envVolume : tone.volume;
+      const v = gate ? table[level] : -table[level];
+      if (ch === 0) this.ch0 = v;
+      else if (ch === 1) this.ch1 = v;
+      else this.ch2 = v;
     }
   }
+
+  /**
+   * Fill `out` with the next out.length mono samples in [-1, 1] at the
+   * native rate (the three channels summed at 1/3 gain).
+   */
+  render(out: Float32Array): void {
+    const n = out.length;
+    for (let i = 0; i < n; i++) {
+      this.tick();
+      out[i] = (this.ch0 + this.ch1 + this.ch2) * (1 / 3);
+    }
+  }
+
+  /**
+   * Per-channel variant of render(): fills the three buffers (equal
+   * lengths) with the raw channel outputs, each spanning [-1, 1]
+   * (±volTable[level], NO 1/3 mix gain). Advances the same generator
+   * state as render() — use one or the other per chip, not both.
+   * Downstream mixers (ay8910-worklet.ts per-channel RC filters) apply
+   * the 1/3 sum themselves: render() == (ch0 + ch1 + ch2) / 3.
+   */
+  renderChannels(out0: Float32Array, out1: Float32Array, out2: Float32Array): void {
+    const n = out0.length;
+    for (let i = 0; i < n; i++) {
+      this.tick();
+      out0[i] = this.ch0;
+      out1[i] = this.ch1;
+      out2[i] = this.ch2;
+    }
+  }
+}
+
+// --------------------------------------------------------------------------
+// Konami switchable RC low-pass (junofrst/gyruss AY port B filter select).
+//
+// Hardware: each AY channel feeds a resistor network with two MCU-switchable
+// capacitors to ground. MAME junofrst.cpp portB_w decodes two bits per
+// channel (bit0 -> 47000 pF, bit1 -> 220000 pF, summed) and programs
+// filter_rc_device LOWPASS_3R with R1=1000, R2=2200, R3=200
+// (src/devices/sound/flt_rc.cpp recalc):
+//   Req = R1*(R2+R3) / (R1+R2+R3)
+//   k   = 1 - exp(-1 / (Req*C) / sampleRate)      (C = 0 -> bypass, k = 1)
+// applied as the one-pole  y += (x - y) * k  per native sample.
+// gyruss.cpp routes the same cap pairs through its discrete net
+// (DISCRETE_RCFILTER_SW); we approximate both boards with the LOWPASS_3R
+// form above.
+
+/** LOWPASS_3R resistor network on the Konami boards (ohms). */
+export const KONAMI_FILTER_R1 = 1000;
+export const KONAMI_FILTER_R2 = 2200;
+export const KONAMI_FILTER_R3 = 200;
+
+/**
+ * Decode an AY port-B filter-select byte (junofrst_state::portB_w /
+ * gyruss_state::filter_w): two bits per channel, bit0 = 47000 pF,
+ * bit1 = 220000 pF, summed. Returns [chA, chB, chC] in picofarads
+ * (0 / 47000 / 220000 / 267000).
+ */
+export function konamiFilterCaps(data: number): [number, number, number] {
+  const caps: [number, number, number] = [0, 0, 0];
+  for (let i = 0; i < 3; i++) {
+    let c = 0;
+    if (data & 1) c += 47000;   // 47000 pF = 0.047 uF
+    if (data & 2) c += 220000;  // 220000 pF = 0.22 uF
+    data >>= 2;
+    caps[i] = c;
+  }
+  return caps;
+}
+
+/**
+ * One-pole coefficient for MAME filter_rc LOWPASS_3R (flt_rc.cpp recalc).
+ * `capPf` in picofarads; returns k for  y += (x - y) * k  at `sampleRate`.
+ * capPf = 0 disables the filter (returns exactly 1 — callers should treat
+ * k === 1 as bypass and skip the filter to stay bit-transparent).
+ */
+export function lowpass3RCoeff(
+  r1: number, r2: number, r3: number, capPf: number, sampleRate: number,
+): number {
+  if (capPf === 0) return 1;
+  const req = (r1 * (r2 + r3)) / (r1 + r2 + r3);
+  return 1 - Math.exp(-1 / (req * capPf * 1e-12) / sampleRate);
+}
+
+/**
+ * Apply the one-pole low-pass in place (flt_rc.cpp stream update,
+ * LOWPASS_3R/LOWPASS branch): memory += (x - memory) * k. Returns the
+ * updated memory (feed it back in on the next block).
+ */
+export function rcLowPass(buf: Float32Array, k: number, memory: number): number {
+  for (let i = 0; i < buf.length; i++) {
+    memory += (buf[i] - memory) * k;
+    buf[i] = memory;
+  }
+  return memory;
 }
 
 /**

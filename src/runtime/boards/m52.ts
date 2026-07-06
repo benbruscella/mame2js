@@ -165,9 +165,9 @@ export class M52Board implements Board {
     this.fbHeight = config.screen.height;
     this.video = new M52Video({
       regions,
-      videoram: shares['m_videoram'] ?? new Uint8Array(0x400),
-      colorram: shares['m_colorram'] ?? new Uint8Array(0x400),
-      spriteram: shares['m_spriteram'] ?? new Uint8Array(0x400),
+      videoram: shares['videoram'] ?? shares['m_videoram'] ?? new Uint8Array(0x400),
+      colorram: shares['colorram'] ?? shares['m_colorram'] ?? new Uint8Array(0x400),
+      spriteram: shares['spriteram'] ?? shares['m_spriteram'] ?? new Uint8Array(0x400),
       scroll: () => this.scroll,
       bgxpos0: () => this.bgxpos[0],
       bgypos0: () => this.bgypos[0],
