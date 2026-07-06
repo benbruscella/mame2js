@@ -582,16 +582,19 @@ if (game) {
     exclude: ['src/**/*.spec.ts'],
   }, null, 2));
 
+  // per-build stamp on the module URL: browsers cache module scripts hard,
+  // and pages' CDN adds 10 min — the query flips both on every deploy
+  const stamp = Date.now().toString(36);
   writeFileSync(join(appDir, 'index.html'), `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>mame2js</title>
+<title>MAME History</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='13' font-size='13'>👾</text></svg>">
 </head>
 <body>
-<script type="module" src="./dist/main.js"></script>
+<script type="module" src="./dist/main.js?v=${stamp}"></script>
 <noscript>mame2js needs JavaScript.</noscript>
 </body>
 </html>
@@ -620,7 +623,7 @@ if (game) {
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='13' font-size='13'>👾</text></svg>">
 </head>
 <body>
-<script type="module" src="./dist/main.js"></script>
+<script type="module" src="./dist/main.js?v=${stamp}"></script>
 <noscript>mame2js needs JavaScript.</noscript>
 </body>
 </html>
