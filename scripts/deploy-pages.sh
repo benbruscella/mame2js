@@ -35,6 +35,12 @@ ART="$ART" node --input-type=module -e '
 
 touch dist/.nojekyll
 
+# custom domain: Pages needs a CNAME file at the branch root, and our
+# force-push would wipe the one GitHub writes — so we own it here
+if [[ -n "${PAGES_DOMAIN:-}" ]]; then
+  printf '%s\n' "$PAGES_DOMAIN" > dist/CNAME
+fi
+
 URL="$(git remote get-url origin)"
 trap 'rm -rf dist/.git' EXIT
 rm -rf dist/.git
