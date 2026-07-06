@@ -43,7 +43,7 @@ attract-mode snapshots composited into the menu covers.
 The knowledge-graph viewer is at **http://localhost:8280/<game>/viewer.html**
 — a self-contained force-directed browser of the extracted source graph
 (search, family filters, node inspector). Also works by just opening
-`out/<game>/viewer.html` as a file.
+`dist/<game>/viewer.html` as a file.
 
 ```sh
 mame2js galaga            # graph -> generate config.json -> (re)build unified app
@@ -65,16 +65,16 @@ MAME C++ driver source                    (src/mame/namco/galaga.cpp, pacman/pac
         │  machine_config (incl. helper call chains) / INPUT_PORTS (incl. polarity
         │  + PORT_CONFNAME) / gfx_layout / GFXDECODE(_SCALE) / constexpr XTAL consts
         ▼
-knowledge graph                           out/<game>/graph.json (+ .cypher for Neo4J,
+knowledge graph                           dist/<game>/graph.json (+ .cypher for Neo4J,
         │                                  + viewer.html — interactive canvas browser)
         │  subgraph reachable from the game node
         ▼
-generated game data                       out/<game>/config.json  (pure data, no compile:
+generated game data                       dist/<game>/config.json  (pure data, no compile:
         │                                  ROM manifest, memory/io-map wiring, screen
         │                                  timing, clocks, sound kind, input polarity,
         │                                  DIP defaults, key bindings, board family)
         ▼
-unified app (out/app)                     ONE compiled copy of the shared runtime
+unified app (dist/app)                     ONE compiled copy of the shared runtime
         │                                  hosts every generated game + the boot menu
         ▼
 shared runtime (src/runtime)              hand-ported, game-agnostic device library:
@@ -130,7 +130,7 @@ library. Cabinet artwork zips in `artwork/` are treated the same way
 ## Knowledge graph in Neo4J (optional)
 
 ```sh
-cypher-shell -u neo4j -p <pass> < out/galaga/graph.cypher
+cypher-shell -u neo4j -p <pass> < dist/galaga/graph.cypher
 ```
 
 The graph's native store is plain JSON; Neo4J is an export, not a dependency.

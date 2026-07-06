@@ -1,7 +1,7 @@
 # The generator (`src/gen/generate.ts`)
 
-Turns the game subgraph into pure data (`out/<game>/config.json` +
-`meta.json`) and (re)builds the **unified app** at `out/app/`. Everything
+Turns the game subgraph into pure data (`dist/<game>/config.json` +
+`meta.json`) and (re)builds the **unified app** at `dist/app/`. Everything
 here is mechanical derivation — if you find yourself hard-coding a game fact
 in the generator, it belongs in the graph (fix the parser) or in a board
 module (if it's behavior).
@@ -9,7 +9,7 @@ module (if it's behavior).
 ## What it emits
 
 ```
-out/
+dist/
 ├── app/                      the ONE compiled app, shared by every game
 │   ├── index.html            loads ./dist/main.js as ES module
 │   ├── tsconfig.json         same flags as the main project; excludes *.spec.ts
@@ -25,7 +25,7 @@ out/
 ```
 
 `generate()` writes the per-game JSON; `buildApp(outRoot)` copies the runtime
-and compiles with `tsc -p out/app` (the project's own node_modules/typescript).
+and compiles with `tsc -p dist/app` (the project's own node_modules/typescript).
 Games are **not compiled** — adding a game after the app is built is just a
 new config.json. tsc failure returns false / sets exit code but leaves
 sources for debugging.
@@ -54,7 +54,7 @@ sources for debugging.
     that tells you exactly what to implement for a new game.
 - **io**: when cpu[0] has an `AS_IO` map, `board.io = { ranges, globalMask? }`
   (pacman: out port 0 = IM2 vector write, global_mask 0xff). Boards build a
-  second `Bus` from it and wire the memory bus's `in`/`out` to it.
+  second `Bus` from it and wire the memory bus's `in`/`dist` to it.
 - **screen**: from the SCREEN device's `set_raw` params:
   width = (hbstart−hbend)/xscale, height = vbstart−vbend,
   refresh = pixclock/(htotal·vtotal), plus vtotal/vbstart/vbend for the
@@ -89,12 +89,12 @@ share the misclatch/06xx skeleton but differ in video and extra customs).
 ## CLI plumbing (`src/cli.ts`)
 
 - Driver discovery scans `<mameSrc>/src/mame/**/*.cpp` for
-  `GAME(\s*year,\s*<name>,` and caches hits in `out/.driver-cache.json`.
+  `GAME(\s*year,\s*<name>,` and caches hits in `dist/.driver-cache.json`.
 - MAME source auto-detection order: parent of mame2js, sibling `../mame`,
   cwd; override `--mame-src` or `$MAME_SRC`.
-- `mame2js --serve` (no game) rebuilds `out/app` and serves everything —
+- `mame2js --serve` (no game) rebuilds `dist/app` and serves everything —
   MAME source not required. With a game, generation runs first.
-- `--serve` starts `src/serve.ts` on :8280 mounting `'' → out/` and
+- `--serve` starts `src/serve.ts` on :8280 mounting `'' → dist/` and
   `/roms → <mame2js>/roms`, plus the dynamic `/games.json` manifest
-  (scans `out/*/meta.json`, flags `hasRom` from roms/). URLs:
+  (scans `dist/*/meta.json`, flags `hasRom` from roms/). URLs:
   `/app/` = boot menu, `/app/?g=<game>` = game, `/<game>/viewer.html` = graph.

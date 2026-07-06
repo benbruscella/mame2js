@@ -35,7 +35,7 @@ const game = command === 'graph' ? positional[1] : positional[0];
 const serveOnly = !game && ('serve' in opts || argv.includes('--serve'));
 if (!game && !serveOnly) usage();
 
-const outRoot = resolve(opts.out ?? join(projectRoot, 'out'));
+const outRoot = resolve(opts.out ?? join(projectRoot, 'dist'));
 const mameSrc = serveOnly ? '' : resolve(opts['mame-src'] ?? process.env.MAME_SRC ?? detectMameSrc());
 
 function detectMameSrc(): string {

@@ -92,5 +92,5 @@ the validator.
 ## Cypher export
 
 `MERGE`-based, idempotent, single `:KG` supertype label + specific label, id
-uniqueness constraint. Load: `cypher-shell -u neo4j -p <pass> < out/galaga/graph.cypher`.
+uniqueness constraint. Load: `cypher-shell -u neo4j -p <pass> < dist/galaga/graph.cypher`.
 No Neo4J driver dependency anywhere — by design.

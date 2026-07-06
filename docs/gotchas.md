@@ -116,6 +116,6 @@ auto-detects MAME source at `../mame` or parent.
 never fetch them. The user's local set: `roms/galaga.zip` ("galaga" = Namco
 rev. B; includes `54xx.bin` MB8844 dump, CRC ee7357e0 — future 54xx LLE).
 
-## 16. `out/.driver-cache.json`
+## 16. `dist/.driver-cache.json`
 Driver discovery caches game→driver-file mappings. If you point at a
 different MAME checkout and things look stale, delete it.
