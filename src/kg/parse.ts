@@ -653,7 +653,9 @@ function expandPortMacros(body: string, macros: TextMacros): string {
             expansion = expansion.replace(new RegExp(`\\b${p}\\b`, 'g'), args[i] ?? '');
           });
         }
-        return expansion;
+        // cpp token pasting: IPT_JOYSTICK_##direction1 -> IPT_JOYSTICK_LEFT
+        // (konamipt.h KONAMI8_* — junofrst lost its LEFT/RIGHT to this once)
+        return expansion.replace(/\s*##\s*/g, '');
       });
     }
     if (!changed) break;

@@ -73,8 +73,15 @@ class Ay8910Processor extends AudioWorkletProcessor {
   private scratch: Float32Array = new Float32Array(CHUNK);
   private nativePos: number = CHUNK; // next unread index; == length => refill
 
-  /** percussion DAC level (zero-order hold), mixed on top of the bank */
+  // --- percussion DAC (i8039 P1) -------------------------------------------
+  // Samples arrive in bursts (the MCU is emulated a frame at a time), so a
+  // plain zero-order hold collapses each frame's drum waveform to its last
+  // byte. Instead: FIFO the bytes and drain them evenly across the output
+  // block, then remove the standing DC offset (the P1 line idles nonzero —
+  // mixing it raw thumps the speaker) with a slow one-pole tracker.
+  private dacQueue: number[] = [];
   private dacLevel: number = 0;
+  private dacDc: number = 0;
 
   constructor() {
     super();
@@ -95,7 +102,8 @@ class Ay8910Processor extends AudioWorkletProcessor {
         case 'write': {
           if (msg.offset === 0x80) {
             // percussion DAC (i8039 P1): unsigned byte -> centered level
-            this.dacLevel = ((msg.data & 0xff) - 128) / 128;
+            this.dacQueue.push(((msg.data & 0xff) - 128) / 128);
+            if (this.dacQueue.length > 4096) this.dacQueue.splice(0, this.dacQueue.length - 4096);
             break;
           }
           const chip = this.chips[msg.offset >> 4];
@@ -126,6 +134,9 @@ class Ay8910Processor extends AudioWorkletProcessor {
     if (this.chips.length === 0) {
       out.fill(0);
     } else {
+      // drain the queued DAC bytes evenly across this output block
+      const dacPerSample = this.dacQueue.length / out.length;
+      let dacPos = 0;
       for (let i = 0; i < out.length; i++) {
         // box-filter decimation: average every native sample this output
         // sample spans. Point-sampling a ~224 kHz square-wave stream down to
@@ -142,7 +153,10 @@ class Ay8910Processor extends AudioWorkletProcessor {
           n++;
         }
         if (n > 0) this.boxAvg = acc / n;
-        out[i] = this.boxAvg + this.dacLevel * DAC_GAIN;
+        dacPos += dacPerSample;
+        while (dacPos >= 1 && this.dacQueue.length) { this.dacLevel = this.dacQueue.shift()!; dacPos -= 1; }
+        this.dacDc += (this.dacLevel - this.dacDc) * 0.0008; // DC blocker
+        out[i] = this.boxAvg + (this.dacLevel - this.dacDc) * DAC_GAIN;
       }
     }
 

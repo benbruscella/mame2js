@@ -17,7 +17,6 @@ import { readZip, crc32 } from './zip.ts';
 import { decodeGfx, type GfxLayout } from './gfx.ts';
 import { loadArtwork } from './artwork.ts';
 import { createBoard } from './boards/index.ts';
-import { loadRomZip, hasRomZip } from './romstore.ts';
 
 interface GameEntry {
   game: string;
@@ -48,9 +47,18 @@ export async function runMenu(): Promise<void> {
   document.title = 'MAME History — the video arcade, transpiled';
   const games: GameEntry[] = await fetch('../games.json').then(r => r.json());
   games.sort((a, b) => a.year.localeCompare(b.year) || a.game.localeCompare(b.game));
-  // ROMs are never server-side: "has a ROM" means the visitor's own browser
-  // remembers a verified drop (romstore) — covers/tile art read from there
-  await Promise.all(games.map(async g => { g.hasRom = await hasRomZip(g.game); }));
+  // NOTHING is cached — no ROM bytes, no derived screenshots (hard user
+  // directive). Purge anything older builds may have stored.
+  try { indexedDB.deleteDatabase('mame2js-roms'); } catch { /* unavailable */ }
+  try {
+    for (const store of [localStorage, sessionStorage]) {
+      for (let i = store.length - 1; i >= 0; i--) {
+        const k = store.key(i);
+        if (k && k.startsWith('mame2js:')) store.removeItem(k);
+      }
+    }
+  } catch { /* storage unavailable */ }
+  for (const g of games) g.hasRom = false; // covers use flyers/placeholders only
 
   const root = el('div', `min-height:100vh;box-sizing:border-box;margin:0;padding:0 0 60px;
     background:linear-gradient(#06070f, #0b0d1d 30%, #10142a);color:#eee;
@@ -534,79 +542,14 @@ export async function runMenu(): Promise<void> {
     roms: { region: string; size: number; loads: { file: string; size: number; offset: number; crc: string }[] }[];
   }
 
-  /** Assemble all ROM regions from the user's remembered drop (never a URL). */
-  async function loadRegions(game: string, cfg: ShellCfg): Promise<Record<string, Uint8Array> | null> {
-    const raw = await loadRomZip(game);
-    if (!raw) return null;
-    const files = await readZip(raw);
-    const byCrc = new Map<number, Uint8Array>();
-    for (const b of files.values()) byCrc.set(crc32(b), b);
-    const regions: Record<string, Uint8Array> = {};
-    for (const spec of cfg.roms) {
-      const bytes = new Uint8Array(spec.size);
-      for (const load of spec.loads) {
-        const f = files.get(load.file.toLowerCase())
-          ?? files.get(load.file.toLowerCase().replace(/_/g, '-'))
-          ?? byCrc.get(parseInt(load.crc, 16) >>> 0);
-        if (f) bytes.set(f.subarray(0, load.size), load.offset);
-      }
-      regions[spec.region] = bytes;
-    }
-    return regions;
+  /** ROMs are never stored: no bytes are available outside a live game page. */
+  async function loadRegions(_game: string, _cfg: ShellCfg): Promise<Record<string, Uint8Array> | null> {
+    return null;
   }
-
-  async function paintTileArt(entry: GameEntry, canvas: HTMLCanvasElement, ctx: CanvasRenderingContext2D): Promise<boolean> {
-    try {
-      const cfg = await fetch(`../${encodeURIComponent(entry.game)}/config.json`).then(r => r.json());
-      const gfxSpec = (cfg.roms as { region: string; size: number; loads: { file: string; size: number; offset: number; crc: string }[] }[])
-        .find(r => r.region === 'gfx1');
-      if (!gfxSpec) return false;
-      const zipBytes = await loadRomZip(entry.game);
-      if (!zipBytes) return false;
-      const files = await readZip(zipBytes);
-      const byCrc = new Map<number, Uint8Array>();
-      for (const b of files.values()) byCrc.set(crc32(b), b);
-      const region = new Uint8Array(gfxSpec.size);
-      for (const load of gfxSpec.loads) {
-        const f = files.get(load.file.toLowerCase())
-          ?? files.get(load.file.toLowerCase().replace(/_/g, '-'))
-          ?? byCrc.get(parseInt(load.crc, 16) >>> 0);
-        if (f) region.set(f.subarray(0, load.size), load.offset);
-      }
-      // decode as generic 2bpp 8x8 tiles (the classic-era common denominator —
-      // this is cover art, not emulation)
-      const layout: GfxLayout = {
-        width: 8, height: 8, total: Math.floor(region.length / 16), planes: 2,
-        planeOffsets: [0, 4], xOffsets: [8 * 8 + 0, 8 * 8 + 1, 8 * 8 + 2, 8 * 8 + 3, 0, 1, 2, 3],
-        yOffsets: [0 * 8, 1 * 8, 2 * 8, 3 * 8, 4 * 8, 5 * 8, 6 * 8, 7 * 8],
-        charIncrement: 16 * 8,
-      };
-      const set = decodeGfx(layout, region);
-      // per-game hue so every box looks distinct
-      let hash = 0;
-      for (const ch of entry.game) hash = (hash * 31 + ch.charCodeAt(0)) >>> 0;
-      const hue = hash % 360;
-      const palette = new Uint32Array([
-        0xff000000, hsl(hue, 90, 55), hsl((hue + 45) % 360, 90, 70), hsl((hue + 90) % 360, 85, 85),
-      ]);
-      const cols = Math.floor(canvas.width / 8);
-      const rows = Math.floor(canvas.height / 8);
-      const img = ctx.createImageData(canvas.width, canvas.height);
-      const px = new Uint32Array(img.data.buffer);
-      for (let t = 0; t < cols * rows; t++) {
-        const tile = t % set.count;
-        const ox = (t % cols) * 8, oy = Math.floor(t / cols) * 8;
-        for (let y = 0; y < 8; y++) {
-          for (let x = 0; x < 8; x++) {
-            px[(oy + y) * canvas.width + ox + x] = palette[set.pixels[tile * 64 + y * 8 + x]];
-          }
-        }
-      }
-      ctx.putImageData(img, 0, 0);
-      return true;
-    } catch {
-      return false;
-    }
+  async function paintTileArt(_entry: GameEntry, _canvas: HTMLCanvasElement, _ctx: CanvasRenderingContext2D): Promise<boolean> {
+    // tile-art covers needed ROM bytes; ROMs are never stored/cached, so
+    // this rung of the cover ladder is permanently retired (flyers rule)
+    return false;
   }
 
   function paintPlaceholder(entry: GameEntry, canvas: HTMLCanvasElement, ctx: CanvasRenderingContext2D): void {
