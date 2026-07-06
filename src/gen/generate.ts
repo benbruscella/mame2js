@@ -244,6 +244,7 @@ export async function generate(graph: KnowledgeGraph, opts: GenerateOptions): Pr
   const portSpecs: { tag: string; init: number }[] = [];
   const bindings: unknown[] = [];
   const dipDefaults: unknown[] = [];
+  const customs: { port: string; mask: number; member: string }[] = [];
   for (const port of ports) {
     const tag = String(port.props.tag);
     let init = 0;
@@ -263,7 +264,18 @@ export async function generate(graph: KnowledgeGraph, opts: GenerateOptions): Pr
         if (activeLow) init |= mask; // released = bit set; active-high released = bit clear
         const type = String(f.props.type ?? '');
         const mods = (f.props.modifiers as string[] | undefined) ?? [];
-        if (mods.includes('PORT_COCKTAIL')) continue; // player-2 cocktail path: unbound
+        // IPT_CUSTOM bits are synthesized from other ports by a named driver
+        // member (invaders reads CONTP1 into IN0/IN1/IN2 bits 4-6) — emit
+        // the wiring fact for the board's member table
+        const customMember = mods
+          .map(m => m.startsWith('PORT_CUSTOM_MEMBER') ? /(\w+)\s*\)*$/.exec(m)?.[1] : undefined)
+          .find(Boolean);
+        if (type === 'IPT_CUSTOM' && customMember) {
+          customs.push({ port: tag, mask, member: customMember });
+          continue;
+        }
+        if (mods.includes('PORT_COCKTAIL')) continue;  // player-2 cocktail path: unbound
+        if (mods.includes('PORT_PLAYER(2)')) continue; // don't double-bind P1 keys
         const keys = KEYMAP[type];
         if (keys) bindings.push({ port: tag, mask, keys, label: type, activeLow });
       }
@@ -279,7 +291,7 @@ export async function generate(graph: KnowledgeGraph, opts: GenerateOptions): Pr
     game: opts.game,
     title,
     family,
-    board: { family, cpus, ranges, ...(io ? { io } : {}), screen, clocks },
+    board: { family, cpus, ranges, ...(io ? { io } : {}), ...(customs.length ? { customs } : {}), screen, clocks },
     sound,
     roms,
     bindings,

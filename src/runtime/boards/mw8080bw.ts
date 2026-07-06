@@ -41,9 +41,38 @@ export class Mw8080bwBoard implements Board {
     const shares: Record<string, Uint8Array> = {};
     this.shares = shares;
 
+    // PORT_CUSTOM_MEMBER implementations (mw8080bw.cpp invaders_state):
+    // the upright control panel port feeds the same bits of IN0/IN1/IN2,
+    // and two dip banks are remapped from fake SW ports. Which member sits
+    // on which port/mask comes from the generated config (config.customs).
+    const members: Record<string, () => number> = {
+      invaders_in0_control_r: () => inputs.read('CONTP1'),
+      invaders_in1_control_r: () => inputs.read('CONTP1'),
+      invaders_in2_control_r: () => inputs.read('CONTP1'), // cocktail P2 unsupported (upright)
+      invaders_sw6_sw7_r: () => inputs.read('SW6SW7'),
+      invaders_sw5_r: () => inputs.read('SW5'),
+    };
+    const shiftOf = (mask: number) => { let s = 0; while (s < 8 && !((mask >> s) & 1)) s++; return s; };
+    const customPort = (tag: string): number => {
+      let v = inputs.read(tag);
+      for (const c of config.customs ?? []) {
+        if (c.port !== tag) continue;
+        const member = members[c.member];
+        if (!member) continue;
+        v = (v & ~c.mask) | ((member() << shiftOf(c.mask)) & c.mask);
+      }
+      return v;
+    };
+
+    const ports = portHandlers(cpu.io?.ranges ?? [], inputs);
+    for (const key of Object.keys(ports)) {
+      const tag = key.slice('port.'.length);
+      if ((config.customs ?? []).some(c => c.port === tag)) ports[key] = () => customPort(tag);
+    }
+
     const registry: HandlerRegistry = {
       read: {
-        ...portHandlers(cpu.io?.ranges ?? [], inputs),
+        ...ports,
         'mb14241.shift_result_r': () => this.shifter.shiftResultR(),
       },
       write: {

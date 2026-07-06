@@ -420,13 +420,14 @@ function parseChain(s: string): { method: string; args: string[] }[] {
   return out;
 }
 
-/** args like [FUNC(cls::meth)] or [m_dev, FUNC(dev_class::meth)] or ["tag", FUNC(...)] */
+/** args like [FUNC(cls::meth)] or [m_dev, FUNC(dev_class::meth)] or ["tag", FUNC(...)];
+ *  templated members (FUNC(m52_state::bgxpos_w<0>)) become method "bgxpos_w_0" */
 function parseHandlerArgs(args: string[]): HandlerRef | undefined {
   const funcArg = args.find(a => a.includes('FUNC('));
   if (!funcArg) return undefined;
-  const fm = /FUNC\(\s*(?:(\w+)::)?(\w+)\s*\)/.exec(funcArg);
+  const fm = /FUNC\(\s*(?:(\w+)::)?(\w+(?:<\d+>)?)\s*\)/.exec(funcArg);
   if (!fm) return undefined;
-  const ref: HandlerRef = { method: fm[2] };
+  const ref: HandlerRef = { method: fm[2].replace(/<(\d+)>/, '_$1') };
   if (fm[1]) ref.deviceClass = fm[1];
   const devArg = args.find(a => !a.includes('FUNC('));
   if (devArg) ref.deviceRef = unquote(devArg.trim());
@@ -508,7 +509,14 @@ export function parseMachineConfigs(
       // device instantiation, possibly wrapped: type_device &var(TYPE(config, ref[, clock]));
       const dm = DEVICE_MACRO_RE.exec(s);
       if (dm && dm[2] !== 'FUNC' && dm[2] !== 'AS_PROGRAM') {
-        const [, localVar, type, refRaw, clockRaw] = dm;
+        const [, localVar, type] = dm;
+        // re-derive the args with balanced parens: the regex's lazy capture
+        // truncates clocks like XTAL(3'579'545) at the inner ')'
+        const open = s.indexOf('(', s.indexOf(type) + type.length - 1);
+        const close = matchParen(s, open);
+        const args = splitArgs(s.slice(open + 1, close)); // [config, ref, ...rest]
+        const refRaw = args[1] ?? dm[3];
+        const clockRaw = args.length > 2 ? args.slice(2).join(', ') : undefined;
         const ref = refRaw.trim();
         const dev: DeviceDef = {
           type,
@@ -627,7 +635,8 @@ function expandPortMacros(body: string, macros: TextMacros): string {
   for (let pass = 0; pass < 5; pass++) {
     let changed = false;
     for (const [name, mac] of Object.entries(macros.ports)) {
-      const re = new RegExp(`\\b${name}\\b(?:\\s*\\(([^()]*)\\))?`, 'g');
+      // args may nest one paren level: KONAMI_COINAGE_LOC(DEF_STR( 1C_1C ), ...)
+      const re = new RegExp(`\\b${name}\\b(?:\\s*\\(((?:[^()]|\\([^()]*\\))*)\\))?`, 'g');
       body = body.replace(re, (whole, argsRaw: string | undefined) => {
         if (mac.params.length && argsRaw === undefined) return whole; // param macro without args: leave
         changed = true;

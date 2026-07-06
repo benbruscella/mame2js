@@ -59,6 +59,9 @@ export interface BoardConfig {
   ranges: RangeSpec[];
   /** cpu[0]'s io space (pacman IM2 vector port) */
   io?: { ranges: RangeSpec[]; globalMask?: number };
+  /** IPT_CUSTOM port bits synthesized by a named driver member (the board
+   * implements members by name; invaders_in1_control_r reads CONTP1) */
+  customs?: { port: string; mask: number; member: string }[];
   screen: { width: number; height: number; refresh: number; vtotal: number; vbstart: number; vbend?: number; rotate: number };
   clocks: { namco06: number; wsg: number };
 }

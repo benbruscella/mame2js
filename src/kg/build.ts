@@ -95,6 +95,10 @@ export function buildGraph(mameSrc: string, driverFile: string): KnowledgeGraph 
   // --- address maps ---
   const maps = parseAddressMaps(combined);
   const mapByName = new Map(maps.map(m => [m.name, m]));
+  // same-class match first: different state classes in one driver file can
+  // reuse map names (m52_state::main_map vs alpha1v_state::main_map)
+  const resolveMap = (cls: string, name: string) =>
+    maps.find(m => m.cls === cls && m.name === name) ?? mapByName.get(name);
   for (const map of maps) {
     const mapId = `map:${map.cls}.${map.name}`;
     const mapProps: Record<string, PropValue> = { cls: map.cls, name: map.name };
@@ -104,7 +108,7 @@ export function buildGraph(mameSrc: string, driverFile: string): KnowledgeGraph 
     g.node('AddressMap', mapId, mapProps);
     g.edge(mapId, fileId, 'DEFINED_IN');
     for (const callee of map.calls) {
-      const target = mapByName.get(callee);
+      const target = resolveMap(map.cls, callee);
       if (target) g.edge(mapId, `map:${target.cls}.${target.name}`, 'INCLUDES_MAP');
     }
     map.ranges.forEach((r, i) => {
@@ -154,7 +158,7 @@ export function buildGraph(mameSrc: string, driverFile: string): KnowledgeGraph 
     // pacman). The generator resolves patches along the game's CALLS chain.
     for (const patch of cfg.patches) {
       for (const [space, mapName] of Object.entries(patch.addrMaps)) {
-        const target = mapByName.get(mapName);
+        const target = resolveMap(cfg.cls, mapName);
         if (!target) continue;
         g.edge(cfgId, `map:${target.cls}.${target.name}`, 'PATCHES_MAP', { space, deviceTag: patch.tag });
       }
@@ -188,7 +192,7 @@ export function buildGraph(mameSrc: string, driverFile: string): KnowledgeGraph 
         // resolve by map NAME: set_addrmap may reference the map through a
         // derived class while the function is defined on the base
         // (m52_soundc_audio_device -> irem_audio_device::m52_small_sound_map)
-        const target = mapByName.get(mapName);
+        const target = resolveMap(cfg.cls, mapName);
         g.edge(devId, target ? `map:${target.cls}.${target.name}` : `map:${cfg.cls}.${mapName}`, 'HAS_MAP', { space });
       }
       if (dev.gfxDecodeName) g.edge(cfgId, `gfxdecode:${dev.gfxDecodeName}`, 'DECODES');
