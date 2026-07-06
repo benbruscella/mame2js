@@ -42,7 +42,7 @@ const COVER_FRAMES = 900; // ~15 s of attract
 const COVER_KEY = (game: string) => `mame2js:cover:${game}:f${COVER_FRAMES}`;
 
 export async function runMenu(): Promise<void> {
-  document.title = 'mame2js — game shelf';
+  document.title = 'MAME History — the video arcade, transpiled';
   const games: GameEntry[] = await fetch('../games.json').then(r => r.json());
   games.sort((a, b) => a.year.localeCompare(b.year) || a.game.localeCompare(b.game));
 
@@ -60,10 +60,23 @@ export async function runMenu(): Promise<void> {
   const marquee = el('div', 'display:flex;flex-direction:column;gap:2px');
   const title = el('div', `font-size:34px;font-weight:800;letter-spacing:3px;
     color:#f2c200;text-shadow:0 0 18px rgba(242,194,0,.55), 0 2px 0 #7a5c00;font-family:ui-monospace,monospace`);
-  title.textContent = 'MAME2JS';
+  title.textContent = 'MAME HISTORY';
   const sub = el('div', 'color:#7f8ac9;letter-spacing:6px;font-size:11px;font-weight:600');
-  sub.textContent = 'VIDEO · ARCADE · RENTAL';
+  sub.textContent = 'VIDEO · ARCADE';
   marquee.append(title, sub);
+
+  // corner sash to the source — this whole site is generated from the repo
+  const sash = document.createElement('a');
+  sash.href = 'https://github.com/benbruscella/mame2js';
+  sash.target = '_blank';
+  sash.rel = 'noopener';
+  sash.textContent = '★ OPEN SOURCE ON GITHUB';
+  sash.title = 'github.com/benbruscella/mame2js';
+  sash.style.cssText = `position:fixed;top:0;right:0;z-index:40;
+    transform:translate(29%,66%) rotate(40deg);transform-origin:center;
+    background:#f2c200;color:#1b1b1b;font-weight:800;font-size:11px;letter-spacing:1px;
+    padding:7px 80px;box-shadow:0 4px 16px rgba(0,0,0,.5);text-decoration:none`;
+  document.body.appendChild(sash);
 
   const search = document.createElement('input');
   search.type = 'search';

@@ -546,6 +546,12 @@ export function buildApp(outRoot: string): boolean {
 import { runShell, type ShellConfig } from './runtime/shell.ts';
 import { runMenu } from './runtime/menu.ts';
 
+// force https on real domains: AudioWorklet (all sound) needs a secure
+// context, and github's own enforcement only kicks in after cert issuance
+if (location.protocol === 'http:' && !/^(localhost|127\\.|192\\.168\\.|10\\.)/.test(location.hostname)) {
+  location.replace(location.href.replace(/^http:/, 'https:'));
+}
+
 const game = new URLSearchParams(location.search).get('g');
 const fail = (err: unknown) => {
   console.error(err);
