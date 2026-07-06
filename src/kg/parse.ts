@@ -668,7 +668,7 @@ export function parseInputPorts(src: string, macros: TextMacros = { ports: {}, s
     const body = expandPortMacros(m[2], macros);
     let port: PortDef | null = null;
     let dip: PortFieldDef | null = null;
-    const tokRe = /(PORT_START|PORT_MODIFY|PORT_INCLUDE|PORT_BIT|PORT_DIPNAME|PORT_DIPSETTING|PORT_SERVICE|PORT_DIPLOCATION|PORT_DIPUNUSED_DIPLOC|PORT_CONDITION|PORT_CONFNAME|PORT_CONFSETTING)\s*\(/g;
+    const tokRe = /(PORT_START|PORT_MODIFY|PORT_INCLUDE|PORT_BIT|PORT_DIPNAME|PORT_DIPSETTING|PORT_SERVICE_DIPLOC|PORT_SERVICE|PORT_DIPLOCATION|PORT_DIPUNUSED_DIPLOC|PORT_CONDITION|PORT_CONFNAME|PORT_CONFSETTING)\s*\(/g;
     let tm: RegExpExecArray | null;
     while ((tm = tokRe.exec(body)) !== null) {
       const open = body.indexOf('(', tm.index + tm[1].length - 1);
@@ -693,6 +693,7 @@ export function parseInputPorts(src: string, macros: TextMacros = { ports: {}, s
           dip = null;
           break;
         }
+        case 'PORT_SERVICE_DIPLOC': // service dip with a DIPLOC arg — same semantics
         case 'PORT_SERVICE': {
           if (!port) break;
           port.fields.push({ kind: 'service', mask: evalExpr(args[0]) ?? 0, activeLow: args[1].includes('LOW') });

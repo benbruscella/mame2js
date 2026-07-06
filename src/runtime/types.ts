@@ -47,6 +47,8 @@ export interface CpuSpec {
   region: string;
   /** this CPU's own program map (multi-CPU boards; galaga-family boards may use the shared top-level `ranges`) */
   ranges?: RangeSpec[];
+  /** program-space global address mask (map.global_mask) */
+  mask?: number;
   /** this CPU's io space (AS_IO) when the driver maps one */
   io?: { ranges: RangeSpec[]; globalMask?: number };
 }

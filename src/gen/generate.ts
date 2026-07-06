@@ -146,13 +146,16 @@ export async function generate(graph: KnowledgeGraph, opts: GenerateOptions): Pr
     const programMap = forSpace('AS_PROGRAM');
     if (!programMap) throw new Error(`no address map on ${dev.props.tag}`);
     const ranges = collectRanges(programMap.id).map(rangeSpec);
+    // program-space global_mask (the Irem sound 6803 masks to 0x7fff so its
+    // reset vector at $FFFE reads ROM $7FFE)
+    const mask = programMap.props.globalMask !== undefined ? Number(programMap.props.globalMask) : undefined;
     const ioMap = forSpace('AS_IO');
     let io: Record<string, unknown> | undefined;
     if (ioMap) {
       io = { ranges: collectRanges(ioMap.id).map(rangeSpec) };
       if (ioMap.props.globalMask !== undefined) io.globalMask = Number(ioMap.props.globalMask);
     }
-    return { ranges, io };
+    return { ranges, ...(mask !== undefined ? { mask } : {}), io };
   };
 
   const cpus = cpuDevs.map(d => ({
@@ -240,15 +243,43 @@ export async function generate(graph: KnowledgeGraph, opts: GenerateOptions): Pr
   // Port polarity comes from the graph per field: galaga/pacman inputs are
   // active-low, galaxian's are active-HIGH (coin bit 0 at rest) — the resting
   // ("init") byte must be computed per port or galaxian sees a stuck coin switch.
-  const ports = g.out(inputs.id, 'HAS_PORT').map(p => p.node);
+  //
+  // PORT_INCLUDE resolution: walk the INCLUDES_PORTS chain root-first and
+  // merge — a PORT_START in a derived set replaces the whole port; a
+  // PORT_MODIFY replaces base fields whose masks overlap (mpatrol inherits
+  // m52's coin/start/service ports and modifies the joystick bits).
+  interface EffPort { tag: string; fields: KGNode[] }
+  const inputsChain: KGNode[] = [];
+  for (let n: KGNode | undefined = inputs; n; n = g.out(n.id, 'INCLUDES_PORTS')[0]?.node) {
+    inputsChain.unshift(n);
+    if (inputsChain.length > 8) break; // cycle guard
+  }
+  const effPorts = new Map<string, EffPort>();
+  for (const setNode of inputsChain) {
+    for (const { node: port } of g.out(setNode.id, 'HAS_PORT')) {
+      const tag = String(port.props.tag);
+      const fields = g.out(port.id, 'HAS_FIELD').map(f => f.node);
+      if (port.props.modify && effPorts.has(tag)) {
+        const eff = effPorts.get(tag)!;
+        for (const f of fields) {
+          const mask = Number(f.props.mask);
+          eff.fields = eff.fields.filter(b => (Number(b.props.mask) & mask) === 0);
+          eff.fields.push(f);
+        }
+      } else {
+        effPorts.set(tag, { tag, fields });
+      }
+    }
+  }
+  const ports = [...effPorts.values()];
   const portSpecs: { tag: string; init: number }[] = [];
   const bindings: unknown[] = [];
   const dipDefaults: unknown[] = [];
   const customs: { port: string; mask: number; member: string }[] = [];
   for (const port of ports) {
-    const tag = String(port.props.tag);
+    const tag = port.tag;
     let init = 0;
-    for (const { node: f } of g.out(port.id, 'HAS_FIELD')) {
+    for (const f of port.fields) {
       const kind = f.props.kind;
       const mask = Number(f.props.mask);
       const activeLow = f.props.activeLow !== false; // default LOW (classic hardware)

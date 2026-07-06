@@ -128,7 +128,14 @@ export class M52Board implements Board {
     const audioRom = regionFor(audioSpec.region);
     if (!audioRom) throw new Error(`missing rom region ${audioSpec.region}`);
     const audioBus = new Bus(audioSpec.ranges ?? [], audioRom, registry, shares);
-    this.audio = new M6803(audioBus, {
+    // the sound map global-masks to 0x7fff: the 6803 reset vector at $FFFE
+    // reads ROM $7FFE (irem.cpp m52_small_sound_map)
+    const audioMask = audioSpec.mask ?? 0xffff;
+    const maskedBus = {
+      read: (a: number) => audioBus.read(a & audioMask),
+      write: (a: number, d: number) => audioBus.write(a & audioMask, d),
+    };
+    this.audio = new M6803(maskedBus, {
       p1Read: () => {
         if (this.port2 & 0x08) return this.ays[0].readReg(this.ayAddr[0]);
         if (this.port2 & 0x10) return this.ays[1].readReg(this.ayAddr[1]);
