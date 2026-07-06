@@ -68,7 +68,13 @@ export class M52Board implements Board {
     for (let i = 0; i < 2; i++) this.ays.push(new AY8910(894886));
     this.ays[0].portARead = () => this.soundLatch; // 45M port A = command latch
     this.msm = new MSM5205(384000);
-    this.msm.vckCallback = state => { if (state) this.audio.nmi(); };
+    this.msm.vckCallback = state => {
+      if (state) { this.audio.nmi(); return; }
+      // falling edge = a nibble was just decoded: route the ADPCM sample to
+      // the worklet's DAC channel (offset 0x80, 8-bit unsigned) — this is
+      // Moon Patrol's explosions/percussion, silent until now
+      sinks.soundWrite(0x80, ((this.msm.signal >> 4) + 128) & 0xff);
+    };
     this.msmClocksPerLine = 384000 / config.screen.refresh / this.vtotal;
     this.ays[0].portBWrite = (d: number) => {
       // irem.cpp ay8910_45M_portb_w: MSM playmode + reset
