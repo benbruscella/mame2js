@@ -8,10 +8,11 @@ your task.
 |------|------------------------|
 | [architecture.md](architecture.md) | The big picture: pipeline phases, design decisions and their rationale, the reuse contract |
 | [knowledge-graph.md](knowledge-graph.md) | Graph schema, parsers, what is/isn't extracted, viewer, Cypher/Neo4J |
-| [runtime.md](runtime.md) | Every runtime module: Z80, bus, Namco chips, video, sound, shell — with the hardware facts baked in |
-| [generator.md](generator.md) | How `config.ts` is derived from the graph; handler-key conventions; what fails loudly and why |
-| [adding-a-game.md](adding-a-game.md) | The playbook for game #2 (Bosconian / Dig Dug / Xevious) |
-| [testing.md](testing.md) | Running the spec suites, the synthetic-ROM smoke test, browser verification |
+| [runtime.md](runtime.md) | Every runtime module: CPUs (Z80/M6809/KONAMI-1/I8080/M6803), buses, sound cores, video, shell — with the hardware facts baked in |
+| [generator.md](generator.md) | How config/meta/dossier/manifest are derived from the graph; handler-key conventions; what fails loudly and why |
+| [adding-a-game.md](adding-a-game.md) | The playbook — proven six times now |
+| [testing.md](testing.md) | Running the spec suites (23 of them), the synthetic-ROM smoke test, headless real-ROM harnesses, browser verification |
+| [deployment.md](deployment.md) | mamehistory.com: GitHub Pages, custom domain/DNS, the deploy script, caching, HTTPS-or-no-sound |
 | [gotchas.md](gotchas.md) | **Read before changing anything.** Hard-won facts that are not obvious from the code |
 | [TODO.md](TODO.md) | Prioritized backlog with context for each item |
 
@@ -26,29 +27,43 @@ mame2js galaga --serve
 2. Parses the driver's macro DSLs into a **knowledge graph**
    (`dist/galaga/graph.json`, `.cypher`, interactive `viewer.html`).
 3. **Generates** `dist/galaga/config.json` (ROM manifest, memory map, clocks,
-   screen, sound kind, DIPs, key bindings) — pure data, no per-game compile.
+   screen, sound kind, DIPs, key bindings) plus `meta.json`, a markdown
+   dossier `README.md`, and `history.txt` (Gaming History text, if the dat
+   is present) — pure data, no per-game compile.
 4. (Re)builds the **unified app** at `dist/app/` (one runtime compile hosting
    every generated game) and serves on **http://localhost:8280/app/** —
-   the boot menu ("video-store shelves" + search). `/app/?g=galaga` boots the
-   game; Esc returns to the menu. `mame2js --serve` alone serves everything
+   the boot menu ("video-store shelves" + search). Clicking a game opens the
+   **story-first "learn" modal** (machine facts, MAME-driver credits + git
+   history, Gaming History chapters, artwork) with the Play button inside.
+   Games live at `/app/g/<game>/` (pretty route; legacy `?g=` still works);
+   Esc returns to the menu. `mame2js --serve` alone serves everything
    without needing the MAME tree.
-5. ROMs: `roms/<game>.zip` auto-loads (or drag-and-drop). Never committed.
+5. ROMs: `roms/<game>.zip` auto-loads; otherwise the arcade screen becomes a
+   drag-drop zone that shows the required chip manifest and validates the
+   zip (per-chip ✓/≈/✗) **before** booting. Never committed.
 
-State as of 2026-07-05: **Galaga boots and plays** — attract mode, coin-up,
-gameplay, scoring, results screen, 60 fps, sound core spec-verified (not yet
-ear-verified). See [TODO.md](TODO.md) for what's missing (54xx explosion
-noise is the headline).
+State as of 2026-07-06: **six games boot and play** — Galaga, Pac-Man,
+Galaxian (issue #1), Gyruss, Space Invaders, Moon Patrol (issue #3) — and
+the whole thing is **deployed at https://mamehistory.com** (issue #4).
+23 spec suites (~2,400 checks) green. Known gaps: gyruss i8039 percussion
+stub, mpatrol MSM5205 drums not routed to the worklet — see
+[TODO.md](TODO.md).
 
 ## Ground rules (user requirements — do not violate)
 
 - **Zero runtime dependencies.** Plain DOM, canvas, Web Audio, native
   `DecompressionStream`. `typescript` is the only dev dependency.
 - **Knowledge-graph-first.** Game-specific facts come from the graph, never
-  hard-coded. New games should be regeneration + missing device cores only.
+  hard-coded — "it should work it out from the cpp code". New games should
+  be regeneration + missing device cores only.
 - **The runtime is a device library.** CPU, machine framework, video, sound,
   run loop, controls are game-agnostic and should "hardly be touched" when
   adding games.
-- **ROMs are copyrighted.** `roms/` is gitignored; keep it that way.
-- The project doubles as a **teaching tool** — the user wants visual,
-  educational features (KG viewer, and see TODO for live-state overlay,
-  memory-map bar, ROM anatomy gallery).
+- **ROMs are copyrighted.** `roms/` (currently renamed `_roms/` locally) is
+  gitignored — as are `*.zip` globally after the 2026-07-06 accidental-commit
+  incident (scrubbed from history). Never commit, never fetch ROMs.
+- **Never bind Ctrl as a game key** (macOS Ctrl+Arrow is a system chord that
+  breaks movement-while-firing). Fire = Space/X.
+- The project doubles as a **teaching tool** — mamehistory.com is an
+  educational arcade-history site: story-first modals, per-game markdown
+  dossiers, driver credits, KG viewer.

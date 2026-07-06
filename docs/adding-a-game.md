@@ -1,9 +1,23 @@
 # Adding a game — the playbook
 
 The promise: **regeneration + missing devices only.** Here's the checklist,
-proven three times now (galaga, then pacman + galaxian in issue #1 — those
-two took: parser extensions, one board module, one video module, one sound
-core each, zero changes to existing engine modules beyond generalization).
+proven six times now: galaga, then pacman + galaxian (issue #1), then
+gyruss + invaders + mpatrol (issue #3 — those three took parser extensions,
+four new CPU cores, three sound cores, and one board + one video module
+each; the engine itself only *generalized*, e.g. multi-CPU cpus[] and
+per-CPU io buses, never special-cased).
+
+Issue #3 lessons worth internalizing before starting:
+
+- **CPU cores are agent-sized tasks** with spec suites (m6809 459 checks,
+  i8080 276, m6803 388). Budget them first; everything else is smaller.
+- When a game misbehaves, the bug has been a **parser gap** far more often
+  than a runtime bug (macro args, PORT_INCLUDE, global_mask, XTAL capture,
+  rom-id collisions). "If this is a pure transpiler, why are you struggling
+  to make the game boot?" — because the graph was missing a fact. Fix the
+  parser.
+- Use the **headless real-ROM harness** (testing.md) for boot failures
+  before any browser debugging.
 
 ## 1. Extract and inspect
 
@@ -34,9 +48,9 @@ Two designed failure points tell you the work list:
 
 | Subsystem | Reuses as-is when... | Needs work when... |
 |---|---|---|
-| CPU | it's a Z80 | 6502/6809/etc. — new CPU core (big; agent-sized task with spec suite like z80.spec.ts) |
+| CPU | Z80, M6809/KONAMI-1, I8080, M6803 (add the type to generate.ts CPU_TYPES if new to a family) | anything else — new CPU core (agent-sized task with spec suite like z80.spec.ts) |
 | Bus/shell/zip/input | always | — |
-| Sound | Namco WSG (pacman!) | new SoundCore (e.g. galaxian tone+noise, AY-3-8910, 54xx LLE) |
+| Sound | WSG, galaxian, AY-3-8910 (N chips), invaders SFX | new SoundCore + worklet (msm5205 routing is the open example) |
 | Video | — | usually per-family: new `video/<family>.ts` implementing `VideoRenderer` (decodeGfx + palette port + tilemap scan + sprites) |
 | Board | same family (bosco/xevious/digdug ≈ galaga skeleton) | new `boards/<family>.ts` (interrupt scheme, latches, customs wiring) |
 | Customs | 06xx/51xx present | 50xx (bosco score protection), 52xx (samples), 53xx (digdug I/O), 54xx (noise), EAROM (digdug) |

@@ -20,24 +20,36 @@ Knowledge graph                   dist/<game>/graph.json (full driver: graph.ful
 Game subgraph                     ~116 nodes for galaga
         │
         │  PHASE 3: GENERATE (src/gen/generate.ts)
-        │  Graph -> ShellConfig JSON: family, cpus+clocks, RangeSpec[] memory
-        │  map (+io map), screen timing (from set_raw), sound kind, ROM
-        │  manifest with CRCs, DIP defaults, keyboard bindings.
+        │  Graph -> ShellConfig JSON: family, cpus[] (multi-CPU, each with
+        │  type/clock/ranges/mask/io), screen timing (from set_raw), sound
+        │  kind, ROM manifest with CRCs, DIP defaults, per-field input
+        │  polarity, keyboard bindings, custom port members.
         │  Unknown handler names -> loud failure.
+        │  Side channels: driver-header copyright credits, MAME git history
+        │  (git log --follow on the driver), Gaming History text extraction.
         ▼
-Game data                         dist/<game>/{config.json, meta.json}   (pure data, no compile)
+Game data                         dist/<game>/{config.json, meta.json,
+        │                          README.md dossier, history.txt}  (pure data)
         │
         │  PHASE 4: UNIFIED APP + SERVE (generate.ts buildApp, src/serve.ts)
         │  ONE app at dist/app (runtime copy + tsc) hosts every generated game;
-        │  /games.json manifest is served live from dist/*/meta.json
+        │  static dist/games.json written at generate time (dev server also
+        │  serves a live version); real dirs app/g/<game>/ for pretty routes
+        │  (<base href="../../">); all URLs relative -> works at any base path
         ▼
-Browser                           /app/ = boot menu (shelves + search),
-                                  /app/?g=<game> = that game (Esc -> menu),
-                                  /<game>/viewer.html = the graph
+Browser                           /app/ = boot menu (shelves + search + story-
+                                  first learn modal), /app/g/<game>/ = the game
+                                  (legacy ?g= works; Esc -> menu; ROM drop zone
+                                  with manifest validation when no zip served),
+                                  /<game>/viewer.html = the graph,
+                                  /<game>/README.md = the markdown dossier.
+                                  Deployed: https://mamehistory.com (docs/deployment.md)
 ```
 
-At runtime the **original Z80 machine code from the ROMs** is what executes;
-the C++ was never translated line-by-line (see "role of the C++ source" below).
+At runtime the **original machine code from the ROMs** is what executes —
+on TS cores for Z80, M6809 (+ the KONAMI-1 decrypting variant via an
+`opcodeFetch` hook), Intel 8080 and M6803; the C++ was never translated
+line-by-line (see "role of the C++ source" below).
 
 ## Key design decisions and why
 
@@ -70,12 +82,16 @@ MAME entirely is on the TODO list.)
 `src/runtime/` is an **engine + device library** and must stay game-agnostic:
 
 - engine: `bus.ts`, `shell.ts`, `menu.ts`, `input.ts`, `zip.ts`, `audio.ts`,
-  `types.ts`
-- devices: `z80.ts`, `ls259.ts`, `namco06.ts`, `namco51.ts`, `wsg.ts`,
-  `starfield05xx.ts`, `gfx.ts` (+ per-family sound cores like
-  `galaxian-sound.ts`)
+  `artwork.ts`, `types.ts`
+- CPU cores: `z80.ts`, `m6809.ts` (+ `konami1.ts` decrypt wrapper),
+  `i8080.ts`, `m6803.ts` (on-chip timer + I/O ports)
+- devices: `ls259.ts`, `namco06.ts`, `namco51.ts`, `mb14241.ts`,
+  `msm5205.ts`, `wsg.ts`, `namco54.ts`, `ay8910.ts`, `invaders-sound.ts`,
+  `galaxian-sound.ts`, `starfield05xx.ts`, `gfx.ts` (+ the `*-worklet.ts`
+  AudioWorklet hosts)
 - board composition: `boards/<family>.ts` (per board *family*, not per game)
   selected via the `boards/index.ts` registry, `video/<family>.ts`
+  (families: galaga, pacman, galaxian, gyruss, mw8080bw, m52)
 
 Game-specific data lives ONLY in generated `config.json`. When a new game
 needs behavior we don't have, add a new **device** or **board** module —
@@ -98,9 +114,11 @@ mame2js/
 │   ├── kg/                 phase 1+2: types, parse, build, cypher, viewer
 │   ├── gen/generate.ts     phase 3: graph -> config.json; buildApp() -> dist/app
 │   └── runtime/            the engine + device library (copied into the unified app)
+├── scripts/deploy-pages.sh publish dist/ to gh-pages (docs/deployment.md)
 ├── docs/                   you are here
-├── roms/                   gitignored; galaga.zip lives here locally
-└── dist/                    gitignored; per-game artifacts + generated app
+├── roms/                   gitignored (currently renamed _roms/ locally); all six zips
+├── artwork/                gitignored; bezel zips, covers/, media/, data/history/history.xml
+└── dist/                   gitignored; per-game artifacts + generated app
 ```
 
 The repo lives at `~/Projects/Github/mame2js` (github.com/benbruscella/mame2js)

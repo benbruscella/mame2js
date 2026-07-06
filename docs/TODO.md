@@ -3,6 +3,19 @@
 Prioritized. Each item has enough context to start cold. Check
 [gotchas.md](gotchas.md) before touching anything.
 
+## P0 — issue #3 phase-2 gaps (known, documented, user-visible)
+
+0a. **Gyruss i8039 percussion**: the fourth CPU (I8039 @ 8 MHz, region
+    `audio2`) is stubbed in `boards/gyruss.ts` — music + AY SFX play, drums
+    don't. Needs an MCS-48 core (agent-sized, spec-suite pattern).
+0b. **Moon Patrol MSM5205 audio routing**: `msm5205.ts` is timing-complete
+    (vck → 6803 NMI pacing verified) but its decoded ADPCM never reaches a
+    worklet — drums silent. Wire it into the ay8910 worklet path or its own.
+0c. **ROMREGION_ERASEFF as graph data**: the 0xff-fill is hard-coded in
+    video/m52.ts; parse the region flag and emit it in config.roms instead.
+0d. **Ear-verification pending**: AY anti-alias fix and gyruss volume 0.55
+    await user confirmation; ditto invaders SFX balance.
+
 ## P0 — correctness & sound
 
 1. ~~54xx explosion noise~~ **shipped as HLE** (2026-07-05, `namco54.ts`):
@@ -23,9 +36,8 @@ Prioritized. Each item has enough context to start cold. Check
    `graphs/<game>.json` snapshot without any MAME checkout (~20 CLI lines).
    Commit the galaga snapshot. Makes cloned repos self-sufficient.
 5. ~~Games #2/#3: Galaxian + Pac-Man + boot menu + Esc~~ **shipped**
-   (issue #1, 2026-07-05): unified app, shelf menu w/ artwork covers +
-   search, galaxian plays; pacman boots/coins but the post-start timed-task
-   stall is under investigation — see issue #1 thread.
+   (issue #1, 2026-07-05; pacman's start-stall later fixed by PATCHES_MAP
+   scoping — all six games play as of issue #3).
 6. **Live-state KG viewer overlay** (the "instrument panel" idea the user
    loved): viewer connects to the running emulator (BroadcastChannel or
    WebSocket through serve.ts), `board.snapshot()` + `board.shares` already
@@ -71,10 +83,26 @@ Prioritized. Each item has enough context to start cold. Check
 19. **npm publish / npx mame2js** (bin already declared).
 20. **Bundle option**: single-file app output (inline modules) for easy
     hosting; keep the no-bundler default.
-21. **PORT_INCLUDE resolution** in the parser (galagamw etc. clone inputs).
-22. **Parser hardening**: ROM_CONTINUE/ROM_FILL.
+21. ~~PORT_INCLUDE resolution~~ **shipped** (issue #3: generator merges the
+    INCLUDES_PORTS chain root-first, PORT_MODIFY by mask overlap).
+22. **Parser hardening**: ROM_CONTINUE/ROM_FILL, ROMREGION_ERASEFF flag.
 23. **Menu polish**: gamepad navigation, per-shelf grouping (by decade/maker),
     localStorage snapshot management UI.
+
+## P2.5 — mamehistory.com (deployed 2026-07-06; next steps)
+
+- **Licensing outreach**: Gaming History (arcade-history.com, Alexis
+  Bousiges) for commercial-use blessing of the story texts; Mr. Do's /
+  Arcade Database for artwork scans (user founded MAMEWorld — has the
+  contacts). Artwork currently deployed at user's explicit decision.
+- **MAMEWorld / Mr. Do's / Arcade Database attribution line** in the modal
+  footer + dossiers (only Gaming History is credited today).
+- **Free-ROM tier**: mamedev.org/roms has a handful of freely-licensed
+  romsets — generating those games would give visitors something playable
+  with zero upload.
+- **Automated deploys**: blocked on local-only assets (MAME checkout,
+  artwork, history dat). A CI build would ship a bare site; revisit if
+  assets ever get hosted. `npm run deploy -- --artwork` is the ship command.
 
 ## Done (for orientation)
 
@@ -90,3 +118,23 @@ Prioritized. Each item has enough context to start cold. Check
   constexpr/XTAL/portr/map+config composition/GFXDECODE_SCALE/io maps,
   per-field input polarity from the graph, SOCD input cleaning, bus mirror
   offset fix
+- Issue #3 (2026-07-06): **Gyruss + Space Invaders + Moon Patrol play.**
+  New cores: m6809+konami1, i8080, m6803, mb14241, msm5205, ay8910×N
+  (+worklet, box-filter anti-alias), invaders SFX synth. Boards/video for
+  gyruss (3 CPUs, 5 AYs), mw8080bw (beam-faithful 1bpp), m52 (masked-bus
+  6803, ERASEFF fill). Parser: multi-line port macros, PORT_INCLUDE merge,
+  PORT_SERVICE_DIPLOC, PATCHES_MAP scoping, region-scoped rom ids,
+  matchParen device args, templated FUNC, same-class map resolution.
+- Education layer (2026-07-06): story-first learn modal (marquee/flyer/
+  cabinet hero, machine facts, driver credits + MAME git history, Gaming
+  History chapters, pinned Play CTA), per-game markdown dossiers
+  (dist/<game>/README.md), ROM drop zone with pre-boot chip-manifest
+  validation (✓/≈/✗ per chip, wrong sets bounce instead of hanging).
+- Deployment (2026-07-06, issue #4): live at **https://mamehistory.com** —
+  base-path-agnostic URLs, static games.json, pretty routes /app/g/<game>/,
+  gh-pages deploy script (CNAME-owning, ROMs never shipped, artwork
+  opt-in), DreamHost DNS → GitHub Pages, HTTPS enforced (sound needs it),
+  cache-busted bundle, MAME HISTORY rebrand + GitHub sash.
+- Incident (2026-07-06): ROM zips briefly committed via a roms/→_roms/
+  rename that escaped .gitignore; history scrubbed (filter-branch +
+  force-push), .gitignore hardened (/roms/, /_roms/, *.zip).

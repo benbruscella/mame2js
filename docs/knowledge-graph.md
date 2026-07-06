@@ -25,11 +25,24 @@ Schema: `src/kg/types.ts`. Builders: `src/kg/parse.ts` (DSL parsers),
 `USES_ROMSET`, `HAS_DEVICE`, `HAS_MAP` (props: space e.g. AS_PROGRAM),
 `HAS_RANGE`, `READS`/`WRITES` (props: deviceTag when the handler is on a
 device), `HAS_REGION`, `LOADS`, `HAS_PORT`, `HAS_FIELD`, `INCLUDES_PORTS`
-(PORT_INCLUDE), `DECODES`, `HAS_ENTRY`, `USES_LAYOUT`, `READS_REGION`,
-`ON_DEVICE`, `INCLUDES_MAP` (address-map composition:
-`galaxian_map -> galaxian_map_base`), `CALLS` (machine-config helper
-chaining: `galaxian -> galaxian_base` — the generator collects devices
-across this chain).
+(PORT_INCLUDE — the generator resolves the merge root-first), `DECODES`,
+`HAS_ENTRY`, `USES_LAYOUT`, `READS_REGION`, `ON_DEVICE`, `INCLUDES_MAP`
+(address-map composition: `galaxian_map -> galaxian_map_base`), `CALLS`
+(machine-config helper chaining AND device `device_add_mconfig` — the
+generator collects devices/maps across this chain), `PATCHES_MAP`
+(cross-config `set_addrmap`: attached to the **patching config**, resolved
+only along a game's own CALLS chain so one game's override can't leak into
+siblings sharing the device).
+
+Id conventions added under issue #3: rom ids are **region-scoped**
+(`rom:<set>/<region>/<file>` — gyruss has two different chips named
+`gyrussk.4`), device ids from device_add_mconfig are
+`device:<cls>.<name>/<tag>`. `resolveMap` prefers same-class matches first
+(an alpha1v map with the same name must not shadow mpatrol's), then falls
+back by name (irem_audio's `m52_small_sound_map` lives on a base class).
+`graph.meta` carries `driverFile`, `license` and `copyrightHolders` parsed
+from the driver header's RAW text (`// copyright-holders:` — comments are
+stripped before parsing everywhere else).
 
 ## What the parsers handle (and don't)
 
@@ -60,12 +73,22 @@ across this chain).
 - **Callback wiring lines** (`misclatch.q_out_cb<0>().set(FUNC(...))`) are
   attached to the device's raw `config` string array — parsed by humans, not
   machines. The generator does not interpret them; board modules encode that
-  knowledge.
-- **NOT parsed yet**: PORT_INCLUDE merge resolution (edge recorded only),
-  ROM_CONTINUE/ROM_FILL, per-CPU maps that differ (galaga family shares one
-  map; xevious mem maps per-CPU need a HAS_MAP per cpu — the parser handles
-  it, the generator currently reads only cpu[0]'s map), source line numbers
-  (wanted for deep-links, TODO).
+  knowledge. Templated FUNCs (`bgxpos_w<0>`) normalize to `bgxpos_w_0`.
+- **Multi-line `#define` port macros** (`parseTextMacros` +
+  `expandPortMacros`): KONAMI8_MONO_B12_UNK, KONAMI_COINAGE_LOC(...) etc.
+  are text-expanded before INPUT_PORTS parsing; macro args use a
+  nested-paren-tolerant regex (a lazy one truncated KONAMI_COINAGE's args
+  and cost gyruss a stuck coin). `PORT_SERVICE_DIPLOC` parses as a service
+  dip. `PORT_CUSTOM_MEMBER` fields carry the member name for board wiring.
+- **Device args are re-parsed with `matchParen`** — the original lazy
+  DEVICE_MACRO_RE capture truncated `XTAL(3'579'545)` and mpatrol's audio
+  CPU got clock 0.
+- **Includes**: same-directory `#include`s are followed (plus `.cpp` twins
+  of included headers) so audio/irem.cpp-style split drivers land in one
+  graph.
+- **NOT parsed yet**: ROM_CONTINUE/ROM_FILL, source line numbers (wanted
+  for deep-links, TODO). PORT_INCLUDE is now resolved (generator-side
+  merge); per-CPU maps are handled (each cpu entry carries its own ranges).
 
 ## Subgraph extraction
 

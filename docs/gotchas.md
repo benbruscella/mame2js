@@ -113,9 +113,68 @@ auto-detects MAME source at `../mame` or parent.
 
 ## 15. ROMs
 `roms/` is gitignored because ROM images are copyrighted. Never commit them,
-never fetch them. The user's local set: `roms/galaga.zip` ("galaga" = Namco
-rev. B; includes `54xx.bin` MB8844 dump, CRC ee7357e0 — future 54xx LLE).
+never fetch them. The user's local set (all six games) currently lives in
+`_roms/` — the user renamed the dir on 2026-07-06 to exercise the drop-zone
+path, so the dev server 404s zips until it's renamed back. **The rename
+escaped the old `/roms/` ignore rule and the zips got committed and pushed**;
+they were scrubbed with filter-branch + force-push, and `.gitignore` now
+blocks `/roms/`, `/_roms/` and `*.zip`. Two lessons: (a) watch for ignore
+escapes when dirs get renamed, (b) `git filter-branch`'s final checkout
+REMOVES formerly-tracked files from the working tree — restore them from the
+backup branch before deleting it.
 
 ## 16. `dist/.driver-cache.json`
 Driver discovery caches game→driver-file mappings. If you point at a
 different MAME checkout and things look stale, delete it.
+
+## 17. No sound? Check the protocol, not the mixer
+**AudioWorklet requires a secure context.** On plain http (real domains)
+`audioWorklet.addModule` fails and every core is silent; localhost is
+exempt, so "works locally, silent in prod" = missing HTTPS. GitHub-level
+enforcement + a client-side http→https redirect in main.ts both exist —
+keep them.
+
+## 18. Relative URLs are load-bearing
+The whole app is base-path agnostic (GitHub Pages serves under `/<repo>/`,
+the custom domain at `/`). Every runtime fetch and generated URL is
+relative to the `/app/` page; the pretty-route pages under `app/g/<game>/`
+rely on `<base href="../../">`. A single leading-slash URL breaks the
+deployed site while working fine on localhost:8280. The dev server
+301-redirects bare directory paths to match Pages.
+
+## 19. Pages CDN caching will gaslight you
+`max-age=600` on everything. After a deploy, curl with a cache-busting
+query (or check `age:` in headers) before concluding the deploy failed;
+browsers additionally cache module scripts hard (hence the `?v=<stamp>` on
+main.js). Pages builds take minutes with the 74 MB artwork tree, and a
+superseded build can show `errored` — only the latest build matters.
+
+## 20. history.dat is CRLF
+The Gaming History dat uses `\r\n`. The extractor normalizes at the source;
+if you ever re-extract by hand, `$`-anchored regexes (section splitting,
+boilerplate stripping) silently fail against un-normalized text.
+
+## 21. Macro-argument regexes must tolerate nested parens
+`KONAMI_COINAGE_LOC(SW1)`-style port macros and `XTAL(3'579'545)` device
+args both broke lazy regex captures (gyruss stuck-coin, mpatrol clock=0).
+Use `matchParen`/balanced scanning for anything that can contain `()`.
+
+## 22. ROMREGION_ERASEFF matters
+Regions flagged ERASEFF must be 0xff-filled before gfx decode — zero-fill
+decodes to transparent pen 0 (mpatrol's black ground strip). Handled in
+video/m52.ts (`normalizeBgRegion`); a graph-driven region-fill flag is the
+proper fix (TODO).
+
+## 23. Map resolution traps (multi-game drivers)
+Maps resolve same-class-first (alpha1v's identically-named map must not
+shadow mpatrol's), then by name (irem_audio's base-class map). Cross-config
+`set_addrmap` patches attach to the PATCHING config and resolve only along
+a game's own CALLS chain — attaching them to the shared device node broke
+pacman ("cannonbp_protection_r").
+
+## 24. DreamHost DNS publishes slowly
+Panel edits take ~5-15 min to reach ns1-3.dreamhost.com — `dig
+@ns1.dreamhost.com` before blaming the records. GitHub Pages cert issuance
+can stall on a domain set before DNS propagated; remove/re-add the cname to
+kick it. The deploy script must own `dist/CNAME` or a force-push detaches
+the custom domain.

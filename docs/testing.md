@@ -3,7 +3,17 @@
 No test framework — every spec is a plain Node script (Node ≥23.6 runs TS
 directly) that prints PASS/FAIL lines and sets `process.exitCode`.
 
-## The suites
+```sh
+npm test    # tsc --noEmit + every src/runtime/**/*.spec.ts (23 suites, ~2,400 checks)
+```
+
+Suites added under issue #3: `m6809.spec.ts` (459), `konami1.spec.ts` (40),
+`i8080.spec.ts` (276), `m6803.spec.ts` (388), `mb14241.spec.ts` (17),
+`msm5205.spec.ts` (35), `ay8910.spec.ts` (634), `invaders-sound.spec.ts`
+(278), `video/gyruss.spec.ts`, `video/mw8080bw.spec.ts`, `video/m52.spec.ts`
+(72 incl. the ERASEFF fill), plus board suites for the new families.
+
+## The original suites
 
 ```
 node src/runtime/z80.spec.ts            # 266+ checks: instruction battery, exhaustive
@@ -26,11 +36,15 @@ node src/runtime/boards/galaxian.spec.ts#   paths of each board family
 npx tsc --noEmit                        # whole project, strict
 ```
 
-Run all of the above before committing runtime changes. There are also
-headless whole-game repro harnesses (real ROMs through the real board in
-plain node — no browser) in the session scratchpads; the pattern is worth
-copying for regressions: load roms/<game>.zip with zip.ts, build the board,
-run frames, assert on shares/videoram/snapshot.
+Run all of the above before committing runtime changes.
+
+## Headless real-ROM repro harness (the issue-#3 workhorse)
+
+For every "game X doesn't boot" bug, a scratchpad `.mjs` beat the browser:
+`readZip(roms/<game>.zip)` → `assembleRegions` → `createBoard` → run N
+frames → inspect `board.shares`/`snapshot()`/framebuffer. No browser, full
+determinism, printf-level access to CPU state. Copy the pattern before
+reaching for Playwright.
 
 ## The board smoke test pattern (works without ROMs)
 
@@ -46,7 +60,7 @@ IRQ/latch chain the real game uses — copy this pattern for every new board.
 
 ```
 node bin/mame2js.js galaga --serve      # menu: http://localhost:8280/app/
-                                        # game: http://localhost:8280/app/?g=galaga
+                                        # game: http://localhost:8280/app/g/galaga/
 ```
 
 With Playwright (or by hand): page loads with zero console errors → press any

@@ -182,6 +182,41 @@ Composition + interrupt wiring (hand-transpiled from galaga.cpp):
   the hook for the future live KG viewer overlay. `shares` is public for the
   same reason.
 
+## Issue #3 additions (Gyruss, Space Invaders, Moon Patrol — 2026-07-06)
+
+All agent-built with spec suites; check counts in testing.md.
+
+- **`m6809.ts` + `konami1.ts`**: full 6809 (459 checks); KONAMI-1 is the
+  6809 with an `opcodeFetch` hook XOR-decrypting opcodes by address mask
+  (`adr & 0xa` pattern, 40 checks). Gyruss's sub CPU.
+- **`i8080.ts`** (276 checks): true 8080 flag semantics (no Z80isms), DAA,
+  RST vectors. Space Invaders.
+- **`m6803.ts`** (388 checks): on-chip 16-bit timer (OCF/TOF IRQs) and P1/P2
+  I/O ports — these pace Irem's sound board; Moon Patrol's audio CPU.
+- **`mb14241.ts`** (17): the Midway shifter chip. **`msm5205.ts`** (35):
+  ADPCM decoder, `vckCallback` drives the 6803 NMI (timing emulated; audio
+  routing to a worklet is TODO).
+- **`ay8910.ts` + `ay8910-worklet.ts`** (634): N-chip bank (register offset
+  `chip*16 + reg`, gain 1/chips), MAME volume table, **box-filter
+  decimation** when downsampling (point-sampling aliased gyruss's 223.7 kHz
+  SFX into "chirps"). Gyruss runs five, with readback (its sound timer is
+  a lookup on ays[2] port A indexed by `audioCycles/1024 % 10`).
+- **`invaders-sound.ts` + worklet** (278): worklet-synthesized discrete SFX
+  (UFO sweep, shot, explosion...) for the analog Midway board.
+- **`boards/gyruss.ts`**: 3 emulated CPUs (Z80 main / KONAMI-1 sub / Z80
+  audio; the i8039 percussion CPU is stubbed), vblank line 240 (masked NMI
+  main + IRQ sub), audio Z80 on a HOLD-line runAudio loop.
+- **`boards/mw8080bw.ts`**: I8080 + MB14241 on an io-space bus, RST 0xcf/
+  0xd7 scanline interrupts (lines 96/224), custom input members (CONTP1),
+  soundboard ports → worklet. **`video/mw8080bw.ts`**: beam-faithful 1bpp
+  shifter, 260×224, fetch at `x&7==4`.
+- **`boards/m52.ts`**: Z80 main + M6803 audio behind a **masked bus**
+  (global_mask 0x7fff — without it the 6803 runs off the map), P1/P2 AY
+  multiplexing (falling-edge protocol on port2 bit0), MSM5205 tick → NMI,
+  protection_r popcount, video latches. **`video/m52.ts`**: scroll/priority
+  layers; `ROMREGION_ERASEFF` regions must be 0xff-filled before decode or
+  the ground strip renders as transparent pen 0 (`normalizeBgRegion`).
+
 ## Shell — `shell.ts`, `input.ts`, `zip.ts` (+ `menu.ts`, `boards/index.ts`)
 
 - **Board registry** (`boards/index.ts`): `createBoard(config, …)` maps
@@ -198,25 +233,37 @@ Composition + interrupt wiring (hand-transpiled from galaga.cpp):
   click that navigated counts as the user gesture; audio resumes on first
   input if the browser held the context suspended.
 - **Cabinet view** (`artwork.ts`, shared with the menu): the game plays
-  inside the real cabinet — marquee scan above (`/artwork/media/marquees/`),
-  bezel around the screen (from `/artwork/<game>.zip`, screen window taken
-  from the zip's MAME `default.lay`, alpha flood-fill as fallback), control
-  panel scan below (`/artwork/media/cpanels/`). Media source pattern:
-  `adb.arcadeitalia.net/media/mame.current/<kind>/<game>.png` (kinds:
-  flyers, marquees, cpanels, cabinets, pcbs, decals, titles…). All
-  user-supplied + gitignored like roms/. Missing pieces degrade gracefully.
-- **Menu** (`menu.ts`, browser-only): the /app/ home screen — video-store
-  shelves (Netflix-scale tiles) from `/games.json`, live search, arrow-key +
-  Enter navigation. Cover priority: classic flyer
-  (`/artwork/covers/<game>.png`) → bezel composited with a DETERMINISTIC
-  emulated screenshot (the game's board run exactly COVER_FRAMES frames,
-  cached in localStorage — permanent across visits) → that screenshot alone
-  → 2bpp tile-sheet art from the user's gfx ROM → stylized placeholder.
+  inside the full, uncropped bezel (from `/artwork/<game>.zip`; screen
+  window from the zip's MAME `default.lay`, honoring
+  `<orientation rotate="180">` — gyruss ships its bezel upside down; alpha
+  flood-fill as fallback). **No marquee/control-panel strips in-game** —
+  tried and removed per user feedback ("the screen is the star"). Media
+  source pattern: `adb.arcadeitalia.net/media/mame.current/<kind>/<game>.png`
+  (kinds: flyers, marquees, cpanels, cabinets, pcbs, decals, titles…). All
+  user-supplied + gitignored like roms/. Missing pieces degrade gracefully
+  (every `<img>` removes itself on error).
+- **Menu** (`menu.ts`, browser-only): the /app/ home screen — "MAME HISTORY"
+  marquee header, GitHub corner sash, video-store shelves from
+  `../games.json`, live search, arrow-key + Enter navigation. **Story-first
+  flow**: clicking a game (or Enter) opens the "learn" modal — marquee
+  light-box, flyer + cabinet-photo hero, machine facts from config.json,
+  MAME-driver credits + git history from meta.json, the Gaming History
+  write-up split into collapsible chapters on its `- TRIVIA -` delimiters,
+  and a pinned CTA footer (Play → `g/<game>/`, KG viewer, markdown
+  dossier). Cover priority: classic flyer → bezel composited with a
+  DETERMINISTIC emulated screenshot (board run exactly COVER_FRAMES frames,
+  cached in localStorage) → screenshot alone → tile-sheet art → placeholder.
   `INSERT ROM` ribbon when no zip.
-- `runShell(config)`: fetch `/roms/<game>.zip` → else drag-drop/file-picker;
+- `runShell(config)`: fetch `../roms/<game>.zip`; if absent (or the served
+  zip fails the manifest check) the CRT becomes a **drop zone**: dashed
+  target with drag-over/busy/error states and the required chip list
+  (★ = boot-critical CPU regions). `checkRomSet` grades the upload against
+  the graph manifest **before booting** — per-chip ✓ verified / ≈ CRC
+  differs / ✗ missing; missing critical chips bounce back for retry
+  (wrong sets used to hang the loader), non-critical gaps warn and boot.
   `assembleRegions` matches zip entries by **name, then dash/underscore
-  swapped, then CRC32** (romset filenames drift across MAME eras — the user's
-  set is dash-style); CRC mismatches warn, missing files throw with the list.
+  swapped, then CRC32**; only CPU code regions are boot-critical — other
+  missing regions zero-fill with a console warning.
 - Canvas: native-res offscreen → visible canvas rotated (ROT90 = translate +
   rotate π/2), integer upscale, `image-rendering: pixelated`.
 - Run loop: fixed-timestep accumulator at `screen.refresh` (60.606 Hz) inside
