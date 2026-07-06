@@ -18,7 +18,9 @@ export interface Artwork { bmp: ImageBitmap | HTMLCanvasElement; window: ArtWind
  */
 export async function loadArtwork(game: string, prefer: 'marquee' | 'bezel'): Promise<Artwork | null> {
   try {
-    const res = await fetch(`/artwork/${encodeURIComponent(game)}.zip`);
+    // relative to the /app/ page so the site works under any base path
+    // (github pages serves the whole tree under /<repo>/)
+    const res = await fetch(`../artwork/${encodeURIComponent(game)}.zip`);
     if (!res.ok) return null;
     const files = await readZip(new Uint8Array(await res.arrayBuffer()));
 

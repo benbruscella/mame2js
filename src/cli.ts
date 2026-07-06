@@ -149,6 +149,11 @@ if (command === 'run') {
   const { generate, buildApp } = await import('./gen/generate.ts');
   await generate(sub, { mameSrc, outDir, game });
   if (!buildApp(outRoot)) process.exitCode = 1;
+  // static manifest so the built tree is servable as plain files (github
+  // pages); the dev server's live /games.json route shadows it locally
+  const { gamesManifest } = await import('./serve.ts');
+  writeFileSync(join(outRoot, 'games.json'),
+    await gamesManifest(outRoot, join(projectRoot, 'roms'), join(projectRoot, 'artwork')));
 }
 
 if ('serve' in opts || argv.includes('--serve')) {

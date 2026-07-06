@@ -43,7 +43,7 @@ const COVER_KEY = (game: string) => `mame2js:cover:${game}:f${COVER_FRAMES}`;
 
 export async function runMenu(): Promise<void> {
   document.title = 'mame2js — game shelf';
-  const games: GameEntry[] = await fetch('/games.json').then(r => r.json());
+  const games: GameEntry[] = await fetch('../games.json').then(r => r.json());
   games.sort((a, b) => a.year.localeCompare(b.year) || a.game.localeCompare(b.game));
 
   const root = el('div', `min-height:100vh;box-sizing:border-box;margin:0;padding:0 0 60px;
@@ -223,7 +223,7 @@ export async function runMenu(): Promise<void> {
     };
 
     // marquee light-box across the top — the sign that pulled you across the arcade
-    scroller.appendChild(img(`/artwork/media/marquees/${game}.png`,
+    scroller.appendChild(img(`../artwork/media/marquees/${game}.png`,
       `width:100%;max-height:140px;object-fit:contain;border-radius:10px 10px 0 0;
        background:radial-gradient(ellipse at center,#1c2150,#0a0c1e);
        box-shadow:inset 0 -12px 24px rgba(0,0,0,.5)`));
@@ -233,7 +233,7 @@ export async function runMenu(): Promise<void> {
 
     // hero spread: flyer · title/facts · cabinet
     const hero = el('div', 'display:flex;gap:22px;align-items:flex-start;margin-bottom:18px');
-    const flyer = img(`/artwork/covers/${game}.png`,
+    const flyer = img(`../artwork/covers/${game}.png`,
       'width:170px;border-radius:6px;box-shadow:0 10px 30px rgba(0,0,0,.65);flex-shrink:0;transform:rotate(-1.5deg)');
     hero.appendChild(flyer);
     const heroText = el('div', 'flex:1;min-width:220px');
@@ -243,7 +243,7 @@ export async function runMenu(): Promise<void> {
     subh.textContent = `${entry.manufacturer} · ${entry.year}`;
     heroText.append(h, subh);
     hero.appendChild(heroText);
-    const cab = img(`/artwork/media/cabinets/${game}.png`,
+    const cab = img(`../artwork/media/cabinets/${game}.png`,
       'width:120px;border-radius:6px;box-shadow:0 10px 30px rgba(0,0,0,.65);flex-shrink:0;transform:rotate(1.5deg)');
     hero.appendChild(cab);
     inner.appendChild(hero);
@@ -289,7 +289,7 @@ export async function runMenu(): Promise<void> {
     // The machine — real facts from the generated config (the knowledge graph)
     const hw = section('The machine (extracted from the MAME driver)', colA);
     try {
-      const cfg = await fetch(`/${game}/config.json`).then(r => r.json());
+      const cfg = await fetch(`../${game}/config.json`).then(r => r.json());
       for (const cpu of cfg.board.cpus) {
         row(hw, cpu === cfg.board.cpus[0] ? 'Processors' : '', `${(cpu.type ?? 'z80').toUpperCase()} "${cpu.tag}" @ ${(cpu.clock / 1e6).toFixed(3)} MHz`);
       }
@@ -316,7 +316,7 @@ export async function runMenu(): Promise<void> {
     // the intro shows in full, each named chapter folds open on click.
     if (entry.hasHistory) {
       const story = section('The story');
-      void fetch(`/${game}/history.txt`).then(r => r.ok ? r.text() : '').then(t => {
+      void fetch(`../${game}/history.txt`).then(r => r.ok ? r.text() : '').then(t => {
         if (!t) { story.remove(); return; }
         const parts = t.split(/^- ([A-Z][A-Z0-9 .&''/-]{2,}) -\s*$/m);
         const intro = el('div', 'white-space:pre-wrap;color:#c9cde8;font-size:14.5px');
@@ -356,10 +356,10 @@ export async function runMenu(): Promise<void> {
       return a;
     };
     links.appendChild(mkBtn('▶ Play', `?g=${game}`, true));
-    const viewer = mkBtn('Explore the knowledge graph', `/${game}/viewer.html`, false);
+    const viewer = mkBtn('Explore the knowledge graph', `../${game}/viewer.html`, false);
     viewer.target = '_blank';
     links.appendChild(viewer);
-    const dossier = mkBtn('Full dossier (markdown)', `/${game}/README.md`, false);
+    const dossier = mkBtn('Full dossier (markdown)', `../${game}/README.md`, false);
     dossier.target = '_blank';
     links.appendChild(dossier);
     card.appendChild(links);
@@ -378,7 +378,7 @@ export async function runMenu(): Promise<void> {
     const ctx = canvas.getContext('2d')!;
     // 0. the classic promotional flyer (artwork/covers/<game>.png,
     //    user-supplied) — real box art beats anything synthesized
-    const flyer = await imageFrom(`/artwork/covers/${encodeURIComponent(entry.game)}.png`);
+    const flyer = await imageFrom(`../artwork/covers/${encodeURIComponent(entry.game)}.png`);
     if (flyer) {
       const s = Math.max(canvas.width / flyer.width, canvas.height / flyer.height);
       const w = flyer.width * s, h = flyer.height * s;
@@ -459,7 +459,7 @@ export async function runMenu(): Promise<void> {
     if (cached) return imageFrom(cached);
     if (!entry.hasRom) return null;
     try {
-      const cfg = await fetch(`/${encodeURIComponent(entry.game)}/config.json`).then(r => r.json()) as ShellCfg;
+      const cfg = await fetch(`../${encodeURIComponent(entry.game)}/config.json`).then(r => r.json()) as ShellCfg;
       const regions = await loadRegions(cfg);
       if (!regions) return null;
       const ports = Object.fromEntries(cfg.ports.map(p => [p.tag, p.init]));
@@ -531,7 +531,7 @@ export async function runMenu(): Promise<void> {
 
   async function paintTileArt(entry: GameEntry, canvas: HTMLCanvasElement, ctx: CanvasRenderingContext2D): Promise<boolean> {
     try {
-      const cfg = await fetch(`/${encodeURIComponent(entry.game)}/config.json`).then(r => r.json());
+      const cfg = await fetch(`../${encodeURIComponent(entry.game)}/config.json`).then(r => r.json());
       const gfxSpec = (cfg.roms as { region: string; size: number; loads: { file: string; size: number; offset: number; crc: string }[] }[])
         .find(r => r.region === 'gfx1');
       if (!gfxSpec) return false;

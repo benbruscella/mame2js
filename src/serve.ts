@@ -17,8 +17,8 @@ const MIME: Record<string, string> = {
   '.cypher': 'text/plain; charset=utf-8',
 };
 
-/** Scan out/ for generated games (meta.json + config.json) and flag ROM/artwork availability. */
-async function gamesManifest(outRoot: string, romsDir: string, artDir: string): Promise<string> {
+/** Scan dist/ for generated games (meta.json + config.json) and flag ROM/artwork availability. */
+export async function gamesManifest(outRoot: string, romsDir: string, artDir: string): Promise<string> {
   const games: unknown[] = [];
   for (const entry of await readdir(outRoot).catch(() => [] as string[])) {
     try {
@@ -50,7 +50,14 @@ export function serve(rootDirs: Record<string, string>, port: number): Promise<n
       if (!path) path = 'index.html';
       let file = join(root, path);
       const s = await stat(file).catch(() => null);
-      if (s?.isDirectory()) file = join(file, 'index.html');
+      if (s?.isDirectory()) {
+        // match github pages: redirect /app -> /app/ so relative URLs resolve
+        if (!url.pathname.endsWith('/')) {
+          res.writeHead(301, { location: `${url.pathname}/` }).end();
+          return;
+        }
+        file = join(file, 'index.html');
+      }
       const body = await readFile(file);
       res.writeHead(200, {
         'content-type': MIME[extname(file)] ?? 'application/octet-stream',

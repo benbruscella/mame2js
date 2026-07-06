@@ -11,6 +11,7 @@
     "serve": "node bin/mame2js.js --serve",
     "gen": "node bin/mame2js.js",
     "gen:all": "for g in galaga pacman galaxian gyruss invaders mpatrol; do node bin/mame2js.js $g || exit 1; done",
+    "deploy": "bash scripts/deploy-pages.sh",
     "test": "tsc --noEmit && for f in src/runtime/*.spec.ts src/runtime/*/*.spec.ts; do node $f > /dev/null || { echo \"FAIL $f\"; exit 1; }; echo \"PASS $f\"; done"
   },
   "engines": {
