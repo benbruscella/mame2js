@@ -8,6 +8,7 @@ import { join, resolve, dirname, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import type { KnowledgeGraph, KGNode } from '../kg/types.ts';
+import { parseSoftwareList, buildCatalog } from '../kg/softlist.ts';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const projectRoot = resolve(here, '../..');
@@ -35,6 +36,25 @@ const KEYMAP: Record<string, string[]> = {
   IPT_COIN1: ['Digit5'],
   IPT_COIN2: ['Digit6'],
   IPT_SERVICE1: ['Digit9'],
+  // console pads (nes joypad: A=IPT_BUTTON2 -> KeyZ, B=IPT_BUTTON1 -> KeyX/Space)
+  IPT_START: ['Enter'],
+  IPT_SELECT: ['ShiftRight'],
+};
+
+// Cart-slot options (mappers/PCBs) each runtime board family implements —
+// a device-library capability table like CPU_TYPES, not a game fact. The
+// softlist catalog carries every cart's slot; the app greys out the rest.
+const CART_SLOT_SUPPORT: Record<string, string[]> = {
+  nes: ['nrom', 'uxrom', 'cnrom', 'sxrom', 'txrom'], // iNES mappers 0, 2, 3, 1, 4
+};
+
+// Explicitly supported cartridge titles (softlist parent short-names; clones
+// of a listed parent count too). Playability is gated on THIS list, not just
+// the mapper — titles are added one at a time as they're verified end-to-end
+// (user directive 2026-07-07: "support explicit games, not all, so I can
+// test"). The full catalog still identifies every cart on the shelf.
+const CART_GAME_SUPPORT: Record<string, string[]> = {
+  nes: ['smb'], // Super Mario Bros. (parent set; covers smb1 "World" etc.)
 };
 
 class Graph {
@@ -71,6 +91,8 @@ export async function generate(graph: KnowledgeGraph, opts: GenerateOptions): Pr
   const devices: KGNode[] = [];
   /** set_addrmap patches in chain order (most-derived config first) */
   const mapPatches: { space: string; tag: string; mapId: string }[] = [];
+  /** SOFTWARE_LIST declarations (consoles/computers) in chain order */
+  const softlistNodes: KGNode[] = [];
   {
     const seen = new Set<string>();
     const queue = [machine.id];
@@ -90,15 +112,17 @@ export async function generate(graph: KnowledgeGraph, opts: GenerateOptions): Pr
           mapId: p.node.id,
         });
       }
+      softlistNodes.push(...g.out(id, 'HAS_SOFTLIST').map(s => s.node));
       queue.push(...g.out(id, 'CALLS').map(c => c.node.id));
     }
   }
+  const kind: 'console' | undefined = game.props.kind === 'console' ? 'console' : undefined;
   const byTag = new Map(devices.map(d => [String(d.props.tag), d]));
 
   // --- cpus + address maps ----------------------------------------------------
   // Every CPU carries its own program map (and io map when the driver has
   // one). Device type -> runtime core is a device-library mapping.
-  const CPU_TYPES: Record<string, string> = { Z80: 'z80', KONAMI1: 'konami1', I8039: 'i8039', I8080: 'i8080', M6803: 'm6803', MC6809: 'mc6809', MC6809E: 'mc6809e' };
+  const CPU_TYPES: Record<string, string> = { Z80: 'z80', KONAMI1: 'konami1', I8039: 'i8039', I8080: 'i8080', M6803: 'm6803', MC6809: 'mc6809', MC6809E: 'mc6809e', RP2A03: 'rp2a03', RP2A03G: 'rp2a03' };
   const cpuDevs = devices.filter(d => String(d.props.type) in CPU_TYPES);
   if (cpuDevs.length === 0) throw new Error('no supported CPU devices found in machine config');
 
@@ -177,10 +201,24 @@ export async function generate(graph: KnowledgeGraph, opts: GenerateOptions): Pr
   const io = cpus[0].io;
 
   // --- screen ------------------------------------------------------------------
+  // Arcade drivers use set_raw; consoles (nes.cpp) use the
+  // set_refresh_hz/set_size/set_visarea trio instead.
   const screenDev = devices.find(d => d.props.type === 'SCREEN');
   const raw = screenDev?.props.screenRaw as number[] | undefined;
-  if (!raw) throw new Error('screen raw params missing');
-  const [pixclock, htotal, hbend, hbstart, vtotal, vbend, vbstart] = raw;
+  let pixclock: number, htotal: number, hbend: number, hbstart: number, vtotal: number, vbend: number, vbstart: number;
+  if (raw) {
+    [pixclock, htotal, hbend, hbstart, vtotal, vbend, vbstart] = raw;
+  } else if (screenDev?.props.screenRefreshHz && screenDev.props.screenSize && screenDev.props.screenVisarea) {
+    const [w] = screenDev.props.screenSize as number[];
+    const [x0, x1, y0, y1] = screenDev.props.screenVisarea as number[];
+    vtotal = (screenDev.props.screenSize as number[])[1];
+    hbend = x0; hbstart = x1 + 1;
+    vbend = y0; vbstart = y1 + 1;
+    htotal = w;
+    pixclock = Number(screenDev.props.screenRefreshHz) * htotal * vtotal;
+  } else {
+    throw new Error('screen raw params missing');
+  }
 
   // the galaxian driver renders horizontally pre-scaled (GFXDECODE_SCALE
   // xscale 3, h params scaled to match); divide back to native pixels
@@ -238,7 +276,10 @@ export async function generate(graph: KnowledgeGraph, opts: GenerateOptions): Pr
     // was ~11 channels' worth ("pulsing drums way too loud").
     gyruss: { chipGains: [1, 1, 0.66, 0.66, 0.66], dacGain: 0.014 },
   };
-  const sound = devices.some(d => d.props.type === 'NAMCO_WSG' || d.props.type === 'NAMCO')
+  const sound = devices.some(d => String(d.props.type).startsWith('RP2A03'))
+    // the NES APU lives on the CPU die — the RP2A03 is its own sound device
+    ? { kind: 'nes', clock: cpus[0].clock }
+    : devices.some(d => d.props.type === 'NAMCO_WSG' || d.props.type === 'NAMCO')
     ? { kind: 'wsg', clock: Number(byTag.get('namco')?.props.clock ?? 96000), waveRegion: 'namco' }
     : devices.some(d => d.props.type === 'GALAXIAN_SOUND')
       ? { kind: 'galaxian', clock: cpus[0].clock }
@@ -369,22 +410,89 @@ export async function generate(graph: KnowledgeGraph, opts: GenerateOptions): Pr
     portSpecs.push({ tag, init });
   }
 
+  // Console control ports live on the default slot device, not the driver
+  // (nes.cpp's INPUT_PORTS_START(nes) is empty; the joypad's fields come from
+  // bus/nes_ctrl/joypad.cpp via the graph's Device->InputPorts USES_INPUTS
+  // edge). Port tags are namespaced `${devTag}:${portTag}` (ctrl1:JOYPAD);
+  // only the first control port gets keyboard bindings (P2 unbound first cut).
+  if (kind === 'console') {
+    let boundController = false;
+    for (const dev of devices) {
+      const slotInputs = g.out(dev.id, 'USES_INPUTS')[0]?.node;
+      if (!slotInputs) continue;
+      for (const { node: port } of g.out(slotInputs.id, 'HAS_PORT')) {
+        const tag = `${dev.props.tag}:${port.props.tag}`;
+        let init = 0;
+        for (const f of g.out(port.id, 'HAS_FIELD').map(x => x.node)) {
+          if (f.props.kind !== 'bit') continue;
+          const mask = Number(f.props.mask);
+          const activeLow = f.props.activeLow !== false;
+          if (activeLow) init |= mask;
+          if (boundController) continue;
+          const type = String(f.props.type ?? '');
+          const keys = KEYMAP[type];
+          if (!keys) continue;
+          const mods = (f.props.modifiers as string[] | undefined) ?? [];
+          const named = mods.map(m => /PORT_NAME\("(?:%p )?([^"]+)"\)/.exec(m)?.[1]).find(Boolean);
+          bindings.push({ port: tag, mask, keys, label: named ?? type, activeLow });
+        }
+        portSpecs.push({ tag, init });
+      }
+      boundController = true;
+    }
+  }
+
   // --- emit ---------------------------------------------------------------------------
   const title = `${game.props.fullname} (${game.props.company}, ${game.props.year})`;
   // board family = driver file stem; selects the board module from the registry
   const family = basename(String(graph.meta.driverFile)).replace(/\.cpp$/, '');
+
+  // Console cart catalog: the machine's primary software list (first
+  // status:'original' whose hash/<name>.xml exists) extracted to a sibling
+  // artifact — dist/<machine>/softlist.json. The graph carries the LIST fact;
+  // the 4,500+ cart entries stay out of graph.json (they'd swamp the viewer).
+  let cart: Record<string, unknown> | undefined;
+  let cartEntries = 0;
+  if (kind === 'console') {
+    mkdirSync(opts.outDir, { recursive: true });
+    for (const listNode of softlistNodes) {
+      if (listNode.props.status !== 'original') continue;
+      const listName = String(listNode.props.name);
+      const xmlPath = join(opts.mameSrc, 'hash', `${listName}.xml`);
+      if (!existsSync(xmlPath)) continue;
+      const parsed = parseSoftwareList(readFileSync(xmlPath, 'utf8'));
+      const catalog = buildCatalog(parsed, listNode.props.filter ? String(listNode.props.filter) : undefined);
+      // compact on purpose: ~4.5k entries; indented it triples in size
+      writeFileSync(join(opts.outDir, 'softlist.json'), JSON.stringify(catalog));
+      cart = {
+        interface: catalog.interface,
+        list: listName,
+        catalogUrl: 'softlist.json',
+        slots: CART_SLOT_SUPPORT[family] ?? [],
+        games: CART_GAME_SUPPORT[family] ?? [],
+      };
+      cartEntries = catalog.entries.length;
+      console.log(`softlist "${listName}": ${catalog.entries.length} cartridges catalogued`);
+      break;
+    }
+    if (!cart) console.warn('  ! console machine has no resolvable software list — carts will be header-identified only');
+  }
+
   const config = {
     game: opts.game,
     title,
     family,
+    ...(kind ? { kind } : {}),
     board: { family, cpus, ranges, ...(io ? { io } : {}), ...(customs.length ? { customs } : {}), screen, clocks },
     sound,
     roms,
+    ...(cart ? { cart } : {}),
     bindings,
     dipDefaults,
     ports: portSpecs,
     // no romUrl: ROMs are never fetched — the shell only accepts user drops
-    // (remembered per-browser in IndexedDB via runtime/romstore.ts)
+    // (console carts are remembered per-browser in IndexedDB via
+    // runtime/cartstore.ts, by explicit user approval 2026-07-07)
     runtimeUrl: './dist/runtime/',
     menuUrl: './',
   };
@@ -447,6 +555,7 @@ export async function generate(graph: KnowledgeGraph, opts: GenerateOptions): Pr
     year: game.props.year,
     manufacturer: game.props.company,
     family,
+    ...(kind ? { kind } : {}),
     driverFile: graph.meta.driverFile,
     ...(graph.meta.license ? { license: graph.meta.license } : {}),
     ...(graph.meta.copyrightHolders ? { copyrightHolders: graph.meta.copyrightHolders } : {}),
@@ -467,6 +576,9 @@ export async function generate(graph: KnowledgeGraph, opts: GenerateOptions): Pr
     license: graph.meta.license as string | undefined,
     copyrightHolders: graph.meta.copyrightHolders as string | undefined,
     cpus, sound, screen, roms, bindings, dipDefaults, gitHistory, historyText,
+    ...(cart ? {
+      cart: { list: String(cart.list), entries: cartEntries, slots: cart.slots as string[] },
+    } : {}),
   }));
   console.log(`\ngenerated ${join(opts.outDir, 'config.json')} (+ meta.json, README.md)`);
   if (!existsSync(join(projectRoot, 'roms', `${opts.game}.zip`))) {
@@ -488,6 +600,7 @@ function gameMarkdown(d: {
   roms: { region: string; size: number; loads: { file: string; offset: number; size: number; crc: string }[] }[];
   bindings: unknown[]; dipDefaults: unknown[];
   gitHistory?: Record<string, unknown>; historyText: string;
+  cart?: { list: string; entries: number; slots: string[] };
 }): string {
   const hex = (n: number) => '0x' + n.toString(16);
   const prettyKey = (k: string) => k.replace(/^Key|^Arrow|^Digit/, '');
@@ -520,16 +633,27 @@ function gameMarkdown(d: {
     (d.screen.rotate ? ` · rotated ${d.screen.rotate}°` : ''));
   md.push('');
 
-  md.push('### ROM chips');
-  md.push('');
-  md.push('| Region | Chip | Offset | Size | CRC |');
-  md.push('| --- | --- | --- | --- | --- |');
-  for (const r of d.roms) {
-    for (const l of r.loads) {
-      md.push(`| \`${r.region}\` | \`${l.file}\` | ${hex(l.offset)} | ${hex(l.size)} | \`${l.crc}\` |`);
+  if (d.cart) {
+    md.push('### Cartridges');
+    md.push('');
+    md.push(`The machine itself needs no ROMs — all software comes on cartridges. ` +
+      `${d.cart.entries.toLocaleString('en-US')} cartridges are catalogued from the MAME \`${d.cart.list}\` ` +
+      `software list; ${d.cart.slots.length} PCB types are currently supported ` +
+      `(${d.cart.slots.map(s => `\`${s}\``).join(', ')}). Drop your own legally-dumped ` +
+      `cart files onto the console page to play.`);
+    md.push('');
+  } else {
+    md.push('### ROM chips');
+    md.push('');
+    md.push('| Region | Chip | Offset | Size | CRC |');
+    md.push('| --- | --- | --- | --- | --- |');
+    for (const r of d.roms) {
+      for (const l of r.loads) {
+        md.push(`| \`${r.region}\` | \`${l.file}\` | ${hex(l.offset)} | ${hex(l.size)} | \`${l.crc}\` |`);
+      }
     }
+    md.push('');
   }
-  md.push('');
 
   const binds = d.bindings as { port: string; mask: number; keys: string[]; label: string }[];
   if (binds.length) {
@@ -604,6 +728,7 @@ export function buildApp(outRoot: string): boolean {
 // Unified app: no ?g= -> boot menu; ?g=<game> -> load that game's generated
 // config (pure knowledge-graph data) and run it.
 import { runShell, type ShellConfig } from './runtime/shell.ts';
+import { runConsole } from './runtime/console.ts';
 import { runMenu } from './runtime/menu.ts';
 
 // force https on real domains: AudioWorklet (all sound) needs a secure
@@ -623,7 +748,9 @@ const fail = (err: unknown) => {
 if (game) {
   fetch(\`../\${encodeURIComponent(game)}/config.json\`)
     .then(r => { if (!r.ok) throw new Error(\`no generated config for "\${game}" — run: mamekit \${game}\`); return r.json(); })
-    .then(cfg => runShell(cfg as ShellConfig))
+    .then(cfg => (cfg as ShellConfig).kind === 'console'
+      ? runConsole(cfg as ShellConfig)   // console room: cart shelf, drop zone, per-cart boot
+      : runShell(cfg as ShellConfig))
     .catch(fail);
 } else {
   runMenu().catch(fail);

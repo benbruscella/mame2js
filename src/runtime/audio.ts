@@ -34,13 +34,23 @@ interface PendingWrite {
   frac?: number;
 }
 
+/** A bulk sample-data push (NES DMC), queued in order with register writes. */
+interface PendingData {
+  id: number;
+  bytes: Uint8Array;
+}
+
+type PendingItem =
+  | { kind: 'write'; write: PendingWrite }
+  | { kind: 'data'; data: PendingData };
+
 export class AudioOutput {
   private ctx: AudioContext | null = null;
   private node: AudioWorkletNode | null = null;
   private gain: GainNode | null = null;
   private volume: number = 1;
-  /** register writes issued before start() resolves, replayed in order */
-  private pending: PendingWrite[] = [];
+  /** writes + data pushes, kept in issue order, flushed once per frame */
+  private pending: PendingItem[] = [];
 
   constructor() {}
 
@@ -95,10 +105,8 @@ export class AudioOutput {
     this.node = node;
     this.gain = gain;
 
-    // replay writes that happened before the context existed
-    if (this.pending.length) {
-      node.port.postMessage({ type: 'batch', writes: this.pending.splice(0) });
-    }
+    // replay writes/data that happened before the context existed, in order
+    this.postPending(node);
 
     if (ctx.state !== 'running') await ctx.resume();
   }
@@ -111,14 +119,44 @@ export class AudioOutput {
    * `pending` and replay as the first batch.
    */
   write(offset: number, data: number, frac?: number): void {
-    this.pending.push({ offset, data, frac });
+    this.pending.push({ kind: 'write', write: { offset, data, frac } });
   }
 
-  /** Post all queued writes as one batch. Call once per emulated frame. */
+  /**
+   * Queue a bulk sample-data push (NES DMC) in the SAME ordered stream as
+   * register writes, so the buffer lands at the worklet before any later
+   * write that starts playing it (the board pushes bytes, then writes $4015).
+   */
+  data(id: number, bytes: Uint8Array): void {
+    this.pending.push({ kind: 'data', data: { id, bytes } });
+  }
+
+  /** Post all queued writes/data preserving order. Call once per frame. */
   flush(): void {
-    if (this.node && this.pending.length) {
-      this.node.port.postMessage({ type: 'batch', writes: this.pending.splice(0) });
+    if (this.node && this.pending.length) this.postPending(this.node);
+  }
+
+  /**
+   * Drain `pending` to the worklet, batching consecutive register writes into
+   * one 'batch' message but breaking the batch at every data push so ordering
+   * (write < data < write) is preserved across the port.
+   */
+  private postPending(node: AudioWorkletNode): void {
+    if (!this.pending.length) return;
+    const items = this.pending.splice(0);
+    let batch: PendingWrite[] = [];
+    for (const item of items) {
+      if (item.kind === 'write') {
+        batch.push(item.write);
+      } else {
+        if (batch.length) {
+          node.port.postMessage({ type: 'batch', writes: batch });
+          batch = [];
+        }
+        node.port.postMessage({ type: 'data', id: item.data.id, bytes: item.data.bytes });
+      }
     }
+    if (batch.length) node.port.postMessage({ type: 'batch', writes: batch });
   }
 
   /** Master volume 0..1 via the GainNode. */

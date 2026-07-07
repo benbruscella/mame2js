@@ -108,19 +108,27 @@ export interface ShellConfig {
   game: string;
   title: string;
   family: string;
+  /** 'console' machines route to the console room first (default arcade) */
+  kind?: 'arcade' | 'console';
   board: BoardConfig;
   sound: SoundSpec;
   roms: RomRegionSpec[];
   bindings: FieldBinding[];
   dipDefaults: DipDefault[];
   ports: PortSpec[];
+  /** console cart facts from the generator (catalog url, capability lists) */
+  cart?: { interface: string; list: string; catalogUrl: string; slots: string[]; games: string[] };
   /** base url of the compiled runtime dir (for worklet modules) */
   runtimeUrl: string;
   /** where Esc returns to (the boot menu) */
   menuUrl?: string;
 }
 
-export async function runShell(cfg: ShellConfig): Promise<void> {
+/**
+ * `preloaded` bypasses the drop-zone/manifest path: the console room hands
+ * over already-verified cart regions (regions.prg/chr) after identification.
+ */
+export async function runShell(cfg: ShellConfig, preloaded?: Regions): Promise<void> {
   const ui = buildDom(cfg);
 
   // cabinet bezel surround: play inside the real artwork's CRT window
@@ -137,16 +145,22 @@ export async function runShell(cfg: ShellConfig): Promise<void> {
   }, { capture: true });
 
   // --- ROM acquisition -------------------------------------------------------
-  // ROMs are NEVER fetched, NEVER stored, NEVER cached — anywhere (hard user
-  // directive). The one and only source is a drag-drop in this page load;
-  // the bytes live in this page's memory and die with it. Only CPU code
-  // regions are boot-critical; other regions warn and zero-fill.
-  const critical = new Set(cfg.board.cpus.map(c => c.region));
-  const zone = ui.dropZone(cfg.game);
-  ui.status(`ROMs are not distributed with mamekit — drop your own ${cfg.game}.zip (never stored).`);
-  const files = await waitForZip(ui, zone, cfg.roms, critical);
-
-  const regions = assembleRegions(cfg.roms, files, ui.status, critical);
+  // ROMs are NEVER fetched and never touch the server (hard user directive).
+  // Arcade path: a drag-drop in this page load, bytes die with the page.
+  // Console path: the room hands in cart regions it already identified
+  // (persisted only in the visitor's own browser via cartstore, by explicit
+  // user approval 2026-07-07).
+  let regions: Regions;
+  if (preloaded) {
+    regions = preloaded;
+  } else {
+    // Only CPU code regions are boot-critical; other regions warn and zero-fill.
+    const critical = new Set(cfg.board.cpus.map(c => c.region));
+    const zone = ui.dropZone(cfg.game);
+    ui.status(`ROMs are not distributed with mamekit — drop your own ${cfg.game}.zip (never stored).`);
+    const files = await waitForZip(ui, zone, cfg.roms, critical);
+    regions = assembleRegions(cfg.roms, files, ui.status, critical);
+  }
 
   // --- machine ----------------------------------------------------------------
   const input = new KeyboardInput(cfg.bindings, cfg.dipDefaults, cfg.ports);
@@ -157,6 +171,7 @@ export async function runShell(cfg: ShellConfig): Promise<void> {
   const audio = new AudioOutput();
   const board = createBoard(cfg.board, regions, input, {
     soundWrite: (offset, data, frac) => audio.write(offset, data, frac),
+    soundData: (id, bytes) => audio.data(id, bytes),
   });
   ui.setNative(board.fbWidth, board.fbHeight); // the board owns true geometry
 
@@ -189,7 +204,7 @@ export async function runShell(cfg: ShellConfig): Promise<void> {
     ).then(() => {
       // per-core master gains: wsg = MAME route gain 0.90*10/16; the AY bank
       // runs hot against the others — tamed to sit level with them
-      const VOLUMES: Record<string, number> = { wsg: 0.5625, ay8910: 0.7 };
+      const VOLUMES: Record<string, number> = { wsg: 0.5625, ay8910: 0.7, nes: 0.8 };
       audio.setVolume(VOLUMES[cfg.sound.kind] ?? 1);
     }).catch(err => console.warn('audio unavailable:', err));
     const resumeAudio = () => audio.resume();
@@ -287,6 +302,56 @@ function assembleRegions(
 
 // ---------------------------------------------------------------------------
 
+/** Human-readable key label from a DOM KeyboardEvent.code. */
+function keyLabel(code: string): string {
+  const map: Record<string, string> = {
+    ArrowLeft: '←', ArrowRight: '→', ArrowUp: '↑', ArrowDown: '↓',
+    Space: 'Space', Enter: 'Enter', ShiftLeft: 'Shift', ShiftRight: 'Shift',
+  };
+  return map[code] ?? code.replace(/^Key|^Digit/, '');
+}
+
+/** Friendly function name from a binding's IPT type / graph label. */
+function fnLabel(label: string): string {
+  const map: Record<string, string> = {
+    IPT_START: 'start', IPT_SELECT: 'select',
+    IPT_START1: 'start 1P', IPT_START2: 'start 2P',
+    IPT_COIN1: 'coin', IPT_COIN2: 'coin 2',
+    IPT_BUTTON1: 'fire', IPT_BUTTON2: 'fire 2', IPT_BUTTON3: 'fire 3',
+    IPT_SERVICE1: 'service', IPT_SERVICE: 'service',
+  };
+  if (map[label]) return map[label];
+  if (/JOYSTICK|_LEFT|_RIGHT|_UP|_DOWN/.test(label)) return 'move';
+  // console pads carry the real button name ("A", "B") in the label — keep
+  // short names verbatim, lowercase longer IPT-derived words
+  const name = label.replace(/^IPT_/, '').replace(/_/g, ' ');
+  return name.length <= 2 ? name : name.toLowerCase();
+}
+
+/** Build the on-screen controls hint from the generated bindings. */
+function controlsHelp(cfg: ShellConfig): string {
+  const parts: string[] = [];
+  const dirKeys = new Set<string>();
+  const seen = new Set<string>();
+  for (const b of cfg.bindings) {
+    const fn = fnLabel(b.label);
+    if (fn === 'move') { for (const k of b.keys) dirKeys.add(k); continue; }
+    const keys = b.keys.map(keyLabel).join(' or ');
+    const line = `${keys}: ${fn}`;
+    if (seen.has(line)) continue;
+    seen.add(line);
+    parts.push(line);
+  }
+  const head: string[] = [];
+  if (dirKeys.size) {
+    const order = ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'];
+    const arrows = order.every(k => dirKeys.has(k))
+      ? 'Arrows' : order.filter(k => dirKeys.has(k)).map(keyLabel).join('');
+    head.push(`${arrows}: move`);
+  }
+  return [...head, ...parts, 'Esc: menu'].join(' · ');
+}
+
 function buildDom(cfg: ShellConfig) {
   document.title = cfg.title;
   const root = document.createElement('div');
@@ -363,7 +428,7 @@ function buildDom(cfg: ShellConfig) {
 
   const help = document.createElement('div');
   help.style.cssText = 'color:#666';
-  help.textContent = 'Arrows: move · Space or X: fire · 5: coin · 1: start 1P · 2: start 2P · Esc: menu';
+  help.textContent = controlsHelp(cfg);
   root.appendChild(help);
 
   const ctx = canvas.getContext('2d')!;

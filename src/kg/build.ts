@@ -1,10 +1,11 @@
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync, readdirSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { GraphBuilder, type KnowledgeGraph, type PropValue } from './types.ts';
 import {
   stripComments, parseDefines, parseGames, parseRomSets, parseAddressMaps,
   parseMachineConfigs, parseMemberTags, parseInputPorts, parseGfxLayouts,
   parseGfxDecodes, parseIncludes, parseDeviceTypeDecls, parseTextMacros,
+  type InputPortsDef,
 } from './parse.ts';
 
 const VERSION = '0.1.0';
@@ -42,11 +43,13 @@ export function buildGraph(mameSrc: string, driverFile: string): KnowledgeGraph 
   const copyrightHolders = /^\/\/\s*copyright-holders\s*:\s*(.+)$/m.exec(driverRaw)?.[1].trim();
 
   let combined = '';
+  const slashIncludes: string[] = [];
   for (const file of family) {
     const raw = readFileSync(file, 'utf8');
     const rel = file.slice(mameSrc.length + 1);
     g.node('SourceFile', `file:${rel}`, { path: rel });
     for (const inc of parseIncludes(raw)) {
+      if (inc.includes('/') && !slashIncludes.includes(inc)) slashIncludes.push(inc);
       g.node('SourceFile', `file:${inc}`, { path: inc, external: true });
       g.edge(`file:${rel}`, `file:${inc}`, 'INCLUDES');
     }
@@ -55,7 +58,18 @@ export function buildGraph(mameSrc: string, driverFile: string): KnowledgeGraph 
   const driverRel = driverFile.slice(mameSrc.length + 1);
   const fileId = `file:${driverRel}`;
 
-  const consts = parseDefines(combined);
+  // constants from external includes (clock XTALs live in device headers:
+  // cpu/m6502/rp2a03.h defines NTSC_APU_CLOCK) — defines only, no graph nodes.
+  // Externals seed first, the driver family's own defines win.
+  let extConsts: Record<string, number> = {};
+  for (const inc of slashIncludes) {
+    for (const cand of [join(mameSrc, 'src/devices', inc), join(mameSrc, 'src', inc), join(mameSrc, 'src/mame', inc)]) {
+      if (!existsSync(cand)) continue;
+      extConsts = parseDefines(stripComments(readFileSync(cand, 'utf8')), extConsts);
+      break;
+    }
+  }
+  const consts = parseDefines(combined, extConsts);
   const memberTags = parseMemberTags(combined);
   const deviceTypes = parseDeviceTypeDecls(combined);
 
@@ -66,6 +80,10 @@ export function buildGraph(mameSrc: string, driverFile: string): KnowledgeGraph 
     g.node('Game', id, {
       name: gm.name, year: gm.year, company: gm.company, fullname: gm.fullname,
       monitor: gm.monitor, cls: gm.cls, init: gm.init, flags: gm.flags,
+      kind: gm.kind,
+      // compat (CONS/SYST/COMP arg 4) is a software-compatibility group, NOT
+      // a clone relationship — famicom is compat with nes but its own machine
+      ...(gm.compat !== '0' ? { compat: gm.compat } : {}),
     });
     g.edge(id, fileId, 'DEFINED_IN');
     if (gm.parent !== '0') g.edge(id, `game:${gm.parent}`, 'CLONE_OF');
@@ -158,6 +176,14 @@ export function buildGraph(mameSrc: string, driverFile: string): KnowledgeGraph 
       const target = cfgByName.get(callee);
       if (target) g.edge(cfgId, `machine:${target.cls}.${target.name}`, 'CALLS');
     }
+    for (const list of cfg.softwareLists) {
+      const listId = `softlist:${list.name}`;
+      g.node('SoftwareList', listId, {
+        name: list.name, tag: list.tag, status: list.status,
+        ...(list.filter ? { filter: list.filter } : {}),
+      });
+      g.edge(cfgId, listId, 'HAS_SOFTLIST');
+    }
     // patches: set_addrmap on devices instantiated in a CALLED config. The
     // edge lives on the PATCHING config (not the shared device node —
     // attaching there would leak one game's map into every other game that
@@ -185,6 +211,13 @@ export function buildGraph(mameSrc: string, driverFile: string): KnowledgeGraph 
           dev.screenRaw.vtotal, dev.screenRaw.vbend, dev.screenRaw.vbstart,
         ];
       }
+      if (dev.screenRefreshHz !== undefined) props.screenRefreshHz = dev.screenRefreshHz;
+      if (dev.screenSize) props.screenSize = [dev.screenSize.w, dev.screenSize.h];
+      if (dev.screenVisarea) {
+        props.screenVisarea = [dev.screenVisarea.x0, dev.screenVisarea.x1, dev.screenVisarea.y0, dev.screenVisarea.y1];
+      }
+      if (dev.slotOptions) props.slotOptions = dev.slotOptions;
+      if (dev.slotDefault) props.slotDefault = dev.slotDefault;
       g.node('Device', devId, props);
       g.edge(cfgId, devId, 'HAS_DEVICE');
       // board-style devices (IREM_M52_SOUNDC_AUDIO...) carry their own
@@ -208,31 +241,13 @@ export function buildGraph(mameSrc: string, driverFile: string): KnowledgeGraph 
 
   // --- inputs ---
   for (const inp of parseInputPorts(combined, parseTextMacros(combined))) {
-    const inpId = `inputs:${inp.name}`;
-    g.node('InputPorts', inpId, { name: inp.name });
-    g.edge(inpId, fileId, 'DEFINED_IN');
-    if (inp.include) g.edge(inpId, `inputs:${inp.include}`, 'INCLUDES_PORTS');
-    for (const port of inp.ports) {
-      const portId = `${inpId}/${port.tag}`;
-      g.node('Port', portId, { tag: port.tag, modify: port.modify ?? false });
-      g.edge(inpId, portId, 'HAS_PORT');
-      port.fields.forEach((f, i) => {
-        const fid = `${portId}/f${i}`;
-        const props: Record<string, PropValue> = { kind: f.kind, mask: f.mask };
-        if (f.activeLow !== undefined) props.activeLow = f.activeLow;
-        if (f.type) props.type = f.type;
-        if (f.modifiers) props.modifiers = f.modifiers;
-        if (f.name) props.name = f.name;
-        if (f.defaultValue !== undefined) props.defaultValue = f.defaultValue;
-        if (f.location) props.location = f.location;
-        if (f.settings?.length) {
-          props.settings = f.settings.map(s => `${s.value}=${s.name}${s.condition ? ` [if ${s.condition}]` : ''}`);
-        }
-        g.node('PortField', fid, props);
-        g.edge(portId, fid, 'HAS_FIELD');
-      });
-    }
+    emitInputPorts(g, inp, fileId);
   }
+
+  // --- console control-port inputs (live on the default slot device, not the
+  // driver: nes.cpp's INPUT_PORTS_START(nes) is empty; the joypad fields are
+  // in bus/nes_ctrl/joypad.cpp) ---
+  resolveSlotInputs(g, mameSrc, slashIncludes, machineConfigs);
 
   // --- gfx ---
   for (const layout of parseGfxLayouts(combined)) {
@@ -269,6 +284,112 @@ export function buildGraph(mameSrc: string, driverFile: string): KnowledgeGraph 
     ...(license ? { license } : {}),
     ...(copyrightHolders ? { copyrightHolders } : {}),
   });
+}
+
+function emitInputPorts(g: GraphBuilder, inp: InputPortsDef, fileId: string): void {
+  const inpId = `inputs:${inp.name}`;
+  g.node('InputPorts', inpId, { name: inp.name });
+  g.edge(inpId, fileId, 'DEFINED_IN');
+  if (inp.include) g.edge(inpId, `inputs:${inp.include}`, 'INCLUDES_PORTS');
+  for (const port of inp.ports) {
+    const portId = `${inpId}/${port.tag}`;
+    g.node('Port', portId, { tag: port.tag, modify: port.modify ?? false });
+    g.edge(inpId, portId, 'HAS_PORT');
+    port.fields.forEach((f, i) => {
+      const fid = `${portId}/f${i}`;
+      const props: Record<string, PropValue> = { kind: f.kind, mask: f.mask };
+      if (f.activeLow !== undefined) props.activeLow = f.activeLow;
+      if (f.type) props.type = f.type;
+      if (f.modifiers) props.modifiers = f.modifiers;
+      if (f.name) props.name = f.name;
+      if (f.defaultValue !== undefined) props.defaultValue = f.defaultValue;
+      if (f.location) props.location = f.location;
+      if (f.settings?.length) {
+        props.settings = f.settings.map(s => `${s.value}=${s.name}${s.condition ? ` [if ${s.condition}]` : ''}`);
+      }
+      g.node('PortField', fid, props);
+      g.edge(portId, fid, 'HAS_FIELD');
+    });
+  }
+}
+
+/**
+ * For slot devices declared with an options table and a quoted default
+ * (NES_CONTROL_PORT(config, m_ctrl1, nes_control_port1_devices, "joypad")),
+ * resolve the default option to its device class and extract that device's
+ * INPUT_PORTS. Emits an InputPorts subtree plus a Device->InputPorts
+ * USES_INPUTS edge with { option } props. Warn-and-continue on any miss —
+ * generation then ships without bindings rather than failing.
+ */
+function resolveSlotInputs(
+  g: GraphBuilder,
+  mameSrc: string,
+  slashIncludes: string[],
+  machineConfigs: { cls: string; name: string; devices: { tag: string; slotOptions?: string; slotDefault?: string }[] }[],
+): void {
+  const busDirs = [...new Set(
+    slashIncludes.filter(inc => inc.startsWith('bus/')).map(inc => join(mameSrc, 'src/devices', dirname(inc))),
+  )].filter(d => existsSync(d));
+  if (!busDirs.length) return;
+
+  // (slotOptions, slotDefault) -> InputPorts node id, or null when unresolved
+  const cache = new Map<string, string | null>();
+
+  const resolve = (slotOptions: string, slotDefault: string): string | null => {
+    const key = `${slotOptions}/${slotDefault}`;
+    if (cache.has(key)) return cache.get(key)!;
+    let result: string | null = null;
+    for (const dir of busDirs) {
+      const files = readdirSync(dir).filter(f => f.endsWith('.cpp'));
+      // 1) the options function: void nes_control_port1_devices(device_slot_interface &device)
+      let deviceType: string | undefined;
+      for (const f of files) {
+        const src = readFileSync(join(dir, f), 'utf8');
+        if (!src.includes(`void ${slotOptions}(device_slot_interface`)) continue;
+        const m = new RegExp(
+          `option_add(?:_internal)?\\(\\s*"${slotDefault}"\\s*,\\s*(\\w+)\\s*\\)`,
+        ).exec(src);
+        if (m) { deviceType = m[1]; break; }
+      }
+      if (!deviceType) continue;
+      // 2) the device definition: DEFINE_DEVICE_TYPE(NES_JOYPAD, nes_joypad_device, ...)
+      for (const f of files) {
+        const raw = readFileSync(join(dir, f), 'utf8');
+        const dm = new RegExp(`DEFINE_DEVICE_TYPE\\(\\s*${deviceType}\\s*,\\s*(\\w+)\\s*,`).exec(raw);
+        if (!dm) continue;
+        const cls = dm[1];
+        // 3) ioport_constructor cls::device_input_ports() { return INPUT_PORTS_NAME(nes_joypad); }
+        const stripped = stripComments(raw);
+        const pm = new RegExp(
+          `${cls}::device_input_ports\\(\\)[^{]*\\{[^}]*INPUT_PORTS_NAME\\(\\s*(\\w+)\\s*\\)`,
+        ).exec(stripped);
+        if (!pm) continue;
+        const portsName = pm[1];
+        const def = parseInputPorts(stripped, parseTextMacros(stripped)).find(p => p.name === portsName);
+        if (!def) continue;
+        const rel = join(dir, f).slice(mameSrc.length + 1);
+        g.node('SourceFile', `file:${rel}`, { path: rel });
+        emitInputPorts(g, def, `file:${rel}`);
+        result = `inputs:${portsName}`;
+        break;
+      }
+      if (result) break;
+    }
+    if (!result) {
+      console.warn(`  ! slot inputs unresolved: ${slotOptions} default "${slotDefault}"`);
+    }
+    cache.set(key, result);
+    return result;
+  };
+
+  for (const cfg of machineConfigs) {
+    for (const dev of cfg.devices) {
+      if (!dev.slotOptions || !dev.slotDefault) continue;
+      const inputsId = resolve(dev.slotOptions, dev.slotDefault);
+      if (!inputsId) continue;
+      g.edge(`device:${cfg.cls}.${cfg.name}/${dev.tag}`, inputsId, 'USES_INPUTS', { option: dev.slotDefault });
+    }
+  }
 }
 
 /**

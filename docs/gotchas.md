@@ -175,10 +175,14 @@ pacman ("cannonbp_protection_r").
 ## 24. ROMs are never read from the server — at all
 Hard user directive (2026-07-06, "stop reading roms from local anything").
 No `/roms` mount in serve.ts, no `romUrl` in configs, no fetch in the shell,
-no symlinks to make dev "convenient". The only sources: the user's drag-drop
-and the browser's IndexedDB memory of it (`runtime/romstore.ts`). Dev
-verification uses headless scratchpad harnesses reading `_roms/` directly —
-that's Node scripts, never the app.
+no symlinks to make dev "convenient". The only source is the user's own
+drag-drop. **Arcade** ROMs are never persisted — the bytes die with the page
+(the old `runtime/romstore.ts` IndexedDB layer was deleted). **Console carts**
+ARE persisted, but only in the visitor's own browser (IndexedDB
+`mamekit-carts` via `runtime/cartstore.ts`), by explicit later user approval
+(2026-07-07) — still never on the server. Dev verification uses headless
+scratchpad harnesses reading `_roms/` (or `_roms2/`) directly — Node scripts,
+never the app. See §27 for the console model.
 
 ## 25. A generated game is NOT a playable game (stale-bundle trap)
 Running `mamekit <game>` writes dist/<game>/ immediately — the shelf lists it
@@ -195,3 +199,45 @@ Panel edits take ~5-15 min to reach ns1-3.dreamhost.com — `dig
 can stall on a domain set before DNS propagated; remove/re-add the cname to
 kick it. The deploy script must own `dist/CNAME` or a force-push detaches
 the custom domain.
+
+## 27. Consoles: the machine has no ROMs; carts are the content (nes, issue #17)
+The NES is declared with `CONS(...)` (an alias of `SYST` in gamedrv.h — extra
+COMPAT field, no MONITOR/ROT), which the parser now recognizes alongside
+`GAME`. Its `ROM_START` is an empty RAM region — the machine needs no ROMs;
+all content is user-supplied cartridges. Fallout to remember:
+- **config gains `kind:"console"` + a `cart` block** `{interface, list,
+  catalogUrl, slots, games}`. `slots` = mappers the board implements; `games`
+  = the *explicit verified allowlist* (user directive 2026-07-07: "support
+  explicit games, not all, so I can test" — starts at `['smb']`). Both are
+  device-library capability tables in the generator (`CART_SLOT_SUPPORT` /
+  `CART_GAME_SUPPORT`), NOT graph facts.
+- **The cart catalog** (`dist/nes/softlist.json`, ~4.5k entries) is extracted
+  from MAME `hash/nes.xml` by `src/kg/softlist.ts` — a sibling artifact, kept
+  OUT of graph.json (it would swamp the viewer). Carts are identified by CRC
+  of the prg/chr slices **separately** (a `.nes` file is header+prg+chr; the
+  catalog CRCs are per-chip). `runtime/nes-ines.ts` does header parse + match.
+- **Three support tiers** from `identify()`: `tested` (allowlisted → verified,
+  plays), `experimental` (supported mapper, unverified → plays, flagged),
+  `unsupported` (mapper not implemented → no play). Don't collapse them.
+- **Cart handoff to the board**: the console room injects `board.cart =
+  {mapper, mirroring, battery}` into a cloned config and passes cart bytes as
+  `regions.prg`/`regions.chr` to `runShell(cfg, regions)`. The generated
+  config never carries cart bytes. `regions.chr` absent/empty ⇒ 8K CHR-RAM.
+- **Controller ports come from the slot device**, not the driver:
+  `INPUT_PORTS_START(nes)` is empty; the joypad's 8 active-HIGH bits live in
+  `bus/nes_ctrl/joypad.cpp`, reached via a Device→InputPorts USES_INPUTS edge
+  (`build.ts` `resolveSlotInputs`). NES keys: Z=A, X/Space=B, Enter=Start,
+  RightShift=Select, arrows=d-pad. The shell's on-screen help is now generated
+  from the bindings (`controlsHelp`), so it's correct per machine.
+- **Audio DMC is split-brain**: the APU DSP runs in the worklet and can't read
+  CPU memory, so the board runs a main-thread "shadow" APU for $4015/IRQs and
+  snapshots DMC sample bytes from cart PRG, pushing them via
+  `BoardSinks.soundData` → `AudioOutput.data()`.
+
+## 28. The Playwright MCP browser is shared with the USER too
+§0c warns about parallel agents sharing the browser — but the *user* driving
+their own session in the same instance will also make pages navigate between
+your calls (e.g. the console menu "jumping" into `g/nes/` was the user
+clicking, not a bug). When live-debugging with the user, don't chase
+self-navigations; and `indexedDB.deleteDatabase(...)`/`localStorage.clear()`
+in an `evaluate` will wipe the user's own dropped carts — warn first.

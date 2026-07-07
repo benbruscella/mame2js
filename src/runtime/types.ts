@@ -66,6 +66,12 @@ export interface BoardConfig {
   customs?: { port: string; mask: number; member: string }[];
   screen: { width: number; height: number; refresh: number; vtotal: number; vbstart: number; vbend?: number; rotate: number };
   clocks: { namco06: number; wsg: number };
+  /**
+   * Console cartridge metadata, injected at runtime by the console room after
+   * identifying a user-dropped cart (never present in generated config.json —
+   * the cart bytes arrive as regions.prg / regions.chr alongside it).
+   */
+  cart?: { mapper: number; mirroring: 'horizontal' | 'vertical' | 'four' | 'single0' | 'single1'; battery?: boolean };
 }
 
 export interface BoardSinks {
@@ -77,6 +83,13 @@ export interface BoardSinks {
    * sweeps quantize into chirpy stair-steps. Pass it whenever known.
    */
   soundWrite: (offset: number, data: number, frac?: number) => void;
+  /**
+   * Bulk sample-data push to the worklet (NES DMC: the APU DSP runs in the
+   * worklet and cannot read CPU memory, so the board snapshots the sample
+   * bytes at trigger time and ships them). `id` names the buffer slot the
+   * core's register writes refer to.
+   */
+  soundData?: (id: number, bytes: Uint8Array) => void;
 }
 
 export interface BoardSnapshot {

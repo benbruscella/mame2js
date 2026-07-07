@@ -17,6 +17,7 @@ import { readZip, crc32 } from './zip.ts';
 import { decodeGfx, type GfxLayout } from './gfx.ts';
 import { loadArtwork } from './artwork.ts';
 import { createBoard } from './boards/index.ts';
+import { openCartStore } from './cartstore.ts';
 
 interface GameEntry {
   game: string;
@@ -25,6 +26,8 @@ interface GameEntry {
   year: string;
   manufacturer: string;
   family: string;
+  /** consoles get their own tab + room; absent means arcade */
+  kind?: 'arcade' | 'console';
   hasRom: boolean;
   hasArt: boolean;
   /** the compiled app contains this game's board module (games.json) */
@@ -47,8 +50,11 @@ export async function runMenu(): Promise<void> {
   document.title = 'MAME History — the video arcade, transpiled';
   const games: GameEntry[] = await fetch('../games.json').then(r => r.json());
   games.sort((a, b) => a.year.localeCompare(b.year) || a.game.localeCompare(b.game));
-  // NOTHING is cached — no ROM bytes, no derived screenshots (hard user
-  // directive). Purge anything older builds may have stored.
+  // NOTHING arcade is cached — no ROM bytes, no derived screenshots (hard
+  // user directive). Purge anything older builds may have stored: the legacy
+  // `mame2js-roms` DB plus mamekit:/mame2js:-prefixed web-storage keys ONLY.
+  // Console carts live in the `mamekit-carts` IndexedDB by explicit user
+  // approval (2026-07-07) — this purge must NEVER touch it.
   try { indexedDB.deleteDatabase('mame2js-roms'); } catch { /* legacy DB name — unavailable is fine */ }
   try {
     for (const store of [localStorage, sessionStorage]) {
@@ -102,6 +108,40 @@ export async function runMenu(): Promise<void> {
   header.append(marquee, search);
   root.appendChild(header);
 
+  // --- ARCADE | CONSOLES tab pills ------------------------------------------------
+  // active tab from ?tab=consoles (deep-linkable, Pages-safe); switching
+  // rewrites the query via replaceState so reload/share lands on the same tab
+  let activeTab: 'arcade' | 'console' =
+    new URLSearchParams(location.search).get('tab') === 'consoles' ? 'console' : 'arcade';
+  const tabsBar = el('div', 'display:flex;gap:14px;justify-content:center;padding:24px 36px 0');
+  const pills = new Map<'arcade' | 'console', HTMLElement>();
+  const stylePills = () => {
+    for (const [tab, pill] of pills) {
+      const active = tab === activeTab;
+      pill.style.background = active ? '#f2c200' : 'transparent';
+      pill.style.color = active ? '#1b1b1b' : '#9fb0ff';
+      pill.style.borderColor = active ? '#f2c200' : '#2a3160';
+    }
+  };
+  const setTab = (tab: 'arcade' | 'console') => {
+    if (tab === activeTab) return;
+    activeTab = tab;
+    history.replaceState(null, '', tab === 'console' ? '?tab=consoles' : location.pathname);
+    stylePills();
+    applyFilter();
+  };
+  for (const [tab, text] of [['arcade', 'ARCADE'], ['console', 'CONSOLES']] as const) {
+    const pill = el('button', `padding:9px 26px;border-radius:20px;border:2px solid #2a3160;
+      font:inherit;font-weight:800;letter-spacing:2px;font-size:12px;cursor:pointer`);
+    pill.textContent = text;
+    pill.setAttribute('data-tab', tab === 'console' ? 'consoles' : 'arcade');
+    pill.addEventListener('click', () => setTab(tab));
+    pills.set(tab, pill);
+    tabsBar.appendChild(pill);
+  }
+  stylePills();
+  root.appendChild(tabsBar);
+
   // --- shelves ------------------------------------------------------------------
   const wall = el('div', `display:flex;flex-wrap:wrap;gap:34px 26px;justify-content:center;
     padding:44px 36px 0;max-width:1280px;margin:0 auto`);
@@ -154,7 +194,8 @@ export async function runMenu(): Promise<void> {
     let any = false;
     for (const b of boxes) {
       const hay = `${b.entry.title} ${b.entry.manufacturer} ${b.entry.year} ${b.entry.game}`.toLowerCase();
-      b.visible = !q || hay.includes(q);
+      const kind = b.entry.kind === 'console' ? 'console' : 'arcade';
+      b.visible = kind === activeTab && (!q || hay.includes(q));
       b.box.style.display = b.visible ? '' : 'none';
       any ||= b.visible;
     }
@@ -163,9 +204,16 @@ export async function runMenu(): Promise<void> {
   };
   search.addEventListener('input', applyFilter);
 
+  // consoles skip the learn modal: the console's story lives in the room's
+  // own About button, so the tile navigates straight to the room
+  const openEntry = (entry: GameEntry) => {
+    if (entry.kind === 'console') location.href = `g/${encodeURIComponent(entry.game)}/`;
+    else void openLearnModal(entry);
+  };
+
   const launch = () => {
     const vis = boxes.filter(b => b.visible);
-    if (vis[selected]) void openLearnModal(vis[selected].entry);
+    if (vis[selected]) openEntry(vis[selected].entry);
   };
 
   addEventListener('keydown', ev => {
@@ -182,7 +230,7 @@ export async function runMenu(): Promise<void> {
         if (ev.target !== search && ev.key.length === 1 && !ev.metaKey && !ev.ctrlKey) search.focus();
     }
   });
-  select(0);
+  applyFilter(); // hides the inactive tab's boxes + selects the first visible
 
   // --- box construction --------------------------------------------------------
 
@@ -212,7 +260,9 @@ export async function runMenu(): Promise<void> {
     label.append(name, meta);
     box.appendChild(label);
 
-    if (entry.supported === false || !entry.hasRom) {
+    // consoles have no romset, so "INSERT ROM" is meaningless there — only
+    // the stale-bundle "IN DEVELOPMENT" ribbon applies to them
+    if (entry.supported === false || (entry.kind !== 'console' && !entry.hasRom)) {
       const ribbon = el('div', `position:absolute;top:14px;right:-34px;transform:rotate(38deg);z-index:4;
         background:${entry.supported === false ? '#666' : '#c22'};color:#fff;font-size:10px;font-weight:700;
         letter-spacing:1px;padding:3px 38px;box-shadow:0 2px 6px rgba(0,0,0,.5)`);
@@ -222,10 +272,28 @@ export async function runMenu(): Promise<void> {
       box.appendChild(ribbon);
     }
 
+    if (entry.kind === 'console') {
+      // async cart-count badge from the visitor's own cart library
+      const badge = el('div', `position:absolute;left:12px;right:0;bottom:66px;z-index:2;
+        padding:6px 14px;font-size:11px;font-weight:600;letter-spacing:.6px;color:#f2c200;
+        background:linear-gradient(transparent, rgba(4,5,12,.9) 45%);pointer-events:none`);
+      badge.setAttribute('data-cart-badge', entry.game);
+      box.appendChild(badge);
+      void openCartStore()
+        .then(s => s.list(entry.game))
+        .then(carts => {
+          badge.textContent = carts.length
+            ? `${carts.length} cart${carts.length === 1 ? '' : 's'} on the shelf`
+            : 'No carts yet — click to insert one';
+        })
+        .catch(() => { badge.textContent = ''; });
+    }
+
     box.addEventListener('mouseenter', () => { box.style.transform = 'translateY(-12px) scale(1.04)'; });
     box.addEventListener('mouseleave', () => { box.style.transform = ''; box.style.outline = 'none'; });
-    // education first: the box opens the game's history card; Play lives inside
-    box.addEventListener('click', () => { void openLearnModal(entry); });
+    // education first: the box opens the game's history card; Play lives
+    // inside. Console tiles go straight to their room (About lives there).
+    box.addEventListener('click', () => openEntry(entry));
 
     // shelf plank under each box — planks in a row join into one shelf
     const plank = el('div', `width:350px;height:16px;margin-top:0;border-radius:2px;
@@ -428,6 +496,9 @@ export async function runMenu(): Promise<void> {
       ctx.drawImage(flyer, (canvas.width - w) / 2, (canvas.height - h) / 2, w, h);
       return;
     }
+    // consoles: no cabinet/screenshot ladder — a stylized front-loader
+    // placeholder unless real box art (step 0 above) exists
+    if (entry.kind === 'console') { swapConsoleCover(canvas); return; }
     // 1. cabinet artwork frame (drawn immediately; the deterministic
     //    screenshot fills the CRT window when it's ready)
     if (entry.hasArt && await paintArtwork(entry, canvas, ctx)) return;
@@ -558,6 +629,57 @@ export async function runMenu(): Promise<void> {
     // tile-art covers needed ROM bytes; ROMs are never stored/cached, so
     // this rung of the cover ladder is permanently retired (flyers rule)
     return false;
+  }
+
+  /**
+   * Stylized console hardware cover: a grey front-loader deck (lighter top,
+   * darker lower front, near-black flap) with the thin red accent stripe —
+   * no trademarked artwork, pure geometry.
+   */
+  // Consoles get a crisp inline-SVG front-loader instead of a canvas painter:
+  // swap the <canvas> cover for a <div> holding the SVG (sharp at any DPR).
+  // Trademark-free: neutral "CONTROL DECK" wordmark, classic dark stripes,
+  // red power LED, cartridge flap. Matches the console room's hero art.
+  function swapConsoleCover(canvas: HTMLCanvasElement): void {
+    const host = el('div', canvas.style.cssText);
+    host.style.background = 'linear-gradient(#171a2b,#0a0b14)';
+    host.style.display = 'flex';
+    host.style.alignItems = 'center';
+    host.style.justifyContent = 'center';
+    host.innerHTML = nesConsoleSvg();
+    canvas.replaceWith(host);
+  }
+
+  function nesConsoleSvg(): string {
+    const W = 300, H = 400;
+    const cw = W * 0.84, cx = (W - cw) / 2, ch = cw * 0.62, cy = H * 0.30;
+    const n = (x: number) => x.toFixed(1);
+    const sx = cx + cw * 0.08, sw = cw * 0.84;
+    const ledX = cx + cw * 0.13, ledY = cy + ch * 0.32, ledR = cw * 0.016;
+    const wmX = cx + cw * 0.3, wmY = cy + ch * 0.38, wmW = cw * 0.4, wmH = ch * 0.16;
+    const fx = cx + cw * 0.06, fy = cy + ch * 0.62, fw = cw * 0.88, fh = ch * 0.32;
+    return `<svg viewBox="0 0 ${W} ${H}" width="100%" height="100%" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="NES console">
+      <defs>
+        <linearGradient id="mcd" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#e2ded4"/><stop offset="1" stop-color="#c4c0b5"/></linearGradient>
+        <radialGradient id="mled" cx="0.5" cy="0.5" r="0.5"><stop offset="0" stop-color="#ff6068"/><stop offset="0.55" stop-color="#e60012"/><stop offset="1" stop-color="rgba(230,0,18,0)"/></radialGradient>
+      </defs>
+      <ellipse cx="${n(cx + cw / 2)}" cy="${n(cy + ch + 12)}" rx="${n(cw * 0.54)}" ry="${n(ch * 0.08)}" fill="rgba(0,0,0,.5)"/>
+      <rect x="${n(cx)}" y="${n(cy)}" width="${n(cw)}" height="${n(ch)}" rx="${n(cw * 0.045)}" fill="url(#mcd)"/>
+      <rect x="${n(cx)}" y="${n(cy)}" width="${n(cw)}" height="3" rx="1.5" fill="rgba(255,255,255,.65)"/>
+      <rect x="${n(sx)}" y="${n(cy + ch * 0.13)}" width="${n(sw)}" height="${n(ch * 0.028)}" fill="#17150f"/>
+      <rect x="${n(sx)}" y="${n(cy + ch * 0.19)}" width="${n(sw)}" height="${n(ch * 0.028)}" fill="#17150f"/>
+      <circle cx="${n(ledX)}" cy="${n(ledY)}" r="${n(ledR * 2.8)}" fill="url(#mled)"/>
+      <circle cx="${n(ledX)}" cy="${n(ledY)}" r="${n(ledR)}" fill="#e60012"/>
+      <rect x="${n(cx + cw * 0.78)}" y="${n(cy + ch * 0.28)}" width="${n(cw * 0.05)}" height="${n(ch * 0.06)}" rx="1" fill="#2c2a27"/>
+      <rect x="${n(cx + cw * 0.86)}" y="${n(cy + ch * 0.28)}" width="${n(cw * 0.05)}" height="${n(ch * 0.06)}" rx="1" fill="#2c2a27"/>
+      <rect x="${n(wmX)}" y="${n(wmY)}" width="${n(wmW)}" height="${n(wmH)}" rx="2" fill="#cbc7bc" stroke="rgba(0,0,0,.25)"/>
+      <text x="${n(wmX + wmW / 2)}" y="${n(wmY + wmH * 0.68)}" text-anchor="middle" font-family="ui-monospace,monospace" font-size="${n(wmH * 0.5)}" font-weight="700" letter-spacing="1.5" fill="#6a655b">CONTROL DECK</text>
+      <rect x="${n(cx + cw * 0.45)}" y="${n(fy - ch * 0.04)}" width="${n(cw * 0.1)}" height="${n(ch * 0.05)}" rx="2" fill="#8f8b82"/>
+      <rect x="${n(fx)}" y="${n(fy)}" width="${n(fw)}" height="${n(fh)}" rx="4" fill="#a7a39a"/>
+      <rect x="${n(fx)}" y="${n(fy)}" width="${n(fw)}" height="2" fill="rgba(255,255,255,.28)"/>
+      <rect x="${n(fx + fw * 0.04)}" y="${n(fy + fh * 0.5)}" width="${n(fw * 0.92)}" height="1.5" fill="rgba(0,0,0,.3)"/>
+      <text x="${n(W / 2)}" y="${n(cy + ch + 40)}" text-anchor="middle" font-family="ui-monospace,monospace" font-size="13" font-weight="700" letter-spacing="3" fill="#5b6486">▸ ENTER TO INSERT CARTS</text>
+    </svg>`;
   }
 
   function paintPlaceholder(entry: GameEntry, canvas: HTMLCanvasElement, ctx: CanvasRenderingContext2D): void {

@@ -11,7 +11,7 @@ your task.
 | [runtime.md](runtime.md) | Every runtime module: CPUs (Z80/M6809/KONAMI-1/I8080/M6803), buses, sound cores, video, shell — with the hardware facts baked in |
 | [generator.md](generator.md) | How config/meta/dossier/manifest are derived from the graph; handler-key conventions; what fails loudly and why |
 | [adding-a-game.md](adding-a-game.md) | The playbook — proven six times now |
-| [testing.md](testing.md) | Running the spec suites (23 of them), the synthetic-ROM smoke test, headless real-ROM harnesses, browser verification |
+| [testing.md](testing.md) | Running the spec suites (35 of them), the synthetic-ROM smoke test, headless real-ROM harnesses, browser verification |
 | [deployment.md](deployment.md) | mamehistory.com: GitHub Pages, custom domain/DNS, the deploy script, caching, HTTPS-or-no-sound |
 | [gotchas.md](gotchas.md) | **Read before changing anything.** Hard-won facts that are not obvious from the code |
 | [TODO.md](TODO.md) | Prioritized backlog with context for each item |
@@ -41,16 +41,23 @@ mamekit galaga --serve
 5. ROMs: **never read from the server or the project tree** (hard user
    directive, 2026-07-06). The arcade screen is a drag-drop zone showing the
    required chip manifest; the zip is validated per-chip (✓/≈/✗) **before**
-   booting, and a verified drop is remembered in the visitor's own browser
-   (IndexedDB, `runtime/romstore.ts`) so it's insert-once per machine.
-   Dev-time headless harnesses may read `_roms/` directly; the app may not.
+   booting. Arcade ROMs are **not** persisted (the bytes die with the page).
+   **Console cartridges** are the exception — a dropped cart is remembered in
+   the visitor's own browser (IndexedDB `mamekit-carts`, `runtime/cartstore.ts`)
+   by explicit user approval (2026-07-07), still never on the server.
+   Dev-time headless harnesses may read `_roms/` / `_roms2/` directly; the
+   app may not.
 
-State as of 2026-07-06: **six games boot and play** — Galaga, Pac-Man,
-Galaxian (issue #1), Gyruss, Space Invaders, Moon Patrol (issue #3) — and
-the whole thing is **deployed at https://mamehistory.com** (issue #4).
-23 spec suites (~2,400 checks) green. Known gaps: gyruss i8039 percussion
-stub, mpatrol MSM5205 drums not routed to the worklet — see
-[TODO.md](TODO.md).
+State as of 2026-07-07: **eight arcade games boot and play** — Galaga,
+Pac-Man, Galaxian (issue #1), Gyruss, Space Invaders, Moon Patrol (issue #3),
+Ghosts'n Goblins, Juno First (issue #12) — plus the project's **first
+console, the NES** (issue #17): drop a cartridge dump onto the console room
+and Super Mario Bros. plays (verified allowlist; other carts on the five
+supported mappers — NROM/UxROM/CNROM/MMC1/MMC3 — are playable as
+experimental). The whole thing is **deployed at https://mamehistory.com**
+(issue #4). 35 spec suites green. Known gaps: gyruss i8039 percussion stub,
+mpatrol MSM5205 drums not routed to the worklet, NES DMC mid-sample bank
+staleness + scanline-granularity PPU timing — see [TODO.md](TODO.md).
 
 ## Ground rules (user requirements — do not violate)
 
