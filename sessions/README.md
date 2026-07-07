@@ -8,7 +8,23 @@ the full reasoning history travels with the repo.
   51xx/06xx HLE, generator, shell, first successful Galaga boot, repo split,
   docs. Read with `zcat <file> | jq -r 'select(.type=="assistant" or .type=="user")'`
   or just `zcat | grep`.
-- `memory/` — snapshot of the persistent memory files from the same period.
+- `2026-07-06-games4-8-education-deploy-audio-mamekit.jsonl.gz` — the long
+  second arc (2026-07-06 → 07). Games #4–8: gyruss, Space Invaders, Moon
+  Patrol (issue #3), Ghosts'n Goblins (#8, YM2203), Juno First (#10, MCS-48 —
+  which also closed the gyruss percussion stub). New CPU cores m6809/konami1,
+  i8080, m6803, mcs48; sound cores ay8910, ym2203, invaders-sound, msm5205.
+  The education layer (story-first learn modal, per-game markdown dossiers,
+  driver credits + git history, Gaming History integration). Deployment to
+  **mamehistory.com** (issue #4: GitHub Pages, DreamHost DNS, HTTPS, pretty
+  routes, deploy watchdog). The **no-server-ROMs** mandate (drop-zone only,
+  no persistence). A deep **audio-fidelity** push (timestamped write
+  scheduling, Konami RC filters, DAC interpolation, the `tools/render-audio`
+  + `tools/compare-audio` "ears", issue #12). And the **mame2js → mamekit**
+  rename (issue #11). *Image payloads stripped* (`<stripped …b base64>`) to
+  keep the file lean — reasoning, tool calls, and results are intact.
+- `memory/` — snapshot of the persistent memory files (current as of the
+  second arc: mamekit identity, no-server-ROMs directive, MAMEWorld
+  provenance, local ROM/artwork inventory, never-bind-Ctrl).
 
 Notes for agents:
 - These are **snapshots**, not live state. The curated, current knowledge is
