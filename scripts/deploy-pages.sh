@@ -58,23 +58,23 @@ echo "pushed gh-pages — waiting for the Pages build (healthy ≈ 45 s)..."
 kicked=0
 for i in $(seq 1 30); do
   sleep 10
-  status="$(gh api repos/benbruscella/mame2js/pages/builds/latest -q .status 2>/dev/null || echo unknown)"
+  status="$(gh api repos/benbruscella/mamekit/pages/builds/latest -q .status 2>/dev/null || echo unknown)"
   case "$status" in
     built) break ;;
     errored)
       echo "DEPLOY FAILED: Pages build errored:" >&2
-      gh api repos/benbruscella/mame2js/pages/builds/latest -q .error.message >&2
+      gh api repos/benbruscella/mamekit/pages/builds/latest -q .error.message >&2
       exit 1 ;;
     building|queued|unknown)
       if [ "$i" -ge 18 ] && [ "$kicked" -eq 0 ]; then
         echo "build stuck ($status after $((i*10))s) — requesting a fresh build"
-        gh api repos/benbruscella/mame2js/pages/builds -X POST > /dev/null 2>&1 || true
+        gh api repos/benbruscella/mamekit/pages/builds -X POST > /dev/null 2>&1 || true
         kicked=1
       fi ;;
   esac
 done
 if [ "${status:-}" != "built" ]; then
-  echo "DEPLOY FAILED: Pages build still '$status' after 5 min — check https://github.com/benbruscella/mame2js/deployments" >&2
+  echo "DEPLOY FAILED: Pages build still '$status' after 5 min — check https://github.com/benbruscella/mamekit/deployments" >&2
   exit 1
 fi
 

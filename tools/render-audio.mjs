@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Audio "ears" for mame2js development.
+// Audio "ears" for mamekit development.
 //
 //   node tools/render-audio.mjs <game> <path/to/game.zip> [frames=2400] [outdir=.] [script]
 //

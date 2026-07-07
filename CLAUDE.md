@@ -1,4 +1,4 @@
-# mame2js — agent orientation
+# mamekit — agent orientation
 
 **Start here: read `docs/README.md`** — it indexes everything (architecture,
 knowledge graph, runtime reference, generator, adding-a-game playbook,
@@ -6,9 +6,9 @@ testing, gotchas, TODO). `docs/gotchas.md` is mandatory before changing code.
 
 Quick facts:
 
-- `mame2js galaga --serve` → knowledge graph + unified app on
+- `mamekit galaga --serve` → knowledge graph + unified app on
   http://localhost:8280/app/ (boot menu; game at /app/?g=galaga, viewer at
-  /galaga/viewer.html). `mame2js --serve` alone serves all generated games.
+  /galaga/viewer.html). `mamekit --serve` alone serves all generated games.
 - MAME source auto-detected at `../mame` (sibling checkout) or parent;
   override with `--mame-src` / `$MAME_SRC`. MAME is a dev-time dependency
   only (extraction + reference for hand-porting device cores).

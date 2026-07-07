@@ -1,16 +1,16 @@
 {
-  "name": "mame2js",
+  "name": "mamekit",
   "version": "0.1.0",
   "description": "Knowledge-graph-first transpiler: MAME driver source -> runnable browser (canvas) emulator app",
   "type": "module",
   "bin": {
-    "mame2js": "bin/mame2js.js"
+    "mamekit": "bin/mamekit.js"
   },
   "scripts": {
     "build": "tsc",
-    "serve": "node bin/mame2js.js --serve",
-    "gen": "node bin/mame2js.js",
-    "gen:all": "for g in galaga pacman galaxian gyruss invaders mpatrol gng junofrst; do node bin/mame2js.js $g || exit 1; done",
+    "serve": "node bin/mamekit.js --serve",
+    "gen": "node bin/mamekit.js",
+    "gen:all": "for g in galaga pacman galaxian gyruss invaders mpatrol gng junofrst; do node bin/mamekit.js $g || exit 1; done",
     "deploy": "bash scripts/deploy-pages.sh",
     "test": "tsc --noEmit && for f in src/runtime/*.spec.ts src/runtime/*/*.spec.ts; do node $f > /dev/null || { echo \"FAIL $f\"; exit 1; }; echo \"PASS $f\"; done"
   },

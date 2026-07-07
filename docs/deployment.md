@@ -61,7 +61,7 @@ legacy `?g=` param — both work.
   deploy busts the HTML→bundle edge; submodules still ride the 10-minute
   window.
 - Pages builds take a few minutes with the 74 MB artwork tree. Check
-  `gh api repos/benbruscella/mame2js/pages/builds/latest`. A superseded
+  `gh api repos/benbruscella/mamekit/pages/builds/latest`. A superseded
   build can show as `errored` — only the latest matters.
 
 ## HTTPS (and why sound depends on it)

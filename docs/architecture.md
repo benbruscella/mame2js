@@ -63,7 +63,7 @@ teachable (viewer), and decouples parser improvements from runtime work.
 ### No C++ AST
 The machine description lives in highly regular declarative macros. Targeted
 parsers get ~95% of the value; libclang would fight the preprocessor for the
-rest. If mame2js ever needs to scale across many exotic drivers, revisit —
+rest. If mamekit ever needs to scale across many exotic drivers, revisit —
 but extend the parsers first (they're ~600 lines total).
 
 ### Role of the C++ source (three distinct uses)
@@ -106,8 +106,8 @@ the CLI**, only for the browser app.
 ## Repository layout
 
 ```
-mame2js/
-├── bin/mame2js.js          CLI entry (imports src/cli.ts — Node runs TS natively)
+mamekit/
+├── bin/mamekit.js          CLI entry (imports src/cli.ts — Node runs TS natively)
 ├── src/
 │   ├── cli.ts              arg parsing, driver discovery (cached), orchestration
 │   ├── serve.ts            zero-dep static server ('' -> dist/, /roms -> roms/, /games.json manifest)
@@ -121,8 +121,8 @@ mame2js/
 └── dist/                   gitignored; per-game artifacts + generated app
 ```
 
-The repo lives at `~/Projects/Github/mame2js` (github.com/benbruscella/mame2js)
-with a **symlink** at `<mame>/mame2js` for convenience. The MAME checkout is
+The repo lives at `~/Projects/Github/mamekit` (github.com/benbruscella/mamekit)
+with a **symlink** at `<mame>/mamekit` for convenience. The MAME checkout is
 auto-detected as sibling (`../mame`) or parent.
 
 ## Performance envelope (so you don't over-engineer)

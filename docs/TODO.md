@@ -41,7 +41,7 @@ Prioritized. Each item has enough context to start cold. Check
 6. **Live-state KG viewer overlay** (the "instrument panel" idea the user
    loved): viewer connects to the running emulator (BroadcastChannel or
    WebSocket through serve.ts), `board.snapshot()` + `board.shares` already
-   expose the data (`window.mame2js` debug handle exists). Click Z80 node →
+   expose the data (`window.mamekit` debug handle exists). Click Z80 node →
    live pc/regs (+ tiny disassembler); videoram range → live tilemap dump;
    edge activity by bus traffic counts (add per-range counters to Bus
    behind a debug flag).
@@ -57,7 +57,7 @@ Prioritized. Each item has enough context to start cold. Check
 10. **Source deep-links**: record line numbers in the parsers
     (`parse.ts` knows offsets; convert to lines), link nodes to
     `github.com/mamedev/mame/blob/master/<file>#L<n>`.
-11. **`mame2js diff` / provenance**: show which driver lines each generated
+11. **`mamekit diff` / provenance**: show which driver lines each generated
     config value came from (needs #10's line capture).
 
 ## P3 — emulation quality
@@ -80,7 +80,7 @@ Prioritized. Each item has enough context to start cold. Check
 
 ## P4 — infrastructure
 
-19. **npm publish / npx mame2js** (bin already declared).
+19. **npm publish / npx mamekit** (bin already declared).
 20. **Bundle option**: single-file app output (inline modules) for easy
     hosting; keep the no-bundler default.
 21. ~~PORT_INCLUDE resolution~~ **shipped** (issue #3: generator merges the
@@ -110,7 +110,7 @@ Prioritized. Each item has enough context to start cold. Check
 - Z80 (266 checks), WSG (+worklet), video (36 checks), board + 51xx/06xx HLE
 - Generator + shell + zip(CRC match) + serve
 - Galaga verified playing in-browser at 60fps
-- Repo split to github.com/benbruscella/mame2js, symlink at <mame>/mame2js
+- Repo split to github.com/benbruscella/mamekit, symlink at <mame>/mamekit
 - Issue #1 (2026-07-05): unified app (dist/app + per-game config.json),
   Blockbuster-shelf boot menu (artwork/snapshot/tile covers + search),
   Esc-to-menu, galaxian board/video/sound (plays in-browser), pacman

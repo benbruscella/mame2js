@@ -19,9 +19,9 @@ function propsBlock(props: Record<string, PropValue>): string {
 
 export function toCypher(graph: KnowledgeGraph): string {
   const lines: string[] = [
-    `// mame2js knowledge graph — driver ${graph.meta.driverFile}`,
+    `// mamekit knowledge graph — driver ${graph.meta.driverFile}`,
     `// generated ${graph.meta.generatedAt}`,
-    `CREATE CONSTRAINT mame2js_id IF NOT EXISTS FOR (n:KG) REQUIRE n.id IS UNIQUE;`,
+    `CREATE CONSTRAINT mamekit_id IF NOT EXISTS FOR (n:KG) REQUIRE n.id IS UNIQUE;`,
   ];
   for (const n of graph.nodes) {
     lines.push(`MERGE (n:KG {id: ${cypherValue(n.id)}}) SET n:${n.label} SET n += {${propsBlock(n.props).replace(/^, /, '')}};`);

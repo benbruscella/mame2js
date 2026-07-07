@@ -1,4 +1,4 @@
-// OKI MSM5205 ADPCM speech decoder for mame2js (Irem M52/M62 sound boards).
+// OKI MSM5205 ADPCM speech decoder for mamekit (Irem M52/M62 sound boards).
 //
 // Ported from MAME src/devices/sound/msm5205.cpp (Dialogic/OKI ADPCM):
 // the 49-step x 16-nibble difference table is computed exactly like MAME's

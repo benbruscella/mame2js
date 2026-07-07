@@ -1,4 +1,4 @@
-# mame2js documentation
+# mamekit documentation
 
 Docs written for **future working sessions (human or agent)** — everything you
 need to pick this project up cold. Read this index, then the file matching
@@ -19,7 +19,7 @@ your task.
 ## Sixty-second orientation
 
 ```
-mame2js galaga --serve
+mamekit galaga --serve
 ```
 
 1. Finds `GAME(..., galaga, ...)` in the MAME source tree (auto-detected at
@@ -36,7 +36,7 @@ mame2js galaga --serve
    **story-first "learn" modal** (machine facts, MAME-driver credits + git
    history, Gaming History chapters, artwork) with the Play button inside.
    Games live at `/app/g/<game>/` (pretty route; legacy `?g=` still works);
-   Esc returns to the menu. `mame2js --serve` alone serves everything
+   Esc returns to the menu. `mamekit --serve` alone serves everything
    without needing the MAME tree.
 5. ROMs: **never read from the server or the project tree** (hard user
    directive, 2026-07-06). The arcade screen is a drag-drop zone showing the

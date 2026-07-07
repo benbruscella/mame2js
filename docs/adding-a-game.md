@@ -22,7 +22,7 @@ Issue #3 lessons worth internalizing before starting:
 ## 1. Extract and inspect
 
 ```
-node bin/mame2js.js graph <game>
+node bin/mamekit.js graph <game>
 open dist/<game>/viewer.html      # or read graph.json
 ```
 
@@ -34,7 +34,7 @@ with clock null and a `clockExpr` string, missing ranges, etc.) — fix
 ## 2. Attempt generation
 
 ```
-node bin/mame2js.js <game>
+node bin/mamekit.js <game>
 ```
 
 Two designed failure points tell you the work list:

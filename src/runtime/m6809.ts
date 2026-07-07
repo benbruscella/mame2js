@@ -1,4 +1,4 @@
-// Motorola MC6809 CPU emulator core for mame2js.
+// Motorola MC6809 CPU emulator core for mamekit.
 //
 // Self-contained ES module: zero imports, zero runtime dependencies, no DOM.
 // Instruction semantics, flag behavior and cycle counts are ported from the

@@ -106,9 +106,9 @@ Use the dev server (`--serve`, :8280). The KG viewer works from file:// for
 humans, but automated checks need http.
 
 ## 14. The symlink arrangement
-Repo truth: `~/Projects/Github/mame2js`. `<mame>/mame2js` is a symlink kept
+Repo truth: `~/Projects/Github/mamekit`. `<mame>/mamekit` is a symlink kept
 for convenience; the MAME repo excludes it via `.git/info/exclude` (entry
-`/mame2js` — **no trailing slash**, symlinks aren't directories). The CLI
+`/mamekit` — **no trailing slash**, symlinks aren't directories). The CLI
 auto-detects MAME source at `../mame` or parent.
 
 ## 15. ROMs
@@ -181,7 +181,7 @@ verification uses headless scratchpad harnesses reading `_roms/` directly —
 that's Node scripts, never the app.
 
 ## 25. A generated game is NOT a playable game (stale-bundle trap)
-Running `mame2js <game>` writes dist/<game>/ immediately — the shelf lists it
+Running `mamekit <game>` writes dist/<game>/ immediately — the shelf lists it
 — but the app bundle only gains the board when tsc succeeds, which it can't
 while agent-built cores are still in flight. Old bundle + new manifest =
 "no board module" crash at Play (burned us on junofrst). The manifest now

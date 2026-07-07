@@ -1,4 +1,4 @@
-// Intel MCS-48 CPU emulator core for mame2js — I8039 variant (the Konami
+// Intel MCS-48 CPU emulator core for mamekit — I8039 variant (the Konami
 // Juno First / Gyruss sound-board DAC sample player).
 //
 // Self-contained ES module: zero imports, zero runtime dependencies, no DOM.

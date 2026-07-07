@@ -48,7 +48,7 @@
 // - readReg on port A/B consults portARead/portBRead only in INPUT mode
 //   (direction bit clear); output mode returns the latch. (Modern MAME
 //   consults the callback in both modes for the kidniki open-collector
-//   case; the agreed mame2js board contract is input-mode-only.)
+//   case; the agreed mamekit board contract is input-mode-only.)
 
 /** AY-3-8910 register indices (ay8910.cpp AY_AFINE..AY_PORTB). */
 const AY_ENABLE = 7;

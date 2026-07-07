@@ -20,7 +20,7 @@
 // Deliberate simplification: MAME 0.121 buffers spriteram per scanline
 // (sprite multiplexing) and modern MAME does partial updates on spriteram_w;
 // we render once per frame from the live spriteram share, like the other
-// mame2js boards.
+// mamekit boards.
 
 import type { Regions, VideoRenderer } from '../types.ts';
 import { decodeGfx } from '../gfx.ts';

@@ -1,4 +1,4 @@
-// MB14241 data shifter (Space Invaders et al.) for mame2js.
+// MB14241 data shifter (Space Invaders et al.) for mamekit.
 //
 // Faithful port of MAME src/devices/machine/mb14241.cpp. The chip holds a
 // 15-bit shift register; each data write pushes a new byte in on top

@@ -30,7 +30,7 @@ export function viewerHtml(graph: KnowledgeGraph, title: string): string {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>${title} — mame2js knowledge graph</title>
+<title>${title} — mamekit knowledge graph</title>
 <style>
   :root {
     --surface: #fcfcfb; --panel: #f4f4f2; --border: #dddcd8;

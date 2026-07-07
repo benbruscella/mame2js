@@ -1,4 +1,4 @@
-// mame2js knowledge graph schema.
+// mamekit knowledge graph schema.
 // The graph is the single source of truth between extraction (MAME C++ source)
 // and generation (TypeScript machine config). Native store is JSON; a Cypher
 // export exists for loading into Neo4J.
@@ -64,7 +64,7 @@ export interface KGEdge {
 
 export interface KnowledgeGraph {
   meta: {
-    tool: 'mame2js';
+    tool: 'mamekit';
     version: string;
     mameSrc: string;
     driverFile: string;

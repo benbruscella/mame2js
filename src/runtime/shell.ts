@@ -139,7 +139,7 @@ export async function runShell(cfg: ShellConfig): Promise<void> {
   // regions are boot-critical; other regions warn and zero-fill.
   const critical = new Set(cfg.board.cpus.map(c => c.region));
   const zone = ui.dropZone(cfg.game);
-  ui.status(`ROMs are not distributed with mame2js — drop your own ${cfg.game}.zip (never stored).`);
+  ui.status(`ROMs are not distributed with mamekit — drop your own ${cfg.game}.zip (never stored).`);
   const files = await waitForZip(ui, zone, cfg.roms, critical);
 
   const regions = assembleRegions(cfg.roms, files, ui.status, critical);
@@ -161,7 +161,7 @@ export async function runShell(cfg: ShellConfig): Promise<void> {
     new Uint8ClampedArray(fb.buffer), board.fbWidth, board.fbHeight);
 
   // debug/testing handle (also the hook for the future live KG-viewer overlay)
-  (window as unknown as Record<string, unknown>).mame2js = { board, input, config: cfg, audio };
+  (window as unknown as Record<string, unknown>).mamekit = { board, input, config: cfg, audio };
 
   // Start immediately — the menu click that navigated here counts as the
   // user gesture in same-origin sessions. Audio starts in parallel; if the
@@ -398,7 +398,7 @@ function buildDom(cfg: ShellConfig) {
       small.textContent = 'or click anywhere on the screen to choose the file';
       const note = document.createElement('div');
       note.style.cssText = 'color:#667;font-size:12px;margin-top:6px;max-width:320px';
-      note.textContent = 'ROMs are copyrighted and not distributed with mame2js — bring your own dump.';
+      note.textContent = 'ROMs are copyrighted and not distributed with mamekit — bring your own dump.';
       const style = document.createElement('style');
       style.textContent = `@keyframes m2j-bob{0%,100%{transform:translateY(0)}50%{transform:translateY(-6px)}}
         @keyframes m2j-shake{0%,100%{transform:translateX(0)}20%,60%{transform:translateX(-8px)}40%,80%{transform:translateX(8px)}}`;

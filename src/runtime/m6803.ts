@@ -1,4 +1,4 @@
-// Motorola MC6803 CPU emulator core for mame2js (Irem M52/M62 sound boards).
+// Motorola MC6803 CPU emulator core for mamekit (Irem M52/M62 sound boards).
 //
 // Self-contained ES module: zero imports, zero runtime dependencies, no DOM.
 // Instruction semantics, flag behavior, cycle counts and the on-chip

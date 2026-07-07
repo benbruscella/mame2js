@@ -261,7 +261,7 @@ export function buildGraph(mameSrc: string, driverFile: string): KnowledgeGraph 
   }
 
   return g.toGraph({
-    tool: 'mame2js',
+    tool: 'mamekit',
     version: VERSION,
     mameSrc,
     driverFile: driverRel,

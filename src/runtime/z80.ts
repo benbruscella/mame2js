@@ -1,4 +1,4 @@
-// Zilog Z80 CPU emulator core for mame2js.
+// Zilog Z80 CPU emulator core for mamekit.
 //
 // Self-contained ES module: zero imports, zero runtime dependencies, no DOM.
 // Flag/cycle behavior follows the MAME Z80 core (src/devices/cpu/z80),

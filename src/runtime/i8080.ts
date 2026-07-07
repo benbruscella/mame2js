@@ -1,4 +1,4 @@
-// Intel 8080 CPU emulator core for mame2js.
+// Intel 8080 CPU emulator core for mamekit.
 //
 // Self-contained ES module: zero imports, zero runtime dependencies, no DOM.
 // Flag/cycle behavior follows the MAME i8085 core in 8080 mode

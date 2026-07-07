@@ -1,9 +1,9 @@
-// mame2js CLI
-//   mame2js <game>            full pipeline: graph -> generate -> build web app
-//   mame2js graph <game>      knowledge graph only (graph.json + graph.cypher)
+// mamekit CLI
+//   mamekit <game>            full pipeline: graph -> generate -> build web app
+//   mamekit graph <game>      knowledge graph only (graph.json + graph.cypher)
 // options:
 //   --mame-src <path>   MAME source root (default: auto-detect / $MAME_SRC)
-//   --out <dir>         output root (default: <mame2js>/out)
+//   --out <dir>         output root (default: <mamekit>/out)
 
 import { readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync, statSync } from 'node:fs';
 import { join, resolve, dirname, basename } from 'node:path';
@@ -16,8 +16,8 @@ const here = dirname(fileURLToPath(import.meta.url));
 const projectRoot = resolve(here, '..');
 
 function usage(): never {
-  console.error('usage: mame2js [graph] <game> [--mame-src <path>] [--out <dir>] [--serve [port]]');
-  console.error('       mame2js --serve            serve the unified app + all generated games');
+  console.error('usage: mamekit [graph] <game> [--mame-src <path>] [--out <dir>] [--serve [port]]');
+  console.error('       mamekit --serve            serve the unified app + all generated games');
   process.exit(2);
 }
 
@@ -39,10 +39,10 @@ const outRoot = resolve(opts.out ?? join(projectRoot, 'dist'));
 const mameSrc = serveOnly ? '' : resolve(opts['mame-src'] ?? process.env.MAME_SRC ?? detectMameSrc());
 
 function detectMameSrc(): string {
-  // mame2js conventionally lives inside or next to a mame checkout
+  // mamekit conventionally lives inside or next to a mame checkout
   const candidates = [
-    resolve(projectRoot, '..'),         // mame2js inside the mame repo
-    resolve(projectRoot, '../mame'),    // mame2js as a sibling of the mame repo
+    resolve(projectRoot, '..'),         // mamekit inside the mame repo
+    resolve(projectRoot, '../mame'),    // mamekit as a sibling of the mame repo
     process.cwd(),
   ];
   for (const candidate of candidates) {
@@ -101,9 +101,9 @@ if (serveOnly) {
 }
 
 async function pipeline(game: string): Promise<void> {
-console.log(`mame2js: searching MAME source at ${mameSrc}`);
+console.log(`mamekit: searching MAME source at ${mameSrc}`);
 const driverFile = findDriverFile(game);
-console.log(`mame2js: driver for "${game}" -> ${driverFile.slice(mameSrc.length + 1)}`);
+console.log(`mamekit: driver for "${game}" -> ${driverFile.slice(mameSrc.length + 1)}`);
 
 const graph = buildGraph(mameSrc, driverFile);
 const sub = gameSubgraph(graph, game);

@@ -41,7 +41,7 @@ interface GameEntry {
 // attract mode) and screenshot that frame. Cached forever in localStorage,
 // keyed by frame count so changing it regenerates.
 const COVER_FRAMES = 900; // ~15 s of attract
-const COVER_KEY = (game: string) => `mame2js:cover:${game}:f${COVER_FRAMES}`;
+const COVER_KEY = (game: string) => `mamekit:cover:${game}:f${COVER_FRAMES}`;
 
 export async function runMenu(): Promise<void> {
   document.title = 'MAME History — the video arcade, transpiled';
@@ -49,12 +49,12 @@ export async function runMenu(): Promise<void> {
   games.sort((a, b) => a.year.localeCompare(b.year) || a.game.localeCompare(b.game));
   // NOTHING is cached — no ROM bytes, no derived screenshots (hard user
   // directive). Purge anything older builds may have stored.
-  try { indexedDB.deleteDatabase('mame2js-roms'); } catch { /* unavailable */ }
+  try { indexedDB.deleteDatabase('mame2js-roms'); } catch { /* legacy DB name — unavailable is fine */ }
   try {
     for (const store of [localStorage, sessionStorage]) {
       for (let i = store.length - 1; i >= 0; i--) {
         const k = store.key(i);
-        if (k && k.startsWith('mame2js:')) store.removeItem(k);
+        if (k && (k.startsWith('mamekit:') || k.startsWith('mame2js:'))) store.removeItem(k);
       }
     }
   } catch { /* storage unavailable */ }
@@ -81,11 +81,11 @@ export async function runMenu(): Promise<void> {
 
   // corner sash to the source — this whole site is generated from the repo
   const sash = document.createElement('a');
-  sash.href = 'https://github.com/benbruscella/mame2js';
+  sash.href = 'https://github.com/benbruscella/mamekit';
   sash.target = '_blank';
   sash.rel = 'noopener';
   sash.textContent = '★ OPEN SOURCE ON GITHUB';
-  sash.title = 'github.com/benbruscella/mame2js';
+  sash.title = 'github.com/benbruscella/mamekit';
   sash.style.cssText = `position:fixed;top:0;right:0;z-index:40;
     transform:translate(29%,66%) rotate(40deg);transform-origin:center;
     background:#f2c200;color:#1b1b1b;font-weight:800;font-size:11px;letter-spacing:1px;
@@ -111,9 +111,17 @@ export async function runMenu(): Promise<void> {
   empty.textContent = 'Nothing on the shelf matches — try another search.';
   wall.appendChild(empty);
 
-  const hint = el('div', 'text-align:center;color:#4b5384;padding:28px;font-size:12px');
+  const hint = el('div', 'text-align:center;color:#4b5384;padding:28px 28px 8px;font-size:12px');
   hint.textContent = '↑↓←→ browse · Enter/click: the story of the game (then Play) · type to search · in-game: Esc returns here';
   root.appendChild(hint);
+
+  // the calm legal footer (issue #11): visible, honest, unhidden
+  const legal = el('div', 'text-align:center;color:#3a4066;padding:4px 28px 20px;font-size:11px;line-height:1.7');
+  legal.innerHTML = 'No ROMs are hosted, distributed, or stored — bring your own legally obtained copies.<br>' +
+    'MAME History is an independent project, not affiliated with or endorsed by MAMEDEV. ' +
+    'Powered by <a href="https://github.com/benbruscella/mamekit" style="color:#5a64a8">mamekit</a> · ' +
+    'stories courtesy of <a href="https://www.arcade-history.com/" style="color:#5a64a8">Gaming History</a>.';
+  root.appendChild(legal);
 
   interface BoxRef { entry: GameEntry; box: HTMLElement; visible: boolean }
   const boxes: BoxRef[] = [];
@@ -127,7 +135,7 @@ export async function runMenu(): Promise<void> {
   }
   if (games.length === 0) {
     empty.style.display = 'block';
-    empty.textContent = 'No games generated yet — run: mame2js <game> (e.g. mame2js galaga)';
+    empty.textContent = 'No games generated yet — run: mamekit <game> (e.g. mamekit galaga)';
   }
 
   const select = (i: number) => {

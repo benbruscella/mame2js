@@ -39,7 +39,7 @@ dist/
 ```
 
 All emitted URLs are **relative to the /app/ page** (`../roms/<g>.zip`,
-`../<game>/config.json`) so the same build works at `/`, `/mame2js/`, or
+`../<game>/config.json`) so the same build works at `/`, `/mamekit/`, or
 mamehistory.com — never emit a leading `/`.
 
 `generate()` writes the per-game JSON; `buildApp(outRoot)` copies the runtime
@@ -139,12 +139,12 @@ share the misclatch/06xx skeleton but differ in video and extra customs).
 
 - Driver discovery scans `<mameSrc>/src/mame/**/*.cpp` for
   `GAME(\s*year,\s*<name>,` and caches hits in `dist/.driver-cache.json`.
-- MAME source auto-detection order: parent of mame2js, sibling `../mame`,
+- MAME source auto-detection order: parent of mamekit, sibling `../mame`,
   cwd; override `--mame-src` or `$MAME_SRC`.
-- `mame2js --serve` (no game) rebuilds `dist/app` and serves everything —
+- `mamekit --serve` (no game) rebuilds `dist/app` and serves everything —
   MAME source not required. With a game, generation runs first.
 - `--serve` starts `src/serve.ts` on :8280 mounting `'' → dist/`,
-  `/roms → <mame2js>/roms` and `/artwork → <mame2js>/artwork`, plus the
+  `/roms → <mamekit>/roms` and `/artwork → <mamekit>/artwork`, plus the
   dynamic `/games.json` manifest (scans `dist/*/meta.json`, flags `hasRom`
   from roms/ — shadows the static file locally). Bare directory paths
   301-redirect to the trailing-slash form (matches GitHub Pages so relative
