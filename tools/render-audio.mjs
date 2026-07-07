@@ -128,7 +128,9 @@ const nextNative = () => {
       for (let ch = 0; ch < 3; ch++) {
         const k = filterK[c * 3 + ch];
         if (k !== 1) filterMem[c * 3 + ch] = rcLowPass(chans[ch], k, filterMem[c * 3 + ch]);
-        for (let i = 0; i < 256; i++) native[i] += chans[ch][i] / (3 * nChips);
+        // AY_BANK_GAIN 0.34 mirrors ay8910-worklet.ts (matched to real MAME
+        // wavwrite level; see the constant's comment there)
+        for (let i = 0; i < 256; i++) native[i] += chans[ch][i] * (0.34 / (3 * nChips));
       }
     }
     nPos = 0;
@@ -147,9 +149,11 @@ for (let t = 0; t < out.length; t++) {
   while (si2 < stream.length && stream[si2][0] * FRAME_OUT <= t) {
     const [, o, d] = stream[si2++];
     if (o === 0x80) {
+      // adaptive ramp = half the stream's write gap (mirrors ay8910-worklet)
+      const gap = Math.max(1, Math.min((t - dacFrom) * 0.5, SR / 2000));
       dacLevel = dacInterp(t); dacFrom = t;
       dacNext = ((d & 0xff) - 128) / 128;
-      dacUntil = t + SR / 2000;
+      dacUntil = t + gap;
     }
     else if (o >= 0x90 && o < 0x90 + nChips) setFilter(o - 0x90, d);
     else if (o < nChips * 16) { const c = chips[o >> 4]; if (c) c.writeReg(o & 0x0f, d); }

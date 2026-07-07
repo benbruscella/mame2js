@@ -73,6 +73,18 @@ const CHUNK = 256;
 /** DAC route gain — MAME junofrst routes the R2R ladder at 0.25. */
 const DAC_GAIN = 0.25;
 
+/**
+ * AY bank gain, matched to real MAME output level (junofrst, MAME 0.288
+ * wavwrite, pure-AY attract-music window: ours was a uniform +9.4 dB across
+ * every octave band). Two factors: our channels swing bipolar ±vol (2× the
+ * hardware's unipolar swing — ay8910.cpp build_single_table maps a channel
+ * to (norm - 0.25) * 0.5, swing 0.5), and MAME routes each channel at 0.30
+ * (junofrst.cpp add_route). Without this the DAC (drums/speech, routed at
+ * a MAME-exact 0.25) sits ~9 dB too low relative to the PSGs and the mix
+ * turns bass-heavy with buried percussion.
+ */
+const AY_BANK_GAIN = 0.34;
+
 class Ay8910Processor extends AudioWorkletProcessor {
   private chips: AY8910[] = [];
   /** native samples advanced per output sample (e.g. 223721.5 / 48000). */
@@ -163,12 +175,19 @@ class Ay8910Processor extends AudioWorkletProcessor {
   /** Apply one register/DAC/filter write NOW (scheduler-dispatched). */
   private apply(offset: number, data: number): void {
     if (offset === 0x80) {
-      // DAC sample: becomes the interpolation target until the next one
+      // DAC sample: becomes the interpolation target until the next one.
+      // Ramp over HALF the stream's own inter-write gap: a FIXED ramp longer
+      // than the gap never completes and eats 8-18 dB off fast streams
+      // (junofrst speech/drums arrive every ~0.2-0.3 ms), while a full-gap
+      // ramp triangle-izes square drum streams (-4 dB fundamental vs the
+      // hardware ZOH). Half-gap slews the edges just enough to kill imaging
+      // and lands within ~2 dB of real-MAME drum band levels. Cap keeps
+      // sparse writes (idle blips) from gliding audibly.
+      const gap = Math.max(1, Math.min((this.clock2 - this.dacFrom) * 0.5, sampleRate / 2000));
       this.dacLevel = this.dacInterp(this.clock2);
       this.dacFrom = this.clock2;
       this.dacNext = ((data & 0xff) - 128) / 128;
-      // hold time until the next sample arrives; refreshed by the next write
-      this.dacUntil = this.clock2 + sampleRate / 2000; // default 2 ms ramp cap
+      this.dacUntil = this.clock2 + gap;
       return;
     }
     if (offset >= 0x90 && offset < 0x90 + this.chips.length) {
@@ -208,7 +227,7 @@ class Ay8910Processor extends AudioWorkletProcessor {
   private renderBankFiltered(): void {
     const out = this.nativeBuf;
     out.fill(0);
-    const gain = (1 / 3) / this.chips.length;
+    const gain = (AY_BANK_GAIN / 3) / this.chips.length;
     for (let c = 0; c < this.chips.length; c++) {
       this.chips[c].renderChannels(this.scratchA, this.scratchB, this.scratchC);
       const bufs = [this.scratchA, this.scratchB, this.scratchC];
