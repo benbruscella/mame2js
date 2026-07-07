@@ -254,13 +254,16 @@ All agent-built with spec suites; check counts in testing.md.
   DETERMINISTIC emulated screenshot (board run exactly COVER_FRAMES frames,
   cached in localStorage) → screenshot alone → tile-sheet art → placeholder.
   `INSERT ROM` ribbon when no zip.
-- `runShell(config)`: fetch `../roms/<game>.zip`; if absent (or the served
-  zip fails the manifest check) the CRT becomes a **drop zone**: dashed
+- `runShell(config)`: ROMs come ONLY from `romstore.ts` (the browser's
+  IndexedDB copy of a previous verified drop) or a fresh drag-drop — there
+  is no server fetch and no `romUrl` (hard user directive; see memory +
+  gotchas). Without a remembered zip the CRT becomes a **drop zone**: dashed
   target with drag-over/busy/error states and the required chip list
   (★ = boot-critical CPU regions). `checkRomSet` grades the upload against
   the graph manifest **before booting** — per-chip ✓ verified / ≈ CRC
-  differs / ✗ missing; missing critical chips bounce back for retry
-  (wrong sets used to hang the loader), non-critical gaps warn and boot.
+  differs / ✗ missing; missing critical chips bounce back for retry,
+  non-critical gaps warn and boot. Accepted drops are saved back to the
+  store for future sessions; menu covers/tile art read the same store.
   `assembleRegions` matches zip entries by **name, then dash/underscore
   swapped, then CRC32**; only CPU code regions are boot-critical — other
   missing regions zero-fill with a console warning.

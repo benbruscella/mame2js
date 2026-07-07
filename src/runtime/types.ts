@@ -69,8 +69,14 @@ export interface BoardConfig {
 }
 
 export interface BoardSinks {
-  /** sound register write, forwarded to the audio worklet (offset space is per SoundCore) */
-  soundWrite: (offset: number, data: number) => void;
+  /**
+   * Sound register write, forwarded to the audio worklet (offset space is
+   * per SoundCore). `frac` is the write's position within the current video
+   * frame (0..1, e.g. scanline/vtotal): boards emulate a whole frame in one
+   * burst, so without it every write lands at the same instant and fast SFX
+   * sweeps quantize into chirpy stair-steps. Pass it whenever known.
+   */
+  soundWrite: (offset: number, data: number, frac?: number) => void;
 }
 
 export interface BoardSnapshot {

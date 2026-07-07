@@ -23,6 +23,7 @@ export interface WorkletCoreConfig {
 interface PendingWrite {
   offset: number;
   data: number;
+  frac?: number;
 }
 
 export class AudioOutput {
@@ -71,7 +72,7 @@ export class AudioOutput {
 
     // replay writes that happened before the context existed
     for (const w of this.pending) {
-      node.port.postMessage({ type: 'write', offset: w.offset, data: w.data });
+      node.port.postMessage({ type: 'write', offset: w.offset, data: w.data, frac: w.frac });
     }
     this.pending.length = 0;
 
@@ -83,11 +84,11 @@ export class AudioOutput {
    * order (frameTime granularity is one process() quantum, ~2.7 ms at 48 kHz,
    * which is well under a video frame).
    */
-  write(offset: number, data: number): void {
+  write(offset: number, data: number, frac?: number): void {
     if (this.node) {
-      this.node.port.postMessage({ type: 'write', offset, data });
+      this.node.port.postMessage({ type: 'write', offset, data, frac });
     } else {
-      this.pending.push({ offset, data });
+      this.pending.push({ offset, data, frac });
     }
   }
 

@@ -92,10 +92,10 @@ if (serveOnly) {
   buildApp(outRoot);
   const { serve } = await import('./serve.ts');
   const port = await serve(
-    { '': outRoot, roms: join(projectRoot, 'roms'), artwork: join(projectRoot, 'artwork') },
+    { '': outRoot, artwork: join(projectRoot, 'artwork') }, // ROMs are never served
     Number(opts.serve) || 8280,
   );
-  console.log(`\nserving http://localhost:${port}/app/  (menu; games at /app/?g=<game>)`);
+  console.log(`\nserving http://localhost:${port}/app/  (menu; games at /app/g/<game>/)`);
 } else {
   await pipeline(game!);
 }
@@ -153,15 +153,15 @@ if (command === 'run') {
   // pages); the dev server's live /games.json route shadows it locally
   const { gamesManifest } = await import('./serve.ts');
   writeFileSync(join(outRoot, 'games.json'),
-    await gamesManifest(outRoot, join(projectRoot, 'roms'), join(projectRoot, 'artwork')));
+    await gamesManifest(outRoot, join(projectRoot, 'artwork')));
 }
 
 if ('serve' in opts || argv.includes('--serve')) {
   const { serve } = await import('./serve.ts');
   const port = await serve(
-    { '': outRoot, roms: join(projectRoot, 'roms'), artwork: join(projectRoot, 'artwork') },
+    { '': outRoot, artwork: join(projectRoot, 'artwork') }, // ROMs are never served
     Number(opts.serve) || 8280,
   );
-  console.log(`\nserving http://localhost:${port}/app/  (game: /app/?g=${game}, viewer: /${game}/viewer.html)`);
+  console.log(`\nserving http://localhost:${port}/app/  (game: /app/g/${game}/, viewer: /${game}/viewer.html)`);
 }
 }

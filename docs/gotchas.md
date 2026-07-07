@@ -172,7 +172,24 @@ shadow mpatrol's), then by name (irem_audio's base-class map). Cross-config
 a game's own CALLS chain — attaching them to the shared device node broke
 pacman ("cannonbp_protection_r").
 
-## 24. DreamHost DNS publishes slowly
+## 24. ROMs are never read from the server — at all
+Hard user directive (2026-07-06, "stop reading roms from local anything").
+No `/roms` mount in serve.ts, no `romUrl` in configs, no fetch in the shell,
+no symlinks to make dev "convenient". The only sources: the user's drag-drop
+and the browser's IndexedDB memory of it (`runtime/romstore.ts`). Dev
+verification uses headless scratchpad harnesses reading `_roms/` directly —
+that's Node scripts, never the app.
+
+## 25. A generated game is NOT a playable game (stale-bundle trap)
+Running `mame2js <game>` writes dist/<game>/ immediately — the shelf lists it
+— but the app bundle only gains the board when tsc succeeds, which it can't
+while agent-built cores are still in flight. Old bundle + new manifest =
+"no board module" crash at Play (burned us on junofrst). The manifest now
+sets `supported` by checking the COMPILED board module exists
+(dist/app/dist/runtime/boards/<family>.js); the menu shows unsupported games
+as "IN DEVELOPMENT" with Play hidden. Don't bypass it.
+
+## 26. DreamHost DNS publishes slowly
 Panel edits take ~5-15 min to reach ns1-3.dreamhost.com — `dig
 @ns1.dreamhost.com` before blaming the records. GitHub Pages cert issuance
 can stall on a domain set before DNS propagated; remove/re-add the cname to

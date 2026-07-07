@@ -131,12 +131,13 @@ integration tests with synthetic hand-assembled ROMs.
 ## ROMs
 
 Not included, not distributable, never committed (`roms/`, `_roms/` and
-`*.zip` are gitignored). Use your own MAME romsets — auto-loaded from
-`roms/` or dropped onto the in-game upload zone, which validates the set
-against the knowledge graph's chip manifest (name, then dash/underscore
-swap, then CRC32) before booting. Unzipping happens in the browser via
-native `DecompressionStream`. Artwork and the Gaming History dat are
-treated the same way (user-supplied, gitignored).
+`*.zip` are gitignored) — and **never read from the server**: the app's only
+ROM source is your own drag-drop, validated against the knowledge graph's
+chip manifest (name, dash/underscore swap, CRC32, and clone-revision
+alternates) before booting, then remembered by your browser (IndexedDB) so
+you drop each zip once. Unzipping happens in the browser via native
+`DecompressionStream`. Artwork and the Gaming History dat are user-supplied
+and gitignored the same way.
 
 ## Knowledge graph in Neo4J (optional)
 

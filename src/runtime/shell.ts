@@ -110,8 +110,6 @@ export interface ShellConfig {
   bindings: FieldBinding[];
   dipDefaults: DipDefault[];
   ports: PortSpec[];
-  /** url of the zip to try first (e.g. "/roms/galaga.zip") */
-  romUrl: string;
   /** base url of the compiled runtime dir (for worklet modules) */
   runtimeUrl: string;
   /** where Esc returns to (the boot menu) */
@@ -135,23 +133,14 @@ export async function runShell(cfg: ShellConfig): Promise<void> {
   }, { capture: true });
 
   // --- ROM acquisition -------------------------------------------------------
-  // only CPU code regions are boot-critical; other regions (e.g. undumped
-  // "unknown PROM" filler that newer MAME sets carry) warn and zero-fill
+  // ROMs are NEVER fetched, NEVER stored, NEVER cached — anywhere (hard user
+  // directive). The one and only source is a drag-drop in this page load;
+  // the bytes live in this page's memory and die with it. Only CPU code
+  // regions are boot-critical; other regions warn and zero-fill.
   const critical = new Set(cfg.board.cpus.map(c => c.region));
-
-  let files: Map<string, Uint8Array> | null = null;
-  try {
-    const res = await fetch(cfg.romUrl);
-    if (res.ok) files = await readZip(new Uint8Array(await res.arrayBuffer()));
-  } catch { /* fall through to manual load */ }
-  // a server zip that can't boot the game counts as no zip at all
-  if (files && checkRomSet(cfg.roms, files, critical).missingCritical.length) files = null;
-
-  if (!files) {
-    const zone = ui.dropZone(cfg.game);
-    ui.status(`ROMs are not distributed with mame2js — bring your own ${cfg.game}.zip.`);
-    files = await waitForZip(ui, zone, cfg.roms, critical);
-  }
+  const zone = ui.dropZone(cfg.game);
+  ui.status(`ROMs are not distributed with mame2js — drop your own ${cfg.game}.zip (never stored).`);
+  const files = await waitForZip(ui, zone, cfg.roms, critical);
 
   const regions = assembleRegions(cfg.roms, files, ui.status, critical);
 
@@ -163,15 +152,16 @@ export async function runShell(cfg: ShellConfig): Promise<void> {
 
   const audio = new AudioOutput();
   const board = createBoard(cfg.board, regions, input, {
-    soundWrite: (offset, data) => audio.write(offset, data),
+    soundWrite: (offset, data, frac) => audio.write(offset, data, frac),
   });
+  ui.setNative(board.fbWidth, board.fbHeight); // the board owns true geometry
 
   const fb = new Uint32Array(board.fbWidth * board.fbHeight);
   const image = new ImageData(
     new Uint8ClampedArray(fb.buffer), board.fbWidth, board.fbHeight);
 
   // debug/testing handle (also the hook for the future live KG-viewer overlay)
-  (window as unknown as Record<string, unknown>).mame2js = { board, input, config: cfg };
+  (window as unknown as Record<string, unknown>).mame2js = { board, input, config: cfg, audio };
 
   // Start immediately — the menu click that navigated here counts as the
   // user gesture in same-origin sessions. Audio starts in parallel; if the
@@ -191,7 +181,7 @@ export async function runShell(cfg: ShellConfig): Promise<void> {
     ).then(() => {
       // per-core master gains: wsg = MAME route gain 0.90*10/16; the AY bank
       // runs hot against the others — tamed to sit level with them
-      const VOLUMES: Record<string, number> = { wsg: 0.5625, ay8910: 0.55 };
+      const VOLUMES: Record<string, number> = { wsg: 0.5625, ay8910: 0.7 };
       audio.setVolume(VOLUMES[cfg.sound.kind] ?? 1);
     }).catch(err => console.warn('audio unavailable:', err));
     const resumeAudio = () => audio.resume();
@@ -306,10 +296,14 @@ function buildDom(cfg: ShellConfig) {
   cab.style.cssText = 'display:flex;flex-direction:column;align-items:center;gap:0';
   root.appendChild(cab);
 
-  // native frame is rendered landscape; the cabinet monitor is rotated (ROT90)
+  // native frame is rendered landscape; the cabinet monitor is rotated (ROT90).
+  // `let` because the BOARD owns the true native size (setNative below):
+  // bitmap hardware like junofrst has no GFXDECODE, so the config's raw
+  // screen params carry the ×3 pixel-clock width (768) — trusting them
+  // squeezed the real 256-wide frame into a corner ("postage stamp").
   const rotated = cfg.board.screen.rotate === 90 || cfg.board.screen.rotate === 270;
-  const w = cfg.board.screen.width, h = cfg.board.screen.height;
-  const dispW = rotated ? h : w, dispH = rotated ? w : h;
+  let w = cfg.board.screen.width, h = cfg.board.screen.height;
+  let dispW = rotated ? h : w, dispH = rotated ? w : h;
 
   const holder = document.createElement('div');
   holder.style.cssText = 'position:relative';
@@ -373,6 +367,16 @@ function buildDom(cfg: ShellConfig) {
     overlay,
     status: (text: string) => { statusEl.textContent = text; if (overlay.style.display !== 'none' && !overlay.querySelector('[data-dropzone]')) overlay.textContent = text; },
     overlayHide: () => { overlay.style.display = 'none'; },
+    /** adopt the board's real framebuffer size when it differs from config */
+    setNative: (nw: number, nh: number) => {
+      if (nw === w && nh === h) return;
+      w = nw; h = nh;
+      dispW = rotated ? h : w; dispH = rotated ? w : h;
+      canvas.width = dispW; canvas.height = dispH;
+      off.width = w; off.height = h;
+      ctx.imageSmoothingEnabled = false;
+      fit();
+    },
     // ROM missing: turn the dark CRT into an inviting drop target
     dropZone: (game: string): DropZone => {
       overlay.textContent = '';
@@ -542,8 +546,9 @@ function waitForZip(
     const handle = async (file: File) => {
       if (accepted) return;
       zone.busy(file.name);
+      const raw = new Uint8Array(await file.arrayBuffer());
       let files: Map<string, Uint8Array>;
-      try { files = await readZip(new Uint8Array(await file.arrayBuffer())); }
+      try { files = await readZip(raw); }
       catch { zone.error(`${file.name} isn’t a readable zip — try the original romset.`); return; }
       // grade the set against the manifest BEFORE booting: ticks in the
       // list, and a wrong set bounces back here instead of hanging

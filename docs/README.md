@@ -38,9 +38,12 @@ mame2js galaga --serve
    Games live at `/app/g/<game>/` (pretty route; legacy `?g=` still works);
    Esc returns to the menu. `mame2js --serve` alone serves everything
    without needing the MAME tree.
-5. ROMs: `roms/<game>.zip` auto-loads; otherwise the arcade screen becomes a
-   drag-drop zone that shows the required chip manifest and validates the
-   zip (per-chip ✓/≈/✗) **before** booting. Never committed.
+5. ROMs: **never read from the server or the project tree** (hard user
+   directive, 2026-07-06). The arcade screen is a drag-drop zone showing the
+   required chip manifest; the zip is validated per-chip (✓/≈/✗) **before**
+   booting, and a verified drop is remembered in the visitor's own browser
+   (IndexedDB, `runtime/romstore.ts`) so it's insert-once per machine.
+   Dev-time headless harnesses may read `_roms/` directly; the app may not.
 
 State as of 2026-07-06: **six games boot and play** — Galaga, Pac-Man,
 Galaxian (issue #1), Gyruss, Space Invaders, Moon Patrol (issue #3) — and

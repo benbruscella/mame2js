@@ -50,6 +50,7 @@ export class M52Board implements Board {
 
   private cyclesPerLine: number[];
   private msmClocksPerLine: number;
+  private curLine = 0;
   private vtotal: number;
   private vbstart: number;
   private mainIrqHeld = false;
@@ -68,7 +69,13 @@ export class M52Board implements Board {
     for (let i = 0; i < 2; i++) this.ays.push(new AY8910(894886));
     this.ays[0].portARead = () => this.soundLatch; // 45M port A = command latch
     this.msm = new MSM5205(384000);
-    this.msm.vckCallback = state => { if (state) this.audio.nmi(); };
+    this.msm.vckCallback = state => {
+      if (state) { this.audio.nmi(); return; }
+      // falling edge = a nibble was just decoded: route the ADPCM sample to
+      // the worklet's DAC channel (offset 0x80, 8-bit unsigned) — this is
+      // Moon Patrol's explosions/percussion, silent until now
+      sinks.soundWrite(0x80, ((this.msm.signal >> 4) + 128) & 0xff, this.curLine / this.vtotal);
+    };
     this.msmClocksPerLine = 384000 / config.screen.refresh / this.vtotal;
     this.ays[0].portBWrite = (d: number) => {
       // irem.cpp ay8910_45M_portb_w: MSM playmode + reset
@@ -104,7 +111,7 @@ export class M52Board implements Board {
           this.soundLatch = d;
           if ((d & 0x80) === 0) this.audio.setIrqLine(true);
         },
-        'irem_audio_device.m52_adpcm_w': (_a, _o, d) => this.msm.write(0, d),
+        'irem_audio_device.m52_adpcm_w': (_a, off, d) => { if (off & 1) this.msm.write(0, d); },
         'irem_audio_device.sound_irq_ack_w': () => {
           if ((this.soundLatch & 0x80) !== 0) this.audio.setIrqLine(false);
         },
@@ -152,7 +159,7 @@ export class M52Board implements Board {
               this.ayAddr[chip] = this.port1 & 0x0f;
             } else {
               this.ays[chip].writeReg(this.ayAddr[chip], this.port1);
-              sinks.soundWrite(chip * 16 + this.ayAddr[chip], this.port1);
+              sinks.soundWrite(chip * 16 + this.ayAddr[chip], this.port1, this.curLine / this.vtotal);
             }
           }
         }
@@ -165,9 +172,9 @@ export class M52Board implements Board {
     this.fbHeight = config.screen.height;
     this.video = new M52Video({
       regions,
-      videoram: shares['m_videoram'] ?? new Uint8Array(0x400),
-      colorram: shares['m_colorram'] ?? new Uint8Array(0x400),
-      spriteram: shares['m_spriteram'] ?? new Uint8Array(0x400),
+      videoram: shares['videoram'] ?? shares['m_videoram'] ?? new Uint8Array(0x400),
+      colorram: shares['colorram'] ?? shares['m_colorram'] ?? new Uint8Array(0x400),
+      spriteram: shares['spriteram'] ?? shares['m_spriteram'] ?? new Uint8Array(0x400),
       scroll: () => this.scroll,
       bgxpos0: () => this.bgxpos[0],
       bgypos0: () => this.bgypos[0],
@@ -211,6 +218,7 @@ export class M52Board implements Board {
   frame(fb: Uint32Array): void {
     const [mainPerLine, audioPerLine] = this.cyclesPerLine;
     for (let line = 0; line < this.vtotal; line++) {
+      this.curLine = line;
       if (line === this.vbstart) {
         this.main.setIrqLine(true);
         this.mainIrqHeld = true;

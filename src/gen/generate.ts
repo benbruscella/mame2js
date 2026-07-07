@@ -3,7 +3,7 @@
 // tsconfig.json} and compiles it with tsc. Everything game-specific comes from
 // the graph; everything behavioral comes from the shared runtime.
 
-import { mkdirSync, writeFileSync, cpSync, existsSync, readFileSync, readdirSync } from 'node:fs';
+import { mkdirSync, writeFileSync, cpSync, existsSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { join, resolve, dirname, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
@@ -367,7 +367,8 @@ export async function generate(graph: KnowledgeGraph, opts: GenerateOptions): Pr
     bindings,
     dipDefaults,
     ports: portSpecs,
-    romUrl: `../roms/${opts.game}.zip`, // resolved from the /app/ page; base-path agnostic
+    // no romUrl: ROMs are never fetched — the shell only accepts user drops
+    // (remembered per-browser in IndexedDB via runtime/romstore.ts)
     runtimeUrl: './dist/runtime/',
     menuUrl: './',
   };
@@ -575,6 +576,10 @@ function gameMarkdown(d: {
 export function buildApp(outRoot: string): boolean {
   const appDir = join(outRoot, 'app');
   const srcDir = join(appDir, 'src');
+  // clean copy: files DELETED from src/runtime must vanish from the app too
+  // (a stale compiled romstore.js once outlived its source — never again)
+  rmSync(srcDir, { recursive: true, force: true });
+  rmSync(join(appDir, 'dist'), { recursive: true, force: true });
   mkdirSync(srcDir, { recursive: true });
 
   cpSync(join(projectRoot, 'src/runtime'), join(srcDir, 'runtime'), { recursive: true });

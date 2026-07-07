@@ -22,12 +22,11 @@ if [[ "$ART" == "--artwork" ]]; then
   rsync -a --exclude 'data' --exclude '.DS_Store' artwork/ dist/artwork/
 fi
 
-# visitors have no server-side roms; artwork flags match what we shipped
+# artwork flags match what we shipped (ROMs are never part of the manifest)
 ART="$ART" node --input-type=module -e '
   import { readFileSync, writeFileSync } from "node:fs";
   const games = JSON.parse(readFileSync("dist/games.json", "utf8"));
   for (const g of games) {
-    g.hasRom = false;
     if (process.env.ART !== "--artwork") g.hasArt = false;
   }
   writeFileSync("dist/games.json", JSON.stringify(games));

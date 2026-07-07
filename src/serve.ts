@@ -17,15 +17,23 @@ const MIME: Record<string, string> = {
   '.cypher': 'text/plain; charset=utf-8',
 };
 
-/** Scan dist/ for generated games (meta.json + config.json) and flag ROM/artwork availability. */
-export async function gamesManifest(outRoot: string, romsDir: string, artDir: string): Promise<string> {
+/** Scan dist/ for generated games (meta.json + config.json) and flag artwork
+ *  availability. ROMs are deliberately NOT scanned: the app never reads ROMs
+ *  from the server — the visitor's browser store is the only source.
+ *
+ *  `supported` = the COMPILED app really contains this game's board module
+ *  (dist/app/dist/runtime/boards/<family>.js). A game generated before its
+ *  cores compile must show as "in development", not crash at Play — a stale
+ *  bundle plus a fresh manifest burned us on junofrst. */
+export async function gamesManifest(outRoot: string, artDir: string): Promise<string> {
   const games: unknown[] = [];
   for (const entry of await readdir(outRoot).catch(() => [] as string[])) {
     try {
       const meta = JSON.parse(await readFile(join(outRoot, entry, 'meta.json'), 'utf8'));
       await stat(join(outRoot, entry, 'config.json'));
-      meta.hasRom = await stat(join(romsDir, `${entry}.zip`)).then(() => true, () => false);
       meta.hasArt = await stat(join(artDir, `${entry}.zip`)).then(() => true, () => false);
+      meta.supported = await stat(join(outRoot, 'app/dist/runtime/boards', `${meta.family}.js`))
+        .then(() => true, () => false);
       games.push(meta);
     } catch { /* not a generated game dir */ }
   }
@@ -40,7 +48,7 @@ export function serve(rootDirs: Record<string, string>, port: number): Promise<n
       if (path.includes('..')) { res.writeHead(403).end(); return; }
       if (path === 'games.json') {
         res.writeHead(200, { 'content-type': MIME['.json'], 'cache-control': 'no-store' });
-        res.end(await gamesManifest(rootDirs[''], rootDirs['roms'] ?? '', rootDirs['artwork'] ?? ''));
+        res.end(await gamesManifest(rootDirs[''], rootDirs['artwork'] ?? ''));
         return;
       }
       // route by first segment if it names a mount, else default mount ''

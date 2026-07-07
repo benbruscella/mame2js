@@ -81,7 +81,43 @@ That's the only shared file a new game touches. (Board modules import
 helpers from `input.ts`/`types.ts`, never from the registry — cycle, see
 gotchas 0b.)
 
-## 7. Keep the contract
+## 7. Beyond the code — the full "new game" checklist
+
+Emulation working is half the job. Every shipped game also needs:
+
+- **ROM availability**: does the user's `roms/` (or `_roms/`) have `<game>.zip`?
+  Run the manifest against it EARLY (`checkRomSet` via a scratchpad harness —
+  see testing.md) so revision drift surfaces before you blame the emulation.
+  The generator emits clone-family `alt` CRCs automatically; if a real set
+  still fails, that's a parser/alternates gap, not the user's zip. NEVER
+  fetch ROMs.
+- **Artwork** (all gitignored, fetch with `curl -L`):
+  - flyer → `artwork/covers/<game>.png`, marquee →
+    `artwork/media/marquees/<game>.png`, cabinet →
+    `artwork/media/cabinets/<game>.png` — all from
+    `http://adb.arcadeitalia.net/media/mame.current/<kind>/<game>.png`
+    (kinds: flyers, marquees, cabinets; check the PARENT set name on 404).
+  - bezel zip → `artwork/<game>.zip` from
+    `https://mrdo.mameworld.info/artwork/<game>.zip` (the site's pages are
+    broken; direct paths work). Confirm it contains a `default.lay`.
+- **Education layer sanity**: `dist/<game>/meta.json` has credits +
+  gitHistory; `history.txt` extracted (Gaming History dat has an entry for
+  most sets); `README.md` dossier reads sensibly; the learn modal shows
+  flyer/cabinet/marquee.
+- **Menu**: game appears on the shelf (`/games.json`), cover renders, story
+  modal opens, Play works via `/app/g/<game>/`.
+- **gen:all**: add the game to `package.json`'s `gen:all` list or it won't
+  deploy.
+- **Mid-build honesty**: until the board + cores actually compile, the shelf
+  shows the game as "IN DEVELOPMENT" (manifest `supported` flag, driven by
+  the compiled board module's existence). Don't tell the user to try a game
+  before `buildApp` has succeeded with its board in the registry.
+- **Deploy**: `npm run deploy -- --artwork` (the script now waits for the
+  Pages build, re-kicks stuck ones, fails loudly, and smoke-probes the live
+  manifest — trust its exit code).
+- **Docs**: TODO.md "Done" entry; new gotchas if you earned any.
+
+## 8. Keep the contract
 
 If you catch yourself writing `if (game === 'digdug')` anywhere in
 src/runtime or src/gen — stop; that fact belongs in the graph (parser), the
