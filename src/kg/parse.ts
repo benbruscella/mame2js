@@ -177,9 +177,11 @@ export function evalExpr(expr: string, consts: Record<string, number> = {}): num
  * Collect numeric constants: `#define NAME (expr)` plus the modern
  * `static constexpr XTAL NAME(expr);` / `static constexpr int NAME = expr;`
  * forms (the galaxian driver uses the latter exclusively).
+ * `seed` supplies constants from other files (device headers define clocks
+ * like NTSC_APU_CLOCK in terms of their own XTALs); later files win.
  */
-export function parseDefines(src: string): Record<string, number> {
-  const out: Record<string, number> = {};
+export function parseDefines(src: string, seed: Record<string, number> = {}): Record<string, number> {
+  const out: Record<string, number> = { ...seed };
   const re = /^#define\s+(\w+)\s+(.+)$|(?:static\s+)?constexpr\s+(?:XTAL|int|unsigned|double|u?int\d+_t)\s+(\w+)\s*(?:\(([^;]*)\)|=\s*([^;]*))\s*;/gm;
   let m: RegExpExecArray | null;
   while ((m = re.exec(src)) !== null) {
@@ -194,28 +196,53 @@ export function parseDefines(src: string): Record<string, number> {
 
 // ---------------------------------------------------------------------------
 // GAME( year, name, parent, machine, input, class, init, monitor, company, fullname, flags )
+// CONS/SYST/COMP( year, name, parent, compat, machine, input, class, init, company, fullname, flags )
+//   — the SYST family has a COMPAT field where GAME has none, and no MONITOR
+//     (orientation is hardcoded ROT0 in gamedrv.h).
 // ---------------------------------------------------------------------------
+
+export type GameKind = 'arcade' | 'console' | 'system' | 'computer';
 
 export interface GameDef {
   year: string; name: string; parent: string; machine: string; input: string;
   cls: string; init: string; monitor: string; company: string; fullname: string; flags: string;
+  kind: GameKind;
+  /** software-compatibility group short-name (CONS/SYST/COMP arg 4); '0' when absent */
+  compat: string;
 }
+
+const GAME_MACRO_KINDS: Record<string, GameKind> = {
+  GAME: 'arcade', GAMEX: 'arcade', GAMEL: 'arcade',
+  CONS: 'console', SYST: 'system', COMP: 'computer',
+};
 
 export function parseGames(src: string): GameDef[] {
   const out: GameDef[] = [];
-  const re = /^\s*GAME[XL]?\s*\(/gm;
+  const re = /^\s*(GAME[XL]?|CONS|SYST|COMP)\s*\(/gm;
   let m: RegExpExecArray | null;
   while ((m = re.exec(src)) !== null) {
+    const kind = GAME_MACRO_KINDS[m[1]];
     const open = src.indexOf('(', m.index);
     const close = matchParen(src, open);
     if (close < 0) continue;
     const args = splitArgs(src.slice(open + 1, close)).map(unquote);
     if (args.length < 10) continue;
-    out.push({
-      year: args[0], name: args[1], parent: args[2], machine: args[3], input: args[4],
-      cls: args[5], init: args[6], monitor: args[7], company: args[8], fullname: args[9],
-      flags: args.slice(10).join(', '),
-    });
+    if (kind === 'arcade') {
+      out.push({
+        year: args[0], name: args[1], parent: args[2], machine: args[3], input: args[4],
+        cls: args[5], init: args[6], monitor: args[7], company: args[8], fullname: args[9],
+        flags: args.slice(10).join(', '),
+        kind, compat: '0',
+      });
+    } else {
+      out.push({
+        year: args[0], name: args[1], parent: args[2], compat: args[3],
+        machine: args[4], input: args[5], cls: args[6], init: args[7],
+        monitor: 'ROT0', company: args[8], fullname: args[9],
+        flags: args.slice(10).join(', '),
+        kind,
+      });
+    }
   }
   return out;
 }
@@ -455,6 +482,13 @@ export interface DeviceDef {
   addrMaps: Record<string, string>;
   /** screen raw params if this is a screen with set_raw */
   screenRaw?: { pixclock: number; htotal: number; hbend: number; hbstart: number; vtotal: number; vbend: number; vbstart: number };
+  /** screen params from the set_refresh_hz/set_size/set_visarea style (consoles: nes.cpp) */
+  screenRefreshHz?: number;
+  screenSize?: { w: number; h: number };
+  screenVisarea?: { x0: number; x1: number; y0: number; y1: number };
+  /** slot devices: NES_CONTROL_PORT(config, m_ctrl1, nes_control_port1_devices, "joypad") */
+  slotOptions?: string;
+  slotDefault?: string;
   /** every raw config statement that mentioned this device (for the generator + human) */
   config: string[];
   /** GFXDECODE(config, ..., gfx_name) reference */
@@ -463,9 +497,21 @@ export interface DeviceDef {
   localVar?: string;
 }
 
+export interface SoftwareListDef {
+  /** config tag, e.g. "cart_list" */
+  tag: string;
+  /** hash/<name>.xml list name from set_original/set_compatible */
+  name: string;
+  status: 'original' | 'compatible';
+  /** set_filter argument, e.g. "!EXP" */
+  filter?: string;
+}
+
 export interface MachineConfigDef {
   cls: string; name: string;
   devices: DeviceDef[];
+  /** SOFTWARE_LIST(config, ...) declarations (consoles/computers) */
+  softwareLists: SoftwareListDef[];
   /** calls to other config helpers on the same class, e.g. galagab() calls galaga() */
   calls: string[];
   /**
@@ -496,7 +542,7 @@ export function parseMachineConfigs(
 ): MachineConfigDef[] {
   const fns = extractFunctionBody(src, /void\s+(\w+)::(\w+)\(machine_config\s*&\s*config\)/g);
   return fns.map(({ cls, name, body }) => {
-    const cfg: MachineConfigDef = { cls, name, devices: [], calls: [], patches: [], raw: body.trim() };
+    const cfg: MachineConfigDef = { cls, name, devices: [], softwareLists: [], calls: [], patches: [], raw: body.trim() };
     const byRef = new Map<string, DeviceDef>(); // m_member, "tag", or localVar -> device
     const resolveTag = (ref: string): string => {
       const r = ref.trim();
@@ -521,6 +567,18 @@ export function parseMachineConfigs(
         const open = s.indexOf('(', s.indexOf(type) + type.length - 1);
         const close = matchParen(s, open);
         const args = splitArgs(s.slice(open + 1, close)); // [config, ref, ...rest]
+        // SOFTWARE_LIST(config, "cart_list").set_original("nes").set_filter("!EXP")
+        // is a catalog declaration, not a device
+        if (type === 'SOFTWARE_LIST') {
+          const list: SoftwareListDef = { tag: unquote(args[1] ?? ''), name: '', status: 'original' };
+          for (const { method, args: chainArgs } of parseChain(s.slice(close + 1))) {
+            if (method === 'set_original') { list.name = unquote(chainArgs[0] ?? ''); list.status = 'original'; }
+            else if (method === 'set_compatible') { list.name = unquote(chainArgs[0] ?? ''); list.status = 'compatible'; }
+            else if (method === 'set_filter') list.filter = unquote(chainArgs[0] ?? '');
+          }
+          if (list.name) cfg.softwareLists.push(list);
+          continue;
+        }
         const refRaw = args[1] ?? dm[3];
         const clockRaw = args.length > 2 ? args.slice(2).join(', ') : undefined;
         const ref = refRaw.trim();
@@ -540,6 +598,14 @@ export function parseMachineConfigs(
         if (type === 'GFXDECODE' && clockRaw) {
           const parts = splitArgs(clockRaw);
           dev.gfxDecodeName = parts[parts.length - 1]?.trim();
+        }
+        // slot device with an options table + quoted default:
+        // NES_CONTROL_PORT(config, m_ctrl1, nes_control_port1_devices, "joypad")
+        if (args.length >= 4 && /_devices$/.test(args[2].trim()) && args[3].trim().startsWith('"')) {
+          dev.slotOptions = args[2].trim();
+          dev.slotDefault = unquote(args[3]);
+          dev.clock = null;
+          delete dev.clockExpr;
         }
         cfg.devices.push(dev);
         continue;
@@ -573,6 +639,17 @@ export function parseMachineConfigs(
             const a = splitArgs(s.slice(open + 1, close)).map(x => evalExpr(x, consts) ?? 0);
             if (a.length >= 7) {
               dev.screenRaw = { pixclock: a[0], htotal: a[1], hbend: a[2], hbstart: a[3], vtotal: a[4], vbend: a[5], vbstart: a[6] };
+            }
+          } else if (method === 'set_refresh_hz' || method === 'set_size' || method === 'set_visarea') {
+            // the console screen style (nes.cpp): no set_raw, three setters instead
+            const open = s.indexOf('(', s.indexOf(method));
+            const close = matchParen(s, open);
+            const a = splitArgs(s.slice(open + 1, close)).map(x => evalExpr(x, consts));
+            if (method === 'set_refresh_hz' && a[0] !== null) dev.screenRefreshHz = a[0];
+            else if (method === 'set_size' && a.length >= 2 && a[0] !== null && a[1] !== null) {
+              dev.screenSize = { w: a[0], h: a[1] };
+            } else if (method === 'set_visarea' && a.length >= 4 && a.every(v => v !== null)) {
+              dev.screenVisarea = { x0: a[0]!, x1: a[1]!, y0: a[2]!, y1: a[3]! };
             }
           }
           continue;

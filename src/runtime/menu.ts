@@ -17,6 +17,7 @@ import { readZip, crc32 } from './zip.ts';
 import { decodeGfx, type GfxLayout } from './gfx.ts';
 import { loadArtwork } from './artwork.ts';
 import { createBoard } from './boards/index.ts';
+import { openCartStore } from './cartstore.ts';
 
 interface GameEntry {
   game: string;
@@ -25,6 +26,8 @@ interface GameEntry {
   year: string;
   manufacturer: string;
   family: string;
+  /** consoles get their own tab + room; absent means arcade */
+  kind?: 'arcade' | 'console';
   hasRom: boolean;
   hasArt: boolean;
   /** the compiled app contains this game's board module (games.json) */
@@ -47,8 +50,11 @@ export async function runMenu(): Promise<void> {
   document.title = 'MAME History — the video arcade, transpiled';
   const games: GameEntry[] = await fetch('../games.json').then(r => r.json());
   games.sort((a, b) => a.year.localeCompare(b.year) || a.game.localeCompare(b.game));
-  // NOTHING is cached — no ROM bytes, no derived screenshots (hard user
-  // directive). Purge anything older builds may have stored.
+  // NOTHING arcade is cached — no ROM bytes, no derived screenshots (hard
+  // user directive). Purge anything older builds may have stored: the legacy
+  // `mame2js-roms` DB plus mamekit:/mame2js:-prefixed web-storage keys ONLY.
+  // Console carts live in the `mamekit-carts` IndexedDB by explicit user
+  // approval (2026-07-07) — this purge must NEVER touch it.
   try { indexedDB.deleteDatabase('mame2js-roms'); } catch { /* legacy DB name — unavailable is fine */ }
   try {
     for (const store of [localStorage, sessionStorage]) {
@@ -102,6 +108,40 @@ export async function runMenu(): Promise<void> {
   header.append(marquee, search);
   root.appendChild(header);
 
+  // --- ARCADE | CONSOLES tab pills ------------------------------------------------
+  // active tab from ?tab=consoles (deep-linkable, Pages-safe); switching
+  // rewrites the query via replaceState so reload/share lands on the same tab
+  let activeTab: 'arcade' | 'console' =
+    new URLSearchParams(location.search).get('tab') === 'consoles' ? 'console' : 'arcade';
+  const tabsBar = el('div', 'display:flex;gap:14px;justify-content:center;padding:24px 36px 0');
+  const pills = new Map<'arcade' | 'console', HTMLElement>();
+  const stylePills = () => {
+    for (const [tab, pill] of pills) {
+      const active = tab === activeTab;
+      pill.style.background = active ? '#f2c200' : 'transparent';
+      pill.style.color = active ? '#1b1b1b' : '#9fb0ff';
+      pill.style.borderColor = active ? '#f2c200' : '#2a3160';
+    }
+  };
+  const setTab = (tab: 'arcade' | 'console') => {
+    if (tab === activeTab) return;
+    activeTab = tab;
+    history.replaceState(null, '', tab === 'console' ? '?tab=consoles' : location.pathname);
+    stylePills();
+    applyFilter();
+  };
+  for (const [tab, text] of [['arcade', 'ARCADE'], ['console', 'CONSOLES']] as const) {
+    const pill = el('button', `padding:9px 26px;border-radius:20px;border:2px solid #2a3160;
+      font:inherit;font-weight:800;letter-spacing:2px;font-size:12px;cursor:pointer`);
+    pill.textContent = text;
+    pill.setAttribute('data-tab', tab === 'console' ? 'consoles' : 'arcade');
+    pill.addEventListener('click', () => setTab(tab));
+    pills.set(tab, pill);
+    tabsBar.appendChild(pill);
+  }
+  stylePills();
+  root.appendChild(tabsBar);
+
   // --- shelves ------------------------------------------------------------------
   const wall = el('div', `display:flex;flex-wrap:wrap;gap:34px 26px;justify-content:center;
     padding:44px 36px 0;max-width:1280px;margin:0 auto`);
@@ -154,7 +194,8 @@ export async function runMenu(): Promise<void> {
     let any = false;
     for (const b of boxes) {
       const hay = `${b.entry.title} ${b.entry.manufacturer} ${b.entry.year} ${b.entry.game}`.toLowerCase();
-      b.visible = !q || hay.includes(q);
+      const kind = b.entry.kind === 'console' ? 'console' : 'arcade';
+      b.visible = kind === activeTab && (!q || hay.includes(q));
       b.box.style.display = b.visible ? '' : 'none';
       any ||= b.visible;
     }
@@ -163,9 +204,16 @@ export async function runMenu(): Promise<void> {
   };
   search.addEventListener('input', applyFilter);
 
+  // consoles skip the learn modal: the console's story lives in the room's
+  // own About button, so the tile navigates straight to the room
+  const openEntry = (entry: GameEntry) => {
+    if (entry.kind === 'console') location.href = `g/${encodeURIComponent(entry.game)}/`;
+    else void openLearnModal(entry);
+  };
+
   const launch = () => {
     const vis = boxes.filter(b => b.visible);
-    if (vis[selected]) void openLearnModal(vis[selected].entry);
+    if (vis[selected]) openEntry(vis[selected].entry);
   };
 
   addEventListener('keydown', ev => {
@@ -182,7 +230,7 @@ export async function runMenu(): Promise<void> {
         if (ev.target !== search && ev.key.length === 1 && !ev.metaKey && !ev.ctrlKey) search.focus();
     }
   });
-  select(0);
+  applyFilter(); // hides the inactive tab's boxes + selects the first visible
 
   // --- box construction --------------------------------------------------------
 
@@ -212,7 +260,9 @@ export async function runMenu(): Promise<void> {
     label.append(name, meta);
     box.appendChild(label);
 
-    if (entry.supported === false || !entry.hasRom) {
+    // consoles have no romset, so "INSERT ROM" is meaningless there — only
+    // the stale-bundle "IN DEVELOPMENT" ribbon applies to them
+    if (entry.supported === false || (entry.kind !== 'console' && !entry.hasRom)) {
       const ribbon = el('div', `position:absolute;top:14px;right:-34px;transform:rotate(38deg);z-index:4;
         background:${entry.supported === false ? '#666' : '#c22'};color:#fff;font-size:10px;font-weight:700;
         letter-spacing:1px;padding:3px 38px;box-shadow:0 2px 6px rgba(0,0,0,.5)`);
@@ -222,10 +272,28 @@ export async function runMenu(): Promise<void> {
       box.appendChild(ribbon);
     }
 
+    if (entry.kind === 'console') {
+      // async cart-count badge from the visitor's own cart library
+      const badge = el('div', `position:absolute;left:12px;right:0;bottom:66px;z-index:2;
+        padding:6px 14px;font-size:11px;font-weight:600;letter-spacing:.6px;color:#f2c200;
+        background:linear-gradient(transparent, rgba(4,5,12,.9) 45%);pointer-events:none`);
+      badge.setAttribute('data-cart-badge', entry.game);
+      box.appendChild(badge);
+      void openCartStore()
+        .then(s => s.list(entry.game))
+        .then(carts => {
+          badge.textContent = carts.length
+            ? `${carts.length} cart${carts.length === 1 ? '' : 's'} on the shelf`
+            : 'No carts yet — click to insert one';
+        })
+        .catch(() => { badge.textContent = ''; });
+    }
+
     box.addEventListener('mouseenter', () => { box.style.transform = 'translateY(-12px) scale(1.04)'; });
     box.addEventListener('mouseleave', () => { box.style.transform = ''; box.style.outline = 'none'; });
-    // education first: the box opens the game's history card; Play lives inside
-    box.addEventListener('click', () => { void openLearnModal(entry); });
+    // education first: the box opens the game's history card; Play lives
+    // inside. Console tiles go straight to their room (About lives there).
+    box.addEventListener('click', () => openEntry(entry));
 
     // shelf plank under each box — planks in a row join into one shelf
     const plank = el('div', `width:350px;height:16px;margin-top:0;border-radius:2px;
@@ -428,6 +496,9 @@ export async function runMenu(): Promise<void> {
       ctx.drawImage(flyer, (canvas.width - w) / 2, (canvas.height - h) / 2, w, h);
       return;
     }
+    // consoles: no cabinet/screenshot ladder — a stylized front-loader
+    // placeholder unless real box art (step 0 above) exists
+    if (entry.kind === 'console') { paintConsolePlaceholder(canvas, ctx); return; }
     // 1. cabinet artwork frame (drawn immediately; the deterministic
     //    screenshot fills the CRT window when it's ready)
     if (entry.hasArt && await paintArtwork(entry, canvas, ctx)) return;
@@ -558,6 +629,63 @@ export async function runMenu(): Promise<void> {
     // tile-art covers needed ROM bytes; ROMs are never stored/cached, so
     // this rung of the cover ladder is permanently retired (flyers rule)
     return false;
+  }
+
+  /**
+   * Stylized console hardware cover: a grey front-loader deck (lighter top,
+   * darker lower front, near-black flap) with the thin red accent stripe —
+   * no trademarked artwork, pure geometry.
+   */
+  function paintConsolePlaceholder(canvas: HTMLCanvasElement, ctx: CanvasRenderingContext2D): void {
+    const W = canvas.width, H = canvas.height;
+    const bg = ctx.createLinearGradient(0, 0, 0, H);
+    bg.addColorStop(0, '#171a2b');
+    bg.addColorStop(1, '#0a0b14');
+    ctx.fillStyle = bg;
+    ctx.fillRect(0, 0, W, H);
+    // faint scanlines to match the arcade placeholders
+    ctx.fillStyle = 'rgba(0,0,0,.3)';
+    for (let y = 0; y < H; y += 3) ctx.fillRect(0, y, W, 1);
+
+    const bw = W * 0.74, bx = (W - bw) / 2, by = H * 0.36;
+    const deckH = H * 0.14, frontH = H * 0.12;
+    // drop shadow
+    ctx.fillStyle = 'rgba(0,0,0,.55)';
+    ctx.fillRect(bx - 10, by + deckH + frontH, bw + 20, 14);
+    // top deck: light grey
+    const deck = ctx.createLinearGradient(0, by, 0, by + deckH);
+    deck.addColorStop(0, '#d9d4cd');
+    deck.addColorStop(1, '#b4afa8');
+    ctx.fillStyle = deck;
+    ctx.fillRect(bx, by, bw, deckH);
+    // grip grooves across the deck
+    ctx.fillStyle = 'rgba(0,0,0,.12)';
+    for (let i = 1; i <= 4; i++) ctx.fillRect(bx, by + (deckH * i) / 5, bw, 3);
+    // lower front: darker grey
+    const front = ctx.createLinearGradient(0, by + deckH, 0, by + deckH + frontH);
+    front.addColorStop(0, '#8f8a83');
+    front.addColorStop(1, '#6f6a64');
+    ctx.fillStyle = front;
+    ctx.fillRect(bx, by + deckH, bw, frontH);
+    // cartridge flap: near-black, left two-thirds of the front
+    ctx.fillStyle = '#403d39';
+    ctx.fillRect(bx + bw * 0.05, by + deckH + frontH * 0.14, bw * 0.62, frontH * 0.62);
+    ctx.fillStyle = 'rgba(255,255,255,.08)';
+    ctx.fillRect(bx + bw * 0.05, by + deckH + frontH * 0.14, bw * 0.62, 4);
+    // the thin red stripe along the deck/front seam
+    ctx.fillStyle = '#e60012';
+    ctx.fillRect(bx, by + deckH - 5, bw, 7);
+    // power/reset nubs on the right of the front
+    ctx.fillStyle = '#2c2a27';
+    ctx.fillRect(bx + bw * 0.74, by + deckH + frontH * 0.3, bw * 0.09, frontH * 0.26);
+    ctx.fillRect(bx + bw * 0.86, by + deckH + frontH * 0.3, bw * 0.09, frontH * 0.26);
+    // controller cord hint
+    ctx.strokeStyle = 'rgba(160,160,160,.35)';
+    ctx.lineWidth = 5;
+    ctx.beginPath();
+    ctx.moveTo(bx + bw * 0.2, by + deckH + frontH + 14);
+    ctx.bezierCurveTo(bx + bw * 0.1, by + deckH + frontH + 120, bx + bw * 0.5, by + deckH + frontH + 90, bx + bw * 0.42, by + deckH + frontH + 180);
+    ctx.stroke();
   }
 
   function paintPlaceholder(entry: GameEntry, canvas: HTMLCanvasElement, ctx: CanvasRenderingContext2D): void {

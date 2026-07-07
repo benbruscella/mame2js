@@ -52,7 +52,7 @@ function detectMameSrc(): string {
   process.exit(1);
 }
 
-/** Locate the driver .cpp that defines GAME(..., <game>, ...) — cached. */
+/** Locate the driver .cpp that defines GAME/CONS/SYST/COMP(..., <game>, ...) — cached. */
 function findDriverFile(game: string): string {
   const cacheFile = join(outRoot, '.driver-cache.json');
   let cache: Record<string, string> = {};
@@ -61,8 +61,9 @@ function findDriverFile(game: string): string {
   }
   if (cache[game] && existsSync(join(mameSrc, cache[game]))) return join(mameSrc, cache[game]);
 
-  // rows may carry a leading /* NNN */ index comment (mw8080bw.cpp style)
-  const gameRe = new RegExp(`^\\s*(?:/\\*[^*]*\\*/\\s*)?GAME[XL]?\\(\\s*\\d{4},\\s*${game}\\s*,`, 'm');
+  // rows may carry a leading /* NNN */ index comment (mw8080bw.cpp style);
+  // console/system rows use CONS/SYST/COMP and may have "19??" years
+  const gameRe = new RegExp(`^\\s*(?:/\\*[^*]*\\*/\\s*)?(?:GAME[XL]?|CONS|SYST|COMP)\\(\\s*[\\d?]{4},\\s*${game}\\s*,`, 'm');
   const root = join(mameSrc, 'src/mame');
   const stack = [root];
   while (stack.length) {

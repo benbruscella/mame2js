@@ -19,14 +19,16 @@ export type NodeLabel =
   | 'PortField'     // PORT_BIT / PORT_DIPNAME / PORT_SERVICE
   | 'GfxLayout'     // static const gfx_layout name = {...}
   | 'GfxDecode'     // GFXDECODE_START(name)
-  | 'GfxDecodeEntry';
+  | 'GfxDecodeEntry'
+  | 'SoftwareList'; // SOFTWARE_LIST(config, "tag") — console/computer software catalog reference
 
 export type RelType =
   | 'DEFINED_IN'      // anything -> SourceFile
   | 'INCLUDES'        // SourceFile -> SourceFile (by name)
   | 'CLONE_OF'        // Game -> Game
   | 'USES_MACHINE'    // Game -> MachineConfig
-  | 'USES_INPUTS'     // Game -> InputPorts
+  | 'USES_INPUTS'     // Game -> InputPorts; also Device(slot) -> InputPorts (props: { option }) for
+                      // console control ports whose fields live on the default slot device
   | 'USES_ROMSET'     // Game -> RomSet
   | 'HAS_DEVICE'      // MachineConfig -> Device
   | 'HAS_MAP'         // Device(cpu) -> AddressMap        props: { space }
@@ -45,7 +47,8 @@ export type RelType =
   | 'DECODES'         // MachineConfig -> GfxDecode
   | 'HAS_ENTRY'       // GfxDecode -> GfxDecodeEntry
   | 'USES_LAYOUT'     // GfxDecodeEntry -> GfxLayout
-  | 'READS_REGION';   // GfxDecodeEntry -> RomRegion (by tag, resolved per romset at generation)
+  | 'READS_REGION'    // GfxDecodeEntry -> RomRegion (by tag, resolved per romset at generation)
+  | 'HAS_SOFTLIST';   // MachineConfig -> SoftwareList
 
 export type PropValue = string | number | boolean | null | (string | number)[];
 
