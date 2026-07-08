@@ -3,6 +3,7 @@
 
 import type { Board, BoardConfig, BoardSinks, InputPorts, Regions } from '../types.ts';
 import { GalagaBoard } from './galaga.ts';
+import { DigdugBoard } from './digdug.ts';
 import { PacmanBoard } from './pacman.ts';
 import { GalaxianBoard } from './galaxian.ts';
 import { GyrussBoard } from './gyruss.ts';
@@ -16,6 +17,7 @@ type BoardCtor = new (config: BoardConfig, regions: Regions, inputs: InputPorts,
 
 const FAMILIES: Record<string, BoardCtor> = {
   galaga: GalagaBoard,
+  digdug: DigdugBoard,
   pacman: PacmanBoard,
   galaxian: GalaxianBoard,
   gyruss: GyrussBoard,

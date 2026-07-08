@@ -15,6 +15,7 @@ import type { Regions, VideoRenderer } from '../types.ts';
 import { decodeGfx } from '../gfx.ts';
 import type { GfxLayout, GfxSet } from '../gfx.ts';
 import { Starfield05xx } from '../starfield05xx.ts';
+import { computeResistorWeights, combineWeights, packRGB } from './resnet.ts';
 
 export interface GalagaVideoDeps {
   regions: Regions;               // gfx1 0x1000, gfx2 0x2000, proms 0x220
@@ -56,69 +57,6 @@ const SPRITE_LAYOUT: GfxLayout = {
 };
 
 // ---------------------------------------------------------------------------
-// resnet.cpp port (only what galaga_palette needs: pulldown supported,
-// pullup passed but always 0 here; autoscale scaler)
-
-interface ResNetwork {
-  resistances: number[];
-  pulldown: number; // Ohms, 0 = none
-  pullup: number;   // Ohms, 0 = none
-}
-
-/** Port of compute_resistor_weights() (resnet.cpp:55-227), autoscale only when scaler < 0. */
-function computeResistorWeights(
-  minval: number,
-  maxval: number,
-  scaler: number,
-  nets: ResNetwork[],
-): number[][] {
-  const w: number[][] = [];
-  for (const net of nets) {
-    const r = net.resistances;
-    const count = r.length;
-    const ww: number[] = new Array<number>(count);
-    for (let n = 0; n < count; n++) {
-      let R0 = net.pulldown === 0 ? 1.0 / 1e12 : 1.0 / net.pulldown;
-      let R1 = net.pullup === 0 ? 1.0 / 1e12 : 1.0 / net.pullup;
-      for (let j = 0; j < count; j++) {
-        if (j === n) {
-          if (r[j] !== 0) R1 += 1.0 / r[j]!;
-        } else if (r[j] !== 0) {
-          R0 += 1.0 / r[j]!;
-        }
-      }
-      R0 = 1.0 / R0;
-      R1 = 1.0 / R1;
-      const vout = (maxval - minval) * (R0 / (R1 + R0)) + minval;
-      ww[n] = Math.min(Math.max(vout, minval), maxval);
-    }
-    w.push(ww);
-  }
-
-  let scale: number;
-  if (scaler < 0.0) {
-    let max = 0.0;
-    for (const ww of w) {
-      let sum = 0.0;
-      for (const v of ww) sum += v;
-      if (sum > max) max = sum;
-    }
-    scale = maxval / max;
-  } else {
-    scale = scaler;
-  }
-
-  return w.map((ww) => ww.map((v) => v * scale));
-}
-
-/** Port of combine_weights() (resnet.h:181): int(sum(tab[i]*w[i]) + 0.5). */
-function combineWeights(tab: number[], ...bits: number[]): number {
-  let sum = 0.0;
-  for (let i = 0; i < bits.length; i++) sum += tab[i]! * bits[i]!;
-  return Math.floor(sum + 0.5);
-}
-
-// ---------------------------------------------------------------------------
 // Palette — port of galaga_state::galaga_palette (galaga_v.cpp:45-111).
 //
 // proms region layout: 32-byte palette PROM @0x000, 256-byte char lookup
@@ -137,10 +75,6 @@ export interface GalagaPalette {
   spriteColor: Uint32Array;
   /** 1 where the sprite pen is transparent (indirect pen == 0x0f). */
   spriteTrans: Uint8Array;
-}
-
-function packRGB(r: number, g: number, b: number): number {
-  return (0xff000000 | (b << 16) | (g << 8) | r) >>> 0;
 }
 
 export function buildGalagaPalette(proms: Uint8Array): GalagaPalette {
