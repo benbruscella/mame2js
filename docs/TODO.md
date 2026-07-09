@@ -147,3 +147,15 @@ Prioritized. Each item has enough context to start cold. Check
   palette RAM (71 checks). **Clone-family ROM alternates**: any sibling
   set's same-slot chip verifies (graph-derived from all ROM_START blocks) —
   classic gngb-era zips load against the modern manifest.
+- Issue #20 (2026-07-09): **Dig Dug** — 3rd galaga.cpp board, reuses the
+  Namco 3×Z80 / WSG / 06xx / 51xx stack. New: `namco53.ts` (HLE DIP reader,
+  alternates DSWA/DSWB — classic MAME 0.121 namcoio HLE, since MAME shipped
+  no 53xx HLE afterward), `er2055.ts` (EAROM high-score NVRAM, faithful
+  set_control/set_clk port, localStorage-persisted per family), `boards/
+  digdug.ts`, `video/digdug.ts` (paged "dirt" bg tilemap via gfx4 map ROM +
+  1bpp transparent alpha layer + galaga-style sprites, own 32+256+256 PROM
+  palette). Generator: **FAMILY_BY_MACHINE override** — one driver file can
+  host multiple boards (galaga.cpp = galaga *and* digdug), so board family
+  keys on machine name, not just file stem. Shared resnet helpers extracted
+  to `video/resnet.ts`. Artwork fetched (flyer/marquee/cabinet/bezel),
+  history.xml story present.

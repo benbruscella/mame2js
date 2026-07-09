@@ -91,15 +91,26 @@ Emulation working is half the job. Every shipped game also needs:
   The generator emits clone-family `alt` CRCs automatically; if a real set
   still fails, that's a parser/alternates gap, not the user's zip. NEVER
   fetch ROMs.
-- **Artwork** (all gitignored, fetch with `curl -L`):
-  - flyer → `artwork/covers/<game>.png`, marquee →
-    `artwork/media/marquees/<game>.png`, cabinet →
-    `artwork/media/cabinets/<game>.png` — all from
-    `http://adb.arcadeitalia.net/media/mame.current/<kind>/<game>.png`
-    (kinds: flyers, marquees, cabinets; check the PARENT set name on 404).
-  - bezel zip → `artwork/<game>.zip` from
-    `https://mrdo.mameworld.info/artwork/<game>.zip` (the site's pages are
-    broken; direct paths work). Confirm it contains a `default.lay`.
+- **Artwork** (all gitignored, copyrighted — the user's explicit call, same as
+  ROMs; fetch with `curl -L`). Without these files the shelf still shows a
+  cover — the menu falls back to a deterministic gameplay screenshot, then to
+  tile art from the gfx ROM, then a placeholder (menu.ts cover chain) — so
+  "there's no artwork" means the nice **scans** are missing, not that the game
+  is broken. To add them for `<game>` (do the same for its PARENT set name if a
+  `<game>` URL 404s — clones share the parent's art):
+  ```
+  base=http://adb.arcadeitalia.net/media/mame.current
+  curl -L $base/flyers/<game>.png   -o artwork/covers/<game>.png
+  curl -L $base/marquees/<game>.png -o artwork/media/marquees/<game>.png
+  curl -L $base/cabinets/<game>.png -o artwork/media/cabinets/<game>.png
+  curl -L https://mrdo.mameworld.info/artwork/<game>.zip -o artwork/<game>.zip
+  ```
+  - `artwork/covers/<game>.png` is the flyer box-art (cover 0, the permanent
+    one); marquee + cabinet feed the learn modal / dossier.
+  - The bezel zip (mrdo — the site's pages 404, but direct file paths work)
+    must contain a `default.lay`; it drives the framed-CRT cover (cover 1).
+  - Regenerate (`node bin/mamekit.js <game>`) so `hasArt`/history land in the
+    config, then hard-refresh the menu.
 - **Education layer sanity**: `dist/<game>/meta.json` has credits +
   gitHistory; `history.txt` extracted (Gaming History dat has an entry for
   most sets); `README.md` dossier reads sensibly; the learn modal shows

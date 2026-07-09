@@ -86,6 +86,14 @@ export async function generate(graph: KnowledgeGraph, opts: GenerateOptions): Pr
     throw new Error(`graph incomplete for ${opts.game}: machine=${!!machine} romset=${!!romset} inputs=${!!inputs}`);
   }
 
+  // Board family selects the runtime board module. It defaults to the driver
+  // file stem, but a single driver file can host several distinct boards
+  // (galaga.cpp defines both galaga and digdug, with different maps/video/I/O).
+  // A machine whose board differs from its file's default is remapped by name.
+  const FAMILY_BY_MACHINE: Record<string, string> = { digdug: 'digdug' };
+  const family = FAMILY_BY_MACHINE[String(machine.props.name)]
+    ?? basename(String(graph.meta.driverFile)).replace(/\.cpp$/, '');
+
   // machine configs compose via helper calls (galaxian(config) -> galaxian_base(config));
   // walk the CALLS chain and collect devices from every config in it
   const devices: KGNode[] = [];
@@ -267,7 +275,7 @@ export async function generate(graph: KnowledgeGraph, opts: GenerateOptions): Pr
   // dacGain replaces the worklet's junofrst-derived default (0.25).
   // TODO(#12): parse plain add_route gains from the graph for the simple
   // (non-discrete) boards, and lift these into graph facts.
-  const soundFamily = basename(String(graph.meta.driverFile)).replace(/\.cpp$/, '');
+  const soundFamily = family;
   const AY_MIX: Record<string, { chipGains?: number[]; dacGain?: number }> = {
     // gyruss.cpp sound_discrete + konami_*_mixer_desc: chips 0/1 feed the
     // mixer at 1.0 through 2.2k per channel; chips 2-4 at 0.33 through
@@ -444,8 +452,6 @@ export async function generate(graph: KnowledgeGraph, opts: GenerateOptions): Pr
 
   // --- emit ---------------------------------------------------------------------------
   const title = `${game.props.fullname} (${game.props.company}, ${game.props.year})`;
-  // board family = driver file stem; selects the board module from the registry
-  const family = basename(String(graph.meta.driverFile)).replace(/\.cpp$/, '');
 
   // Console cart catalog: the machine's primary software list (first
   // status:'original' whose hash/<name>.xml exists) extracted to a sibling
