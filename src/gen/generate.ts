@@ -541,7 +541,7 @@ export async function generate(graph: KnowledgeGraph, opts: GenerateOptions): Pr
     // no romUrl: ROMs are never fetched — the shell only accepts user drops
     // (console carts are remembered per-browser in IndexedDB via
     // runtime/cartstore.ts, by explicit user approval 2026-07-07)
-    runtimeUrl: './dist/runtime/',
+    runtimeUrl: './modules/runtime/',
     menuUrl: './',
   };
 
