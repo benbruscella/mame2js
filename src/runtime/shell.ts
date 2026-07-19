@@ -207,7 +207,7 @@ export async function runShell(cfg: ShellConfig, preloaded?: Regions): Promise<v
   if (input.debug) console.log('[input] debug on — bindings:', cfg.bindings, 'ports:', cfg.ports);
 
   const audio = new AudioOutput();
-  const board = createBoard(cfg.board, regions, input, {
+  const board = createBoard({ ...cfg.board, game: cfg.game }, regions, input, {
     soundWrite: (offset, data, frac) => audio.write(offset, data, frac),
     soundData: (id, bytes) => audio.data(id, bytes),
   });
@@ -768,4 +768,3 @@ function waitForZip(
     });
   });
 }
-

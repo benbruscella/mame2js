@@ -11,6 +11,7 @@ export type NodeLabel =
   | 'AddressMap'    // void cls::name(address_map&)
   | 'AddressRange'  // one map(start,end)... statement
   | 'Handler'       // a named read/write handler referenced by a range or callback
+  | 'Callback'      // one machine-config signal/callback binding
   | 'RomSet'        // ROM_START(name) ... ROM_END
   | 'RomRegion'     // ROM_REGION(size, "tag", flags)
   | 'Rom'           // ROM_LOAD(...)
@@ -20,7 +21,12 @@ export type NodeLabel =
   | 'GfxLayout'     // static const gfx_layout name = {...}
   | 'GfxDecode'     // GFXDECODE_START(name)
   | 'GfxDecodeEntry'
-  | 'SoftwareList'; // SOFTWARE_LIST(config, "tag") — console/computer software catalog reference
+  | 'SoftwareList'  // SOFTWARE_LIST(config, "tag") — console/computer software catalog reference
+  | 'HardwareType'  // a MAME device type used by one or more generated machines
+  | 'HardwareImplementation' // the MAME class/source implementing a hardware type
+  | 'HardwareMethod' // one source method lowered into device IR
+  | 'HardwareDsl'   // a MAME opcode/operation DSL such as z80.lst
+  | 'GeneratedArtifact'; // a generated runtime module or exact source capsule
 
 export type RelType =
   | 'DEFINED_IN'      // anything -> SourceFile
@@ -35,6 +41,9 @@ export type RelType =
   | 'HAS_RANGE'       // AddressMap -> AddressRange
   | 'READS'           // AddressRange -> Handler
   | 'WRITES'          // AddressRange -> Handler
+  | 'HAS_CALLBACK'    // Device/MachineConfig -> Callback
+  | 'CALLS_HANDLER'   // Callback -> Handler
+  | 'TARGETS_DEVICE'  // Callback -> Device
   | 'ON_DEVICE'       // Handler -> Device (handler lives on a device rather than the driver state)
   | 'HAS_REGION'      // RomSet -> RomRegion
   | 'LOADS'           // RomRegion -> Rom
@@ -48,7 +57,12 @@ export type RelType =
   | 'HAS_ENTRY'       // GfxDecode -> GfxDecodeEntry
   | 'USES_LAYOUT'     // GfxDecodeEntry -> GfxLayout
   | 'READS_REGION'    // GfxDecodeEntry -> RomRegion (by tag, resolved per romset at generation)
-  | 'HAS_SOFTLIST';   // MachineConfig -> SoftwareList
+  | 'HAS_SOFTLIST'    // MachineConfig -> SoftwareList
+  | 'USES_HARDWARE'   // Game -> HardwareType
+  | 'IMPLEMENTS'      // HardwareImplementation -> HardwareType
+  | 'HAS_METHOD'      // HardwareImplementation -> HardwareMethod
+  | 'HAS_DSL'         // HardwareImplementation -> HardwareDsl
+  | 'EMITS';          // HardwareType/HardwareDsl -> GeneratedArtifact
 
 export type PropValue = string | number | boolean | null | (string | number)[];
 
@@ -69,6 +83,8 @@ export interface KnowledgeGraph {
   meta: {
     tool: 'mamekit';
     version: string;
+    /** version of the source-aware graph schema, independent of package version */
+    schemaVersion?: number;
     mameSrc: string;
     driverFile: string;
     generatedAt: string;

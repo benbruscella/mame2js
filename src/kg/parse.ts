@@ -342,6 +342,9 @@ export interface HandlerRef {
   deviceClass?: string;
   /** device reference: member (m_foo) or "tag" it was attached to in the map */
   deviceRef?: string;
+  /** MAME inline map lambda (lw8/lr8) lowered as a generated handler. */
+  inlineParameters?: string;
+  inlineBody?: string;
 }
 
 export interface AddressRangeDef {
@@ -408,6 +411,8 @@ export function parseAddressMaps(src: string): AddressMapDef[] {
           case 'bankw': range.bankWrite = unquote(args[0]).replace(/^m_/, ''); break;
           case 'r': range.read = parseHandlerArgs(args); break;
           case 'w': range.write = parseHandlerArgs(args); break;
+          case 'lr8': range.read = parseInlineHandler(args, name, range, 'lr8'); break;
+          case 'lw8': range.write = parseInlineHandler(args, name, range, 'lw8'); break;
           case 'rw': {
             // rw(readFunc, writeFunc) or rw(dev, readFunc, writeFunc)
             if (args.length === 2) {
@@ -426,6 +431,22 @@ export function parseAddressMaps(src: string): AddressMapDef[] {
     }
     return { cls, name, ranges, calls, globalMask, unmapHigh };
   });
+}
+
+function parseInlineHandler(
+  args: string[],
+  mapName: string,
+  range: AddressRangeDef,
+  kind: 'lr8' | 'lw8',
+): HandlerRef | undefined {
+  const source = args.join(',').trim().replace(/^NAME\s*\(/, '').replace(/\)\s*$/, '');
+  const match = /\[[^\]]*\]\s*\(([^)]*)\)\s*\{([\s\S]*)\}\s*$/.exec(source);
+  if (!match) return undefined;
+  return {
+    method: `__inline_${mapName}_${range.start.toString(16)}_${kind}`,
+    inlineParameters: match[1].trim(),
+    inlineBody: match[2].trim(),
+  };
 }
 
 function splitStatements(body: string): string[] {

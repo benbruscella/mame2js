@@ -586,7 +586,12 @@ export async function runMenu(): Promise<void> {
       const regions = await loadRegions(entry.game, cfg);
       if (!regions) return null;
       const ports = Object.fromEntries(cfg.ports.map(p => [p.tag, p.init]));
-      const board = createBoard(cfg.board, regions, { read: t => ports[t] ?? 0xff }, { soundWrite: () => { /* silent */ } });
+      const board = createBoard(
+        { ...cfg.board, game: entry.game },
+        regions,
+        { read: t => ports[t] ?? 0xff },
+        { soundWrite: () => { /* silent */ } },
+      );
       const fb = new Uint32Array(board.fbWidth * board.fbHeight);
       for (let f = 0; f < COVER_FRAMES; f += 30) {
         for (let i = 0; i < 30; i++) board.frame(fb);

@@ -1,6 +1,7 @@
 // mamekit CLI
 //   mamekit <game>            full pipeline: graph -> generate -> build web app
 //   mamekit graph <game>      knowledge graph only (graph.json + graph.cypher)
+//   mamekit from-graph <game> rebuild from a graph snapshot (no MAME required)
 // options:
 //   --mame-src <path>   MAME source root (default: auto-detect / $MAME_SRC)
 //   --out <dir>         output root (default: <mamekit>/out)
@@ -16,7 +17,9 @@ const here = dirname(fileURLToPath(import.meta.url));
 const projectRoot = resolve(here, '..');
 
 function usage(): never {
-  console.error('usage: mamekit [graph] <game> [--mame-src <path>] [--out <dir>] [--serve [port]]');
+  console.error('usage: mamekit [graph|from-graph] <game> [--mame-src <path>] [--out <dir>] [--serve [port]]');
+  console.error('       mamekit <game> --from-graph [graph.json]');
+  console.error('       mamekit --build-runtime [--build-app]');
   console.error('       mamekit --serve            serve the unified app + all generated games');
   process.exit(2);
 }
@@ -26,19 +29,46 @@ const positional: string[] = [];
 const opts: Record<string, string> = {};
 for (let i = 0; i < argv.length; i++) {
   const a = argv[i];
-  if (a.startsWith('--')) opts[a.slice(2)] = argv[++i] ?? '';
-  else positional.push(a);
+  if (!a.startsWith('--')) {
+    positional.push(a);
+    continue;
+  }
+  const key = a.slice(2);
+  const next = argv[i + 1];
+  if (key === 'serve') {
+    opts[key] = next && /^\d+$/.test(next) ? argv[++i] : 'true';
+  } else if (key === 'from-graph') {
+    opts[key] = next && next.endsWith('.json') ? argv[++i] : 'true';
+  } else if (key === 'skip-app' || key === 'build-app' || key === 'build-runtime') {
+    opts[key] = 'true';
+  } else {
+    opts[key] = next && !next.startsWith('--') ? argv[++i] : '';
+  }
 }
 
-const command = positional[0] === 'graph' ? 'graph' : 'run';
-const game = command === 'graph' ? positional[1] : positional[0];
+const command = positional[0] === 'graph'
+  ? 'graph'
+  : positional[0] === 'from-graph' || 'from-graph' in opts
+    ? 'from-graph'
+    : 'run';
+const game = positional[0] === 'graph' || positional[0] === 'from-graph'
+  ? positional[1]
+  : positional[0];
 const serveOnly = !game && ('serve' in opts || argv.includes('--serve'));
-if (!game && !serveOnly) usage();
+const buildAppOnly = !game && 'build-app' in opts;
+const buildRuntimeOnly = !game && 'build-runtime' in opts;
+if (!game && !serveOnly && !buildAppOnly && !buildRuntimeOnly) usage();
 
 const outRoot = resolve(opts.out ?? join(projectRoot, 'dist'));
-const mameSrc = serveOnly ? '' : resolve(opts['mame-src'] ?? process.env.MAME_SRC ?? detectMameSrc());
+const explicitMameSrc = opts['mame-src'] ?? process.env.MAME_SRC;
+const detectedMameSrc = serveOnly ? '' : detectMameSrc(command !== 'from-graph');
+const mameSrc = serveOnly
+  ? ''
+  : explicitMameSrc
+    ? resolve(explicitMameSrc)
+    : detectedMameSrc;
 
-function detectMameSrc(): string {
+function detectMameSrc(required: boolean): string {
   // mamekit conventionally lives inside or next to a mame checkout
   const candidates = [
     resolve(projectRoot, '..'),         // mamekit inside the mame repo
@@ -48,6 +78,7 @@ function detectMameSrc(): string {
   for (const candidate of candidates) {
     if (existsSync(join(candidate, 'src/mame'))) return candidate;
   }
+  if (!required) return '';
   console.error('error: cannot find MAME source tree; pass --mame-src or set $MAME_SRC');
   process.exit(1);
 }
@@ -88,7 +119,30 @@ function findDriverFile(game: string): string {
 
 // ---------------------------------------------------------------------------
 
-if (serveOnly) {
+if (buildAppOnly || buildRuntimeOnly) {
+  const { REQUIRED_TARGETS } = await import('./gen/targets.ts');
+  const { buildHardwareClosure, emitHardwareClosure } = await import('./mame/hardware.ts');
+  const targetGraphs = REQUIRED_TARGETS.map(target => {
+    const graphPath = join(outRoot, target, 'graph.json');
+    if (!existsSync(graphPath)) {
+      throw new Error(`cannot build runtime hardware closure: missing ${graphPath}`);
+    }
+    return {
+      game: target,
+      graph: JSON.parse(readFileSync(graphPath, 'utf8')),
+    };
+  });
+  console.log(`mamekit: resolving MAME hardware used by ${targetGraphs.length} targets`);
+  const closure = buildHardwareClosure(mameSrc, targetGraphs);
+  emitHardwareClosure(closure, outRoot);
+  console.log(
+    `generated hardware closure: ${closure.summary.sourceResolved}/${closure.summary.types} ` +
+    `types source-resolved, ${closure.summary.unresolved} unresolved`,
+  );
+  if (!buildAppOnly) process.exit(0);
+  const { buildApp } = await import('./gen/generate.ts');
+  if (!buildApp(outRoot)) process.exitCode = 1;
+} else if (serveOnly) {
   const { buildApp } = await import('./gen/generate.ts');
   buildApp(outRoot);
   const { serve } = await import('./serve.ts');
@@ -97,6 +151,8 @@ if (serveOnly) {
     Number(opts.serve) || 8280,
   );
   console.log(`\nserving http://localhost:${port}/app/  (menu; games at /app/g/<game>/)`);
+} else if (command === 'from-graph') {
+  await pipelineFromGraph(game!);
 } else {
   await pipeline(game!);
 }
@@ -149,7 +205,7 @@ if (regions.length) {
 if (command === 'run') {
   const { generate, buildApp } = await import('./gen/generate.ts');
   await generate(sub, { mameSrc, outDir, game, fullGraph: graph });
-  if (!buildApp(outRoot)) process.exitCode = 1;
+  if (!('skip-app' in opts) && !buildApp(outRoot)) process.exitCode = 1;
   // static manifest so the built tree is servable as plain files (github
   // pages); the dev server's live /games.json route shadows it locally
   const { gamesManifest } = await import('./serve.ts');
@@ -165,4 +221,52 @@ if ('serve' in opts || argv.includes('--serve')) {
   );
   console.log(`\nserving http://localhost:${port}/app/  (game: /app/g/${game}/, viewer: /${game}/viewer.html)`);
 }
+}
+
+async function pipelineFromGraph(game: string): Promise<void> {
+  const graphPath = resolve(
+    opts['from-graph'] && opts['from-graph'] !== 'true'
+      ? opts['from-graph']
+      : join(outRoot, game, 'graph.json'),
+  );
+  if (!existsSync(graphPath)) {
+    console.error(`error: graph snapshot not found: ${graphPath}`);
+    process.exit(1);
+  }
+
+  const loaded = JSON.parse(readFileSync(graphPath, 'utf8'));
+  const sub = gameSubgraph(loaded, game);
+  if (!sub.nodes.some(n => n.id === `game:${game}`)) {
+    console.error(`error: graph snapshot does not contain game "${game}"`);
+    process.exit(1);
+  }
+
+  const fullPath = join(dirname(graphPath), 'graph.full.json');
+  const fullGraph = existsSync(fullPath)
+    ? JSON.parse(readFileSync(fullPath, 'utf8'))
+    : loaded;
+  const outDir = join(outRoot, game);
+  mkdirSync(outDir, { recursive: true });
+  writeFileSync(join(outDir, 'graph.json'), JSON.stringify(sub, null, 2));
+  writeFileSync(join(outDir, 'graph.cypher'), toCypher(sub));
+  writeFileSync(join(outDir, 'viewer.html'), viewerHtml(sub, `${game} — knowledge graph`));
+
+  console.log(`mamekit: rebuilding "${game}" from ${graphPath}`);
+  console.log(`knowledge graph: ${sub.nodes.length} nodes, ${sub.edges.length} edges`);
+
+  const { generate, buildApp } = await import('./gen/generate.ts');
+  await generate(sub, { mameSrc, outDir, game, fullGraph });
+  if (!('skip-app' in opts) && !buildApp(outRoot)) process.exitCode = 1;
+  const { gamesManifest } = await import('./serve.ts');
+  writeFileSync(join(outRoot, 'games.json'),
+    await gamesManifest(outRoot, join(projectRoot, 'artwork')));
+
+  if ('serve' in opts) {
+    const { serve } = await import('./serve.ts');
+    const port = await serve(
+      { '': outRoot, artwork: join(projectRoot, 'artwork') },
+      Number(opts.serve) || 8280,
+    );
+    console.log(`\nserving http://localhost:${port}/app/`);
+  }
 }

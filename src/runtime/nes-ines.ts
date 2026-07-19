@@ -9,7 +9,8 @@
 // dataareas at each chip's declared size.
 
 import { crc32 } from './zip.ts';
-import { MAPPER_SLOTS, type Mirroring } from './nes-cart.ts';
+
+export type Mirroring = 'horizontal' | 'vertical' | 'four' | 'single0' | 'single1';
 
 export interface INesInfo {
   mapper: number;
@@ -134,7 +135,11 @@ function areaMatches(area: SoftArea, bytes: Uint8Array): boolean {
 export function identify(
   ines: INesInfo,
   catalog: SoftCatalog | null,
-  support: { slots: string[]; games: string[] },
+  support: {
+    slots: string[];
+    games: string[];
+    mapperSlots?: Record<number, string>;
+  },
 ): ResolvedCart {
   const prgCrc = hex8(crc32(ines.prg));
   const chrCrc = ines.chr ? hex8(crc32(ines.chr)) : null;
@@ -166,7 +171,7 @@ export function identify(
     if (best) { meta = best.entry; approx = !best.exact; }
   }
 
-  const slot = meta?.slot ?? MAPPER_SLOTS[ines.mapper] ?? null;
+  const slot = meta?.slot ?? support.mapperSlots?.[ines.mapper] ?? null;
   const slotOk = slot !== null && support.slots.includes(slot);
   const gameOk = meta !== undefined &&
     (support.games.includes(meta.name) || (meta.cloneof !== undefined && support.games.includes(meta.cloneof)));

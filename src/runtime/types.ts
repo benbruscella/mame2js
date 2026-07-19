@@ -54,6 +54,8 @@ export interface CpuSpec {
 }
 
 export interface BoardConfig {
+  /** generated machine module key, injected by the shell from ShellConfig.game */
+  game?: string;
   /** driver family from the graph (galaga, pacman, galaxian, gyruss) — selects the board module */
   family: string;
   cpus: CpuSpec[];

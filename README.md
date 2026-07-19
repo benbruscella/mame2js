@@ -11,21 +11,29 @@ computer systems through the hardware knowledge preserved in
 ```
 MAME source
   ↓
-mamekit extractor          targeted parsers for MAME's macro DSLs
+mamekit source compiler    targeted ASTs for MAME C++ and macro/opcode DSLs
   ↓
-machine knowledge graph    typed nodes/edges: CPUs, maps, ROMs, inputs, gfx
+typed machine/device IR    executable behavior with source provenance
   ↓
-browser-native configs     pure data + a shared hand-ported device library
-+ dossiers                 (markdown per machine: chips, credits, history)
+machine knowledge graph    reachability, audit, history and documentation
+  ↓
+generated TypeScript       machine wiring and reachable hardware in dist/
++ browser host ABI         canvas, audio transport, input, ROMs and storage
   ↓
 mamehistory.com            playable exhibits in original cabinet artwork
 ```
 
 What executes in your browser is the original machine code from your own
-ROMs, run by hand-ported TypeScript CPU cores; the machine wiring (memory
-and IO maps, clocks, video timing, input polarity, DIP switches) is
-generated from parsing the real MAME driver source. **Zero runtime
-dependencies** — plain DOM, canvas, Web Audio, native `DecompressionStream`.
+ROMs, run by readable TypeScript generated from the reachable MAME CPU,
+device, and driver source. Machine wiring, clocks, video timing, inputs,
+graphics, and sound behavior use the same source-aware compiler pipeline.
+**Zero runtime dependencies** — plain DOM, canvas, Web Audio, native
+`DecompressionStream`.
+
+Handwritten TypeScript copies of MAME CPUs, sound chips, video devices, or
+family boards are migration failures, not runtime architecture. Maintained
+`src` code is limited to the MAME-specific compiler and a hardware-neutral
+browser host ABI; generated MAME-domain implementation belongs in `dist`.
 
 ## The machines
 
@@ -78,31 +86,33 @@ Controls: **arrows** move · **Space/X** fire · **Z** button 2 · **5** coin ·
 Requires **Node ≥ 23.6** (the CLI is TypeScript run natively; the only
 build step is `tsc` for the browser app).
 
-## Why not just compile MAME to WebAssembly?
+## Why not compile MAME to WebAssembly?
 
 Compiling MAME to WASM runs MAME in the browser — a fine thing that already
 exists. mamekit has a different goal: **extract machine knowledge from MAME
 source and generate small, inspectable, browser-native exhibits** for
 selected machines. Every fact on a machine page — memory map, chip roster,
 clock tree, DIP sheet — is data you can read, link to, and learn from, not
-bytes inside a compiled blob. The runtime is a legible device library
-(a Z80 you can read in an afternoon), not an emulation monolith.
+bytes inside a compiled blob. Mamekit does not use Emscripten or WebAssembly
+for emulation. Its executable output is readable TypeScript with links back
+to the MAME source constructs that produced it.
 
 ## Project shape
 
 ```
 src/kg/        extractor + knowledge graph (parse, build, viewer, cypher)
-src/gen/       graph -> config.json, dossiers, manifest, unified app
-src/runtime/   the device library: CPU cores (Z80, M6809/KONAMI-1, I8080,
-               M6803, MCS-48), sound cores (+AudioWorklets), video per
-               family, boards per family, shell/menu
+src/mame/      MAME C++/macro/opcode DSL ASTs and typed lowering
+src/gen/       IR -> generated TypeScript, configs, dossiers, unified app
+src/runtime/   hardware-neutral browser ABI, scheduler, shell and presentation
+dist/          generated machine and reachable MAME hardware implementation
 tools/         dev instruments (headless audio render, reference A/B)
 docs/          written for cold-start sessions — start at docs/README.md
 ```
 
-Adding a machine is regeneration plus whatever device cores are missing —
-see [docs/adding-a-game.md](docs/adding-a-game.md). Every core ships with a
-plain-Node spec suite (26 suites, ~3,400 checks): `npm test`.
+Adding a machine extends the source-compiled hardware closure rather than
+adding a handwritten family implementation. See issue
+[#21](https://github.com/benbruscella/mamekit/issues/21) for the active
+migration and acceptance criteria.
 
 ## License
 

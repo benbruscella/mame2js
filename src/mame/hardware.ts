@@ -1,0 +1,522 @@
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
+import { basename, dirname, extname, join, relative, resolve } from 'node:path';
+import { GraphBuilder, type KnowledgeGraph } from '../kg/types.ts';
+import { parseMameSource, type MameMacro, type MameTranslationUnit } from './ast.ts';
+import { compileMameHandler } from './handler-ir.ts';
+import { parseZ80OpcodeDsl } from './opcode-dsl.ts';
+import { compileMameZ80 } from './cpu-compiler.ts';
+import { compileMameDevice } from './device-compiler.ts';
+
+export interface HardwareUse {
+  game: string;
+  tags: string[];
+}
+
+export interface MameHardwareDefinition {
+  type: string;
+  className: string;
+  shortName?: string;
+  description?: string;
+  sourceFile: string;
+  sourceLine: number;
+  sourceColumn: number;
+  macro: string;
+}
+
+export interface HardwareMethodIr {
+  name: string;
+  parameters: string;
+  sourceFile: string;
+  sourceLine: number;
+  body: string;
+  program: ReturnType<typeof compileMameHandler>;
+}
+
+export interface HardwareClosureEntry {
+  type: string;
+  uses: HardwareUse[];
+  status: 'source-resolved' | 'declarative-host' | 'unresolved';
+  definition?: MameHardwareDefinition;
+  methods: HardwareMethodIr[];
+  dslFiles: string[];
+  sourceFiles: string[];
+}
+
+export interface HardwareClosure {
+  schemaVersion: 1;
+  mameSource: string;
+  targets: string[];
+  hardware: HardwareClosureEntry[];
+  summary: {
+    types: number;
+    sourceResolved: number;
+    declarativeHost: number;
+    unresolved: number;
+    methods: number;
+    compiledMethods: number;
+    blockedMethods: number;
+    dslFiles: number;
+  };
+}
+
+const DECLARATIVE_HOST_TYPES = new Set([
+  'DISCRETE',
+  'GFXDECODE',
+  'PALETTE',
+  'SCREEN',
+  'SPEAKER',
+]);
+
+/**
+ * Parse DEFINE_DEVICE_TYPE* macros through the source-preserving MAME AST.
+ * The string pre-check only avoids running the full AST over unrelated files.
+ */
+export function deviceDefinitionsFromSource(
+  file: string,
+  source: string,
+): MameHardwareDefinition[] {
+  if (!source.includes('DEFINE_DEVICE_TYPE') && !source.includes('DAC_GENERATOR')) return [];
+  return parseMameSource(file, source).macros
+    .filter(macro =>
+      macro.name.startsWith('DEFINE_DEVICE_TYPE') ||
+      macro.name === 'DAC_GENERATOR')
+    .flatMap(definitionFromMacro);
+}
+
+function definitionFromMacro(macro: MameMacro): MameHardwareDefinition[] {
+  if (macro.name === 'DAC_GENERATOR') {
+    const type = cleanToken(macro.args[0]);
+    const className = cleanToken(macro.args[1]);
+    if (!type || !className) return [];
+    return [{
+      type,
+      className,
+      description: unquote(macro.args[6]),
+      shortName: unquote(macro.args[7]),
+      sourceFile: macro.span.file,
+      sourceLine: macro.span.line,
+      sourceColumn: macro.span.column,
+      macro: macro.text,
+    }];
+  }
+  const privateType = macro.name.includes('PRIVATE');
+  const type = cleanToken(macro.args[0]);
+  const className = cleanToken(macro.args[privateType ? 2 : 1]);
+  if (!type || !className) return [];
+  const shortNameIndex = privateType ? 3 : 2;
+  const descriptionIndex = privateType ? 4 : 3;
+  const shortName = unquote(macro.args[shortNameIndex]);
+  const description = unquote(macro.args[descriptionIndex]);
+  return [{
+    type,
+    className,
+    ...(shortName ? { shortName } : {}),
+    ...(description ? { description } : {}),
+    sourceFile: macro.span.file,
+    sourceLine: macro.span.line,
+    sourceColumn: macro.span.column,
+    macro: macro.text,
+  }];
+}
+
+function cleanToken(value: string | undefined): string {
+  return (value ?? '').trim().replace(/^&/, '');
+}
+
+function unquote(value: string | undefined): string | undefined {
+  const trimmed = value?.trim();
+  const match = trimmed && /^"([\s\S]*)"$/.exec(trimmed);
+  return match?.[1];
+}
+
+export function indexMameHardware(mameSrc: string): Map<string, MameHardwareDefinition> {
+  const roots = [join(mameSrc, 'src/devices'), join(mameSrc, 'src/mame')]
+    .filter(existsSync);
+  const definitions = new Map<string, MameHardwareDefinition>();
+  for (const root of roots) {
+    for (const file of sourceFiles(root)) {
+      const source = readFileSync(file, 'utf8');
+      for (const definition of deviceDefinitionsFromSource(relative(mameSrc, file), source)) {
+        definitions.set(definition.type, definition);
+      }
+    }
+  }
+  return definitions;
+}
+
+function sourceFiles(root: string): string[] {
+  const files: string[] = [];
+  const stack = [root];
+  while (stack.length) {
+    const dir = stack.pop()!;
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const file = join(dir, entry.name);
+      if (entry.isDirectory()) stack.push(file);
+      else if (entry.isFile() && ['.cpp', '.h'].includes(extname(entry.name))) files.push(file);
+    }
+  }
+  return files.sort();
+}
+
+export function buildHardwareClosure(
+  mameSrc: string,
+  targetGraphs: { game: string; graph: KnowledgeGraph }[],
+): HardwareClosure {
+  const definitions = indexMameHardware(mameSrc);
+  const uses = new Map<string, Map<string, Set<string>>>();
+  for (const { game, graph } of targetGraphs) {
+    for (const device of graph.nodes.filter(node => node.label === 'Device')) {
+      const type = String(device.props.type);
+      const games = uses.get(type) ?? new Map<string, Set<string>>();
+      const tags = games.get(game) ?? new Set<string>();
+      tags.add(String(device.props.tag));
+      games.set(game, tags);
+      uses.set(type, games);
+    }
+  }
+
+  const unitCache = new Map<string, MameTranslationUnit>();
+  const hardware = [...uses.entries()]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([type, games]): HardwareClosureEntry => {
+      const definition = resolveDefinition(type, definitions);
+      const usedBy = [...games.entries()]
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([game, tags]) => ({ game, tags: [...tags].sort() }));
+      if (!definition) {
+        return {
+          type,
+          uses: usedBy,
+          status: DECLARATIVE_HOST_TYPES.has(type) ? 'declarative-host' : 'unresolved',
+          methods: [],
+          dslFiles: [],
+          sourceFiles: [],
+        };
+      }
+
+      const absolute = join(mameSrc, definition.sourceFile);
+      const unit = unitCache.get(absolute) ??
+        parseMameSource(definition.sourceFile, readFileSync(absolute, 'utf8'));
+      unitCache.set(absolute, unit);
+      const methods = unit.functions
+        .filter(fn => fn.className === definition.className)
+        .map(fn => ({
+          name: fn.name,
+          parameters: fn.parameters,
+          sourceFile: fn.span.file,
+          sourceLine: fn.span.line,
+          body: fn.body,
+          program: compileMameHandler(fn.body),
+        }));
+      const dslFiles = findDeviceDslFiles(absolute, definition.className)
+        .map(file => relative(mameSrc, file));
+      const sourceFiles = sourceClosureFiles(
+        absolute,
+        dslFiles.map(file => join(mameSrc, file)),
+      ).map(file => relative(mameSrc, file));
+      return {
+        type,
+        uses: usedBy,
+        status: 'source-resolved',
+        definition,
+        methods,
+        dslFiles,
+        sourceFiles,
+      };
+    });
+
+  const methods = hardware.flatMap(entry => entry.methods);
+  return {
+    schemaVersion: 1,
+    mameSource: resolve(mameSrc),
+    targets: targetGraphs.map(target => target.game).sort(),
+    hardware,
+    summary: {
+      types: hardware.length,
+      sourceResolved: hardware.filter(entry => entry.status === 'source-resolved').length,
+      declarativeHost: hardware.filter(entry => entry.status === 'declarative-host').length,
+      unresolved: hardware.filter(entry => entry.status === 'unresolved').length,
+      methods: methods.length,
+      compiledMethods: methods.filter(method => method.program.diagnostics.length === 0).length,
+      blockedMethods: methods.filter(method => method.program.diagnostics.length > 0).length,
+      dslFiles: new Set(hardware.flatMap(entry => entry.dslFiles)).size,
+    },
+  };
+}
+
+function resolveDefinition(
+  type: string,
+  definitions: Map<string, MameHardwareDefinition>,
+): MameHardwareDefinition | undefined {
+  const aliases: Record<string, string> = {
+    KONAMI1: 'KONAMI',
+    MC6809: 'M6809',
+    MC6809E: 'M6809E',
+  };
+  return definitions.get(type) ?? definitions.get(aliases[type] ?? '');
+}
+
+function findDeviceDslFiles(sourceFile: string, className: string): string[] {
+  const dir = dirname(sourceFile);
+  const stem = basename(sourceFile, extname(sourceFile));
+  return readdirSync(dir)
+    .filter(file => file.endsWith('.lst'))
+    .filter(file => {
+      const lower = file.toLowerCase();
+      return lower.includes(stem.toLowerCase()) ||
+        lower.includes(className.replace(/_device$/, '').toLowerCase()) ||
+        (stem === 'rp2a03' && lower.includes('6502')) ||
+        (stem === 'konami' && lower.includes('konami'));
+    })
+    .map(file => join(dir, file))
+    .sort();
+}
+
+function sourceClosureFiles(sourceFile: string, dslFiles: string[]): string[] {
+  const files = new Set([sourceFile, ...dslFiles]);
+  const source = readFileSync(sourceFile, 'utf8');
+  for (const match of source.matchAll(/^\s*#include\s+"([^"]+)"/gm)) {
+    const local = join(dirname(sourceFile), match[1]);
+    if (existsSync(local) && statSync(local).isFile()) files.add(local);
+  }
+  const sameStemHeader = join(
+    dirname(sourceFile),
+    `${basename(sourceFile, extname(sourceFile))}.h`,
+  );
+  if (existsSync(sameStemHeader)) files.add(sameStemHeader);
+  return [...files].sort();
+}
+
+export function hardwareKnowledgeGraph(
+  closure: HardwareClosure,
+  executableTypes: ReadonlySet<string> = new Set(),
+): KnowledgeGraph {
+  const graph = new GraphBuilder();
+  for (const entry of closure.hardware) {
+    const typeId = `hardware:${entry.type}`;
+    graph.node('HardwareType', typeId, {
+      type: entry.type,
+      status: entry.status,
+      games: entry.uses.map(use => use.game),
+    });
+    for (const use of entry.uses) {
+      const gameId = `game:${use.game}`;
+      graph.node('Game', gameId, { name: use.game });
+      graph.edge(gameId, typeId, 'USES_HARDWARE', { tags: use.tags });
+    }
+    if (entry.definition) {
+      const implementationId = `hardware-implementation:${entry.definition.className}`;
+      graph.node('HardwareImplementation', implementationId, {
+        className: entry.definition.className,
+        sourceFile: entry.definition.sourceFile,
+        sourceLine: entry.definition.sourceLine,
+        sourceColumn: entry.definition.sourceColumn,
+      });
+      graph.edge(implementationId, typeId, 'IMPLEMENTS');
+      for (const method of entry.methods) {
+        const methodId = `hardware-method:${entry.definition.className}:${method.name}`;
+        graph.node('HardwareMethod', methodId, {
+          className: entry.definition.className,
+          method: method.name,
+          sourceFile: method.sourceFile,
+          sourceLine: method.sourceLine,
+          compiled: method.program.diagnostics.length === 0,
+          diagnostics: method.program.diagnostics,
+        });
+        graph.edge(implementationId, methodId, 'HAS_METHOD');
+      }
+      for (const dsl of entry.dslFiles) {
+        const dslId = `hardware-dsl:${dsl}`;
+        graph.node('HardwareDsl', dslId, { path: dsl });
+        graph.edge(implementationId, dslId, 'HAS_DSL');
+      }
+    }
+    const artifactId = `generated-artifact:device:${entry.type}`;
+    graph.node('GeneratedArtifact', artifactId, {
+      path: `devices/${entry.type.toLowerCase()}.ts`,
+      executable: executableTypes.has(entry.type),
+      stage: executableTypes.has(entry.type) ? 'executable-ir' : 'source-ir',
+    });
+    graph.edge(typeId, artifactId, 'EMITS');
+  }
+  return graph.toGraph({
+    tool: 'mamekit',
+    version: '0.1.0',
+    schemaVersion: 1,
+    mameSrc: closure.mameSource,
+    driverFile: '<hardware-closure>',
+    generatedAt: new Date().toISOString(),
+  });
+}
+
+export function emitHardwareClosure(closure: HardwareClosure, outRoot: string): void {
+  const root = join(outRoot, 'runtime/generated');
+  const devicesDir = join(root, 'devices');
+  const dslDir = join(root, 'dsl');
+  rmSync(root, { recursive: true, force: true });
+  mkdirSync(devicesDir, { recursive: true });
+  mkdirSync(dslDir, { recursive: true });
+
+  const compactEntry = (entry: HardwareClosureEntry) => ({
+    ...entry,
+    methods: entry.methods.map(method => ({
+      name: method.name,
+      parameters: method.parameters,
+      sourceFile: method.sourceFile,
+      sourceLine: method.sourceLine,
+      program: method.program,
+    })),
+  });
+  const z80 = closure.hardware.some(entry => entry.type === 'Z80')
+    ? compileMameZ80(closure.mameSource)
+    : undefined;
+  const ls259Entry = closure.hardware.find(entry => entry.type === 'LS259');
+  const ls259 = ls259Entry?.definition
+    ? compileMameDevice(closure.mameSource, ls259Entry.definition)
+    : undefined;
+  if (ls259Entry && ls259) {
+    const previousMethods = ls259Entry.methods;
+    ls259Entry.methods = ls259.methods.map(method => ({
+      name: method.name,
+      parameters: method.parameters,
+      sourceFile: method.source.file,
+      sourceLine: method.source.line,
+      body: '',
+      program: method.program,
+    }));
+    ls259Entry.sourceFiles = ls259.sourceFiles;
+    closure.summary.methods += ls259Entry.methods.length - previousMethods.length;
+    closure.summary.compiledMethods +=
+      ls259Entry.methods.filter(method => !method.program.diagnostics.length).length -
+      previousMethods.filter(method => !method.program.diagnostics.length).length;
+    closure.summary.blockedMethods +=
+      ls259Entry.methods.filter(method => method.program.diagnostics.length).length -
+      previousMethods.filter(method => method.program.diagnostics.length).length;
+  }
+  const executableTypes = new Set<string>([
+    ...(z80 ? ['Z80'] : []),
+    ...(ls259 ? ['LS259'] : []),
+  ]);
+  const compact = {
+    ...closure,
+    hardware: closure.hardware.map(entry => ({
+      ...compactEntry(entry),
+      executable: executableTypes.has(entry.type),
+      ...(entry.type === 'Z80'
+        ? {
+            executableKind: 'cpu',
+            executableArtifact: 'devices/z80.cpu.ir.json',
+          }
+        : entry.type === 'LS259'
+          ? {
+              executableKind: 'device',
+              executableArtifact: 'devices/ls259.device.ir.json',
+            }
+        : {}),
+    })),
+  };
+  writeFileSync(join(root, 'hardware-manifest.json'), JSON.stringify(compact, null, 2));
+  writeFileSync(
+    join(root, 'hardware-graph.json'),
+    JSON.stringify(hardwareKnowledgeGraph(closure, executableTypes), null, 2),
+  );
+
+  for (const entry of closure.hardware) {
+    const slug = entry.type.toLowerCase();
+    const emitted = compactEntry(entry);
+    writeFileSync(join(devicesDir, `${slug}.ir.json`), JSON.stringify(emitted, null, 2));
+    if (entry.type === 'Z80' && z80) {
+      writeFileSync(
+        join(devicesDir, 'z80.cpu.ir.json'),
+        JSON.stringify(z80, null, 2),
+      );
+      writeFileSync(join(devicesDir, `${slug}.ts`), `// GENERATED from MAME Z80 source and opcode DSL; do not edit.
+import type { GeneratedCpuDefinition } from '../../../app/modules/runtime/generated-cpu.js';
+
+export const cpu = ${JSON.stringify(z80, null, 2)} as GeneratedCpuDefinition;
+export default cpu;
+`);
+      continue;
+    }
+    if (entry.type === 'LS259' && ls259) {
+      writeFileSync(
+        join(devicesDir, 'ls259.device.ir.json'),
+        JSON.stringify(ls259, null, 2),
+      );
+      writeFileSync(join(devicesDir, `${slug}.ts`), `// GENERATED from MAME device source; do not edit.
+import type { GeneratedDeviceDefinition } from '../../../app/modules/runtime/generated-device.js';
+
+export const device = ${JSON.stringify(ls259, null, 2)} as GeneratedDeviceDefinition;
+export default device;
+`);
+      continue;
+    }
+    writeFileSync(join(devicesDir, `${slug}.ts`), `// GENERATED from MAME hardware source; do not edit.
+// Source IR stage: executable lowering is tracked by hardware-manifest.json.
+export const hardware = JSON.parse(${JSON.stringify(JSON.stringify(emitted))});
+export default hardware;
+`);
+  }
+
+  for (const file of new Set(closure.hardware.flatMap(entry => entry.dslFiles))) {
+    const absolute = join(closure.mameSource, file);
+    const stem = basename(file, extname(file));
+    if (basename(file) === 'z80.lst') {
+      const ir = parseZ80OpcodeDsl(file, readFileSync(absolute, 'utf8'));
+      writeFileSync(join(dslDir, `${stem}.ir.json`), JSON.stringify(ir, null, 2));
+      writeFileSync(join(dslDir, `${stem}.ts`), `// GENERATED from ${file}; do not edit.
+// MAME opcode DSL AST with macro expansion and source provenance.
+export const opcodeDsl = JSON.parse(${JSON.stringify(JSON.stringify(ir))});
+export default opcodeDsl;
+`);
+    } else {
+      writeFileSync(join(dslDir, `${stem}.source.json`), JSON.stringify({
+        schemaVersion: 1,
+        dialect: 'unlowered-mame-operation-dsl',
+        sourceFile: file,
+      }, null, 2));
+    }
+  }
+
+  const lines = [
+    '# Generated MAME hardware closure',
+    '',
+    `Targets: **${closure.targets.length}**`,
+    '',
+    `Hardware types: **${closure.summary.types}**`,
+    '',
+    `Source-resolved: **${closure.summary.sourceResolved}**`,
+    '',
+    `Declarative browser-host concepts: **${closure.summary.declarativeHost}**`,
+    '',
+    `Unresolved: **${closure.summary.unresolved}**`,
+    '',
+    `Source methods lowered to IR: **${closure.summary.compiledMethods}/${closure.summary.methods}**`,
+    '',
+    `MAME opcode/operation DSL files: **${closure.summary.dslFiles}**`,
+    '',
+    '## Hardware',
+    '',
+    '| Type | Status | MAME implementation | Games |',
+    '|---|---|---|---|',
+    ...closure.hardware.map(entry =>
+      `| ${entry.type} | ${entry.status} | ` +
+      `${entry.definition
+        ? `${entry.definition.className} (${entry.definition.sourceFile}:${entry.definition.sourceLine})`
+        : '-'} | ${entry.uses.map(use => use.game).join(', ')} |`),
+    '',
+    'Generated device modules are currently structured IR. They become executable as',
+    'the device compiler gains the required MAME constructs; `executable: false` in the',
+    'hardware graph prevents source extraction alone from being reported as completion.',
+    '',
+  ];
+  writeFileSync(join(root, 'hardware-report.md'), lines.join('\n'));
+}

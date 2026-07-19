@@ -9,6 +9,11 @@ import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import type { KnowledgeGraph, KGNode } from '../kg/types.ts';
 import { parseSoftwareList, buildCatalog } from '../kg/softlist.ts';
+import {
+  buildRuntimeReport, runtimeReportMarkdown, type RuntimeConfigShape,
+} from './runtime-report.ts';
+import { emitGeneratedMachine } from './emit-machine.ts';
+import type { BoardConfig } from '../runtime/types.ts';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const projectRoot = resolve(here, '../..');
@@ -46,6 +51,10 @@ const KEYMAP: Record<string, string[]> = {
 // softlist catalog carries every cart's slot; the app greys out the rest.
 const CART_SLOT_SUPPORT: Record<string, string[]> = {
   nes: ['nrom', 'uxrom', 'cnrom', 'sxrom', 'txrom'], // iNES mappers 0, 2, 3, 1, 4
+};
+
+const CART_INTERFACE_BY_FAMILY: Record<string, string> = {
+  nes: 'nes_cart',
 };
 
 // Explicitly supported cartridge titles (softlist parent short-names; clones
@@ -465,11 +474,20 @@ export async function generate(graph: KnowledgeGraph, opts: GenerateOptions): Pr
       if (listNode.props.status !== 'original') continue;
       const listName = String(listNode.props.name);
       const xmlPath = join(opts.mameSrc, 'hash', `${listName}.xml`);
-      if (!existsSync(xmlPath)) continue;
-      const parsed = parseSoftwareList(readFileSync(xmlPath, 'utf8'));
-      const catalog = buildCatalog(parsed, listNode.props.filter ? String(listNode.props.filter) : undefined);
-      // compact on purpose: ~4.5k entries; indented it triples in size
-      writeFileSync(join(opts.outDir, 'softlist.json'), JSON.stringify(catalog));
+      const catalogPath = join(opts.outDir, 'softlist.json');
+      const catalog = existsSync(xmlPath)
+        ? buildCatalog(
+            parseSoftwareList(readFileSync(xmlPath, 'utf8')),
+            listNode.props.filter ? String(listNode.props.filter) : undefined,
+          )
+        : existsSync(catalogPath)
+          ? JSON.parse(readFileSync(catalogPath, 'utf8'))
+          : null;
+      if (!catalog) continue;
+      if (existsSync(xmlPath)) {
+        // compact on purpose: ~4.5k entries; indented it triples in size
+        writeFileSync(catalogPath, JSON.stringify(catalog));
+      }
       cart = {
         interface: catalog.interface,
         list: listName,
@@ -480,6 +498,19 @@ export async function generate(graph: KnowledgeGraph, opts: GenerateOptions): Pr
       cartEntries = catalog.entries.length;
       console.log(`softlist "${listName}": ${catalog.entries.length} cartridges catalogued`);
       break;
+    }
+    if (!cart) {
+      const listNode = softlistNodes.find(node => node.props.status === 'original');
+      const cartInterface = CART_INTERFACE_BY_FAMILY[family];
+      if (listNode && cartInterface) {
+        cart = {
+          interface: cartInterface,
+          list: String(listNode.props.name),
+          catalogUrl: 'softlist.json',
+          slots: CART_SLOT_SUPPORT[family] ?? [],
+          games: CART_GAME_SUPPORT[family] ?? [],
+        };
+      }
     }
     if (!cart) console.warn('  ! console machine has no resolvable software list — carts will be header-identified only');
   }
@@ -582,6 +613,16 @@ export async function generate(graph: KnowledgeGraph, opts: GenerateOptions): Pr
   // the game itself is pure knowledge-graph data — the unified app at
   // out/app loads it at runtime (no per-game compile)
   writeFileSync(join(opts.outDir, 'config.json'), JSON.stringify(config, null, 2));
+  const runtimeReport = buildRuntimeReport(graph, config as unknown as RuntimeConfigShape);
+  writeFileSync(join(opts.outDir, 'runtime-report.json'), JSON.stringify(runtimeReport, null, 2));
+  writeFileSync(join(opts.outDir, 'runtime-report.md'), runtimeReportMarkdown(runtimeReport));
+  emitGeneratedMachine(
+    graph,
+    opts.game,
+    family,
+    opts.outDir,
+    config.board as unknown as BoardConfig,
+  );
 
   // the full dossier: everything above as a standalone markdown document,
   // readable outside the app (out/<game>/README.md, linked from the modal)
@@ -596,7 +637,7 @@ export async function generate(graph: KnowledgeGraph, opts: GenerateOptions): Pr
       cart: { list: String(cart.list), entries: cartEntries, slots: cart.slots as string[] },
     } : {}),
   }));
-  console.log(`\ngenerated ${join(opts.outDir, 'config.json')} (+ meta.json, README.md)`);
+  console.log(`\ngenerated ${join(opts.outDir, 'config.json')} (+ meta.json, README.md, runtime report)`);
   if (!existsSync(join(projectRoot, 'roms', `${opts.game}.zip`))) {
     console.log(`note: put ${opts.game}.zip in ${join(projectRoot, 'roms')}/ to auto-load ROMs (or drop the zip onto the page)`);
   }
@@ -731,14 +772,91 @@ function gameMarkdown(d: {
  */
 export function buildApp(outRoot: string): boolean {
   const appDir = join(outRoot, 'app');
-  const srcDir = join(appDir, 'src');
-  // clean copy: files DELETED from src/runtime must vanish from the app too
-  // (a stale compiled romstore.js once outlived its source — never again)
-  rmSync(srcDir, { recursive: true, force: true });
-  rmSync(join(appDir, 'dist'), { recursive: true, force: true });
+  const buildDir = join(appDir, '.build');
+  const srcDir = join(buildDir, 'src');
+  const modulesDir = join(appDir, 'modules');
+  // The app is entirely generated. Recreate it so renamed output directories
+  // and deleted runtime modules cannot survive as mixed build artifacts.
+  rmSync(appDir, { recursive: true, force: true });
   mkdirSync(srcDir, { recursive: true });
 
-  cpSync(join(projectRoot, 'src/runtime'), join(srcDir, 'runtime'), { recursive: true });
+  cpSync(join(projectRoot, 'src/runtime'), join(srcDir, 'runtime'), {
+    recursive: true,
+    filter: source =>
+      !source.endsWith('.spec.ts') &&
+      !source.endsWith('/capabilities.ts'),
+  });
+  const hardwareImports: string[] = [];
+  const cpuBindings: string[] = [];
+  const deviceBindings: string[] = [];
+  const hardwareManifestPath = join(outRoot, 'runtime/generated/hardware-manifest.json');
+  if (existsSync(hardwareManifestPath)) {
+    const manifest = JSON.parse(readFileSync(hardwareManifestPath, 'utf8')) as {
+      hardware?: {
+        type: string;
+        executable?: boolean;
+        executableKind?: 'cpu' | 'device';
+      }[];
+    };
+    const sourceDir = join(outRoot, 'runtime/generated/devices');
+    const targetDir = join(srcDir, 'generated-hardware/devices');
+    mkdirSync(targetDir, { recursive: true });
+    for (const hardware of manifest.hardware ?? []) {
+      if (!hardware.executable) continue;
+      const slug = hardware.type.toLowerCase();
+      const sourceFile = join(sourceDir, `${slug}.ts`);
+      if (!existsSync(sourceFile)) continue;
+      const binding = hardware.executableKind === 'device'
+        ? `device_${deviceBindings.length}`
+        : `cpu_${cpuBindings.length}`;
+      hardwareImports.push(`import ${binding} from './generated-hardware/devices/${slug}.ts';`);
+      if (hardware.executableKind === 'device') deviceBindings.push(binding);
+      else cpuBindings.push(binding);
+      writeFileSync(
+        join(targetDir, `${slug}.ts`),
+        readFileSync(sourceFile, 'utf8')
+          .replaceAll('../../../app/modules/runtime/', '../../runtime/'),
+      );
+    }
+  }
+  const generatedImports: string[] = [];
+  for (const entry of readdirSync(outRoot).sort()) {
+    const generatedDir = join(outRoot, entry, 'generated');
+    const boardSource = join(generatedDir, 'board.ts');
+    if (!existsSync(boardSource)) continue;
+    const target = join(srcDir, 'generated', entry);
+    mkdirSync(target, { recursive: true });
+    cpSync(generatedDir, target, { recursive: true });
+    for (const file of readdirSync(target).filter(file => file.endsWith('.ts'))) {
+      const targetFile = join(target, file);
+      const source = readFileSync(targetFile, 'utf8');
+      writeFileSync(
+        targetFile,
+        source.replaceAll('../../app/modules/runtime/', '../../runtime/'),
+      );
+    }
+    const binding = `board_${generatedImports.length}`;
+    generatedImports.push(`import ${binding} from './${entry}/board.ts';`);
+  }
+  const boardBindings = generatedImports.map((_, index) => `board_${index}`);
+  mkdirSync(join(srcDir, 'generated'), { recursive: true });
+  writeFileSync(join(srcDir, 'generated/registry.ts'), `// GENERATED by mamekit — do not edit.
+import { registerGeneratedMachine } from '../runtime/generated-machine.ts';
+import { registerGeneratedBoard } from '../runtime/boards/index.ts';
+import { registerGeneratedCpu } from '../runtime/generated-cpu.ts';
+import { registerGeneratedDevice } from '../runtime/generated-device.ts';
+${hardwareImports.join('\n')}
+${generatedImports.join('\n')}
+
+export function registerGeneratedMachines(): void {
+  for (const cpu of [${cpuBindings.join(', ')}]) registerGeneratedCpu(cpu);
+  for (const device of [${deviceBindings.join(', ')}]) registerGeneratedDevice(device);
+  for (const board of [${boardBindings.join(', ')}]) {
+    registerGeneratedMachine(board.machine);
+    registerGeneratedBoard(board.machine.game, board.createBoard);
+  }
+}
+`);
 
   writeFileSync(join(srcDir, 'main.ts'), `// GENERATED by mamekit — do not edit.
 // Unified app: no ?g= -> boot menu; ?g=<game> -> load that game's generated
@@ -746,6 +864,9 @@ export function buildApp(outRoot: string): boolean {
 import { runShell, type ShellConfig } from './runtime/shell.ts';
 import { runConsole } from './runtime/console.ts';
 import { runMenu } from './runtime/menu.ts';
+import { registerGeneratedMachines } from './generated/registry.ts';
+
+registerGeneratedMachines();
 
 // force https on real domains: AudioWorklet (all sound) needs a secure
 // context, and github's own enforcement only kicks in after cert issuance
@@ -773,16 +894,15 @@ if (game) {
 }
 `);
 
-  writeFileSync(join(appDir, 'tsconfig.json'), JSON.stringify({
+  writeFileSync(join(buildDir, 'tsconfig.json'), JSON.stringify({
     compilerOptions: {
       target: 'ES2022', module: 'ESNext', moduleResolution: 'bundler',
       lib: ['ES2022', 'DOM', 'DOM.Iterable'], strict: true,
       allowImportingTsExtensions: true, rewriteRelativeImportExtensions: true,
       erasableSyntaxOnly: true, verbatimModuleSyntax: true, skipLibCheck: true,
-      outDir: 'dist', rootDir: 'src',
+      outDir: '../modules', rootDir: 'src',
     },
     include: ['src'],
-    exclude: ['src/**/*.spec.ts'],
   }, null, 2));
 
   // per-build stamp on the module URL: browsers cache module scripts hard,
@@ -797,7 +917,7 @@ if (game) {
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='13' font-size='13'>👾</text></svg>">
 </head>
 <body>
-<script type="module" src="./dist/main.js?v=${stamp}"></script>
+<script type="module" src="./modules/main.js?v=${stamp}"></script>
 <noscript>mamekit needs JavaScript.</noscript>
 </body>
 </html>
@@ -826,7 +946,7 @@ if (game) {
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='13' font-size='13'>👾</text></svg>">
 </head>
 <body>
-<script type="module" src="./dist/main.js?v=${stamp}"></script>
+<script type="module" src="./modules/main.js?v=${stamp}"></script>
 <noscript>mamekit needs JavaScript.</noscript>
 </body>
 </html>
@@ -834,13 +954,20 @@ if (game) {
   }
 
   console.log('compiling unified app with tsc...');
-  const tsc = spawnSync(process.execPath, [join(projectRoot, 'node_modules/typescript/bin/tsc'), '-p', appDir], {
+  const tsc = spawnSync(process.execPath, [
+    join(projectRoot, 'node_modules/typescript/bin/tsc'),
+    '-p',
+    join(buildDir, 'tsconfig.json'),
+  ], {
     stdio: 'inherit',
   });
   if (tsc.status !== 0) {
     console.error('tsc failed — app emitted but not compiled');
+    rmSync(buildDir, { recursive: true, force: true });
+    rmSync(modulesDir, { recursive: true, force: true });
     return false;
   }
+  rmSync(buildDir, { recursive: true, force: true });
   console.log(`app ready: ${join(appDir, 'index.html')}`);
   return true;
 }

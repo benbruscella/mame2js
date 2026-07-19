@@ -114,7 +114,11 @@ function makeINes(opts: {
   const crcIndex: Record<string, number[]> = {};
   entries.forEach((e, i) => { (crcIndex[e.prg.roms[0].crc] ??= []).push(i); });
   const catalog: SoftCatalog = { list: 'nes', description: 'test', interface: 'nes_cart', entries, crcIndex };
-  const support = { slots: ['nrom', 'uxrom', 'cnrom', 'sxrom', 'txrom'], games: ['smb'] };
+  const support = {
+    slots: ['nrom', 'uxrom', 'cnrom', 'sxrom', 'txrom'],
+    games: ['smb'],
+    mapperSlots: { 0: 'nrom', 1: 'sxrom', 2: 'uxrom', 3: 'cnrom', 4: 'txrom' },
+  };
 
   const r = identify(smbParsed, catalog, support);
   eq('exact match found', r.meta?.name, 'smb');
@@ -156,7 +160,7 @@ function makeINes(opts: {
   eq('identified + supported mapper -> experimental', r5.tier, 'experimental');
   eq('experimental reason', r5.reason, 'runs on a supported board — not yet verified');
 
-  // unsupported mapper number (66 = gxrom, not in MAPPER_SLOTS), no catalog
+  // unsupported mapper number (66 = gxrom, absent from generated mapper metadata)
   const m66 = parseINes(makeINes({ prgBanks: 1, chrBanks: 0, flags6: 2 << 4, flags7: 0x40 }))!;
   const r6 = identify(m66, null, support);
   eq('mapper 66 number', r6.mapper, 66);

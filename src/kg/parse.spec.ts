@@ -5,7 +5,7 @@
 // setter trio (set_refresh_hz/set_size/set_visarea), and slot-device default
 // option capture — plus a GAME-row regression so the arcade path can't drift.
 
-import { parseGames, parseMachineConfigs, parseDefines } from './parse.ts';
+import { parseGames, parseMachineConfigs, parseDefines, parseAddressMaps } from './parse.ts';
 
 let totalPass = 0;
 let totalFail = 0;
@@ -122,6 +122,22 @@ void nes_state::nes(machine_config &config)
   const seeded = parseDefines('#define LOCAL (BASE*2)\n#define BASE 7', { BASE: 3 });
   eq('seeded constant resolves', seeded.LOCAL, 6);   // uses seed BASE=3 at eval time
   eq('local redefinition wins', seeded.BASE, 7);
+}
+
+// --- MAME inline address-map lambdas become named generated handlers ---------
+{
+  const [map] = parseAddressMaps(`
+void timeplt_state::main_map(address_map &map)
+{
+  map(0xc300, 0xc30f).lw8(NAME([this](offs_t offset, u8 data) {
+    m_mainlatch->write_d0(offset >> 1, data);
+  }));
+}
+`);
+  const handler = map.ranges[0]?.write;
+  eq('lw8 inline handler name', handler?.method, '__inline_main_map_c300_lw8');
+  eq('lw8 inline parameters', handler?.inlineParameters, 'offs_t offset, u8 data');
+  eq('lw8 inline body', handler?.inlineBody, 'm_mainlatch->write_d0(offset >> 1, data);');
 }
 
 console.log(`\nparse.spec: ${totalPass} passed, ${totalFail} failed`);

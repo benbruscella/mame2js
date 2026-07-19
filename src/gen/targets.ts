@@ -1,0 +1,15 @@
+export const REQUIRED_TARGETS = [
+  'galaga',
+  'digdug',
+  'pacman',
+  'galaxian',
+  'gyruss',
+  'invaders',
+  'mpatrol',
+  'gng',
+  'junofrst',
+  'rocnrope',
+  'pooyan',
+  'timeplt',
+  'nes',
+] as const;
