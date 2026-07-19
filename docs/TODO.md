@@ -88,6 +88,9 @@ Prioritized. Each item has enough context to start cold. Check
 21. ~~PORT_INCLUDE resolution~~ **shipped** (issue #3: generator merges the
     INCLUDES_PORTS chain root-first, PORT_MODIFY by mask overlap).
 22. **Parser hardening**: ROM_CONTINUE/ROM_FILL, ROMREGION_ERASEFF flag.
+    Also: `lw8`/`lr8` map lambdas parse as `nop` (timeplt's pair-addressed
+    mainlatch at 0xc300-0xc30f is hand-patched in boards/timeplt.ts —
+    emitting the lambda body as graph data would restore the contract).
 23. **Menu polish**: gamepad navigation, per-shelf grouping (by decade/maker),
     localStorage snapshot management UI.
 24. **Organise `src/runtime/`**: the folder is flat (~60 files) with natural
@@ -154,6 +157,19 @@ Prioritized. Each item has enough context to start cold. Check
   palette RAM (71 checks). **Clone-family ROM alternates**: any sibling
   set's same-slot chip verifies (graph-derived from all ROM_START blocks) —
   classic gngb-era zips load against the modern manifest.
+- Issue #27 (2026-07-19): **Pooyan + Time Pilot** — the timeplt-sound-board
+  pair. The Roc'n Rope Z80+2xAY sound section (soundlatch, LS90 bi-quinary
+  timer, sh_irqtrigger HOLD_LINE pacing, filter_w cap-swap) extracted to
+  shared `timeplt-audio.ts` (rocnrope refactored onto it, spec-identical).
+  New: `boards/pooyan.ts` + `boards/timeplt.ts` (Z80 main, vblank-NMI gated
+  by latch Q0), `video/pooyan.ts` (4bpp, rocnrope-style indirect palette
+  with char/sprite LUT roles SWAPPED — chars use upper 16), `video/timeplt.ts`
+  (2bpp, 5-bit/channel dual-PROM palette, priority tilemap attr bit 4 over
+  sprites, video-enable gate, raw-pen-0 sprite transparency). timeplt quirks:
+  scanline_r (cloud multiplex), mainlatch written through an lw8 lambda at
+  0xc300-0xc30f (offset>>1 pair addressing; parser emits `nop`, board
+  patches the range — see P4 #22). Real-ROM boot + ear verification pending
+  (user's library has no pooyan.zip/timeplt.zip yet).
 - Issue #20 (2026-07-09): **Dig Dug** — 3rd galaga.cpp board, reuses the
   Namco 3×Z80 / WSG / 06xx / 51xx stack. New: `namco53.ts` (HLE DIP reader,
   alternates DSWA/DSWB — classic MAME 0.121 namcoio HLE, since MAME shipped

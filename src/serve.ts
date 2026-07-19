@@ -5,6 +5,13 @@ import { createServer } from 'node:http';
 import { readFile, readdir, stat } from 'node:fs/promises';
 import { join, normalize, extname } from 'node:path';
 
+// Public ROM mirror bucket behind the drop screen's "Try web search". The
+// bucket sends no CORS headers, so the browser can't fetch it cross-origin —
+// /romsearch/<game>.zip proxies it same-origin (dev serve only; a static
+// deploy needs CORS enabled on the bucket instead). Keep in sync with
+// ROM_SEARCH_BASE in runtime/shell.ts.
+const ROM_SEARCH_BASE = 'https://mamehistory.s3.us-east-005.dream.io/roms/arcade';
+
 const MIME: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
@@ -49,6 +56,15 @@ export function serve(rootDirs: Record<string, string>, port: number): Promise<n
       if (path === 'games.json') {
         res.writeHead(200, { 'content-type': MIME['.json'], 'cache-control': 'no-store' });
         res.end(await gamesManifest(rootDirs[''], rootDirs['artwork'] ?? ''));
+        return;
+      }
+      if (path.startsWith('romsearch/')) {
+        const name = path.slice('romsearch/'.length);
+        if (!/^[a-z0-9_-]+\.zip$/i.test(name)) { res.writeHead(400).end(); return; }
+        const upstream = await fetch(`${ROM_SEARCH_BASE}/${name}`).catch(() => null);
+        if (!upstream?.ok) { res.writeHead(upstream?.status === 404 ? 404 : 502).end(); return; }
+        res.writeHead(200, { 'content-type': MIME['.zip'], 'cache-control': 'no-store' });
+        res.end(Buffer.from(await upstream.arrayBuffer()));
         return;
       }
       // route by first segment if it names a mount, else default mount ''

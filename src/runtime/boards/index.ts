@@ -12,6 +12,8 @@ import { M52Board } from './m52.ts';
 import { GngBoard } from './gng.ts';
 import { JunofrstBoard } from './junofrst.ts';
 import { RocnropeBoard } from './rocnrope.ts';
+import { PooyanBoard } from './pooyan.ts';
+import { TimepltBoard } from './timeplt.ts';
 import { NesBoard } from './nes.ts';
 
 type BoardCtor = new (config: BoardConfig, regions: Regions, inputs: InputPorts, sinks: BoardSinks) => Board;
@@ -27,6 +29,8 @@ const FAMILIES: Record<string, BoardCtor> = {
   gng: GngBoard,
   junofrst: JunofrstBoard,
   rocnrope: RocnropeBoard,
+  pooyan: PooyanBoard,
+  timeplt: TimepltBoard,
   nes: NesBoard,
 };
 

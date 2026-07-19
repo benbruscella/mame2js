@@ -41,6 +41,34 @@ export interface DropZone {
   error: (msg: string) => void;
   /** per-chip validation result: colors the manifest + summary line */
   verdict: (check: RomCheck) => void;
+  /** the "Try web search" affordance: button ↔ progress bar */
+  search: {
+    button: HTMLButtonElement;
+    start: () => void;
+    progress: (frac: number, label?: string) => void;
+    /** bring the button back (nothing found / set rejected) */
+    reset: () => void;
+    /** collapse the affordance for good (set accepted) */
+    hide: () => void;
+  };
+}
+
+/** public mirror bucket probed by the drop screen's "Try web search" */
+const ROM_SEARCH_BASE = 'https://mamehistory.s3.us-east-005.dream.io/roms/arcade';
+
+/**
+ * Look for the romset on the web: the mirror bucket directly, then the dev
+ * server's same-origin /romsearch/ proxy (the bucket sends no CORS headers,
+ * so a cross-origin fetch is blocked unless the bucket ever allows it).
+ */
+async function fetchRomSet(game: string): Promise<Uint8Array> {
+  for (const url of [`${ROM_SEARCH_BASE}/${game}.zip`, `/romsearch/${game}.zip`]) {
+    try {
+      const res = await fetch(url);
+      if (res.ok) return new Uint8Array(await res.arrayBuffer());
+    } catch { /* CORS or network — try the next source */ }
+  }
+  throw new Error(`no web source had ${game}.zip`);
 }
 
 /** result of checking an uploaded zip against the knowledge-graph manifest */
@@ -147,8 +175,10 @@ export async function runShell(cfg: ShellConfig, preloaded?: Regions): Promise<v
   }, { capture: true });
 
   // --- ROM acquisition -------------------------------------------------------
-  // ROMs are NEVER fetched and never touch the server (hard user directive).
-  // Arcade path: a drag-drop in this page load, bytes die with the page.
+  // ROMs never touch the mamekit server and are never auto-fetched. Arcade
+  // path: a drag-drop in this page load, bytes die with the page — plus the
+  // opt-in "Try web search" button, which fetches from the public mirror
+  // bucket only on an explicit click (user directive 2026-07-19, arcade only).
   // Console path: the room hands in cart regions it already identified
   // (persisted only in the visitor's own browser via cartstore, by explicit
   // user approval 2026-07-07).
@@ -160,7 +190,7 @@ export async function runShell(cfg: ShellConfig, preloaded?: Regions): Promise<v
     const critical = new Set(cfg.board.cpus.map(c => c.region));
     const zone = ui.dropZone(cfg.game);
     ui.status(`ROMs are not distributed with mamekit — drop your own ${cfg.game}.zip (never stored).`);
-    const files = await waitForZip(ui, zone, cfg.roms, critical);
+    const files = await waitForZip(ui, zone, cfg.roms, critical, cfg.game);
     regions = assembleRegions(cfg.roms, files, ui.status, critical);
   }
 
@@ -481,6 +511,28 @@ function buildDom(cfg: ShellConfig) {
       const note = document.createElement('div');
       note.style.cssText = 'color:#667;font-size:12px;margin-top:6px;max-width:320px';
       note.textContent = 'ROMs are copyrighted and not distributed with mamekit — bring your own dump.';
+
+      // opt-in web rescue: the button swaps for a progress bar while
+      // waitForZip hunts the mirror bucket (fetch happens there, not here)
+      const searchWrap = document.createElement('div');
+      searchWrap.style.cssText = 'margin-top:8px;display:flex;flex-direction:column;align-items:center;gap:7px;min-height:36px';
+      const searchBtn = document.createElement('button');
+      searchBtn.type = 'button';
+      searchBtn.textContent = '🔍 Try web search';
+      searchBtn.style.cssText = `font:600 13px ui-sans-serif,system-ui;color:#9fb0ff;cursor:pointer;
+        background:rgba(159,176,255,.08);border:1px solid rgba(159,176,255,.35);
+        border-radius:999px;padding:7px 18px;transition:background .15s ease,border-color .15s ease`;
+      searchBtn.addEventListener('mouseenter', () => { searchBtn.style.background = 'rgba(159,176,255,.18)'; searchBtn.style.borderColor = '#9fb0ff'; });
+      searchBtn.addEventListener('mouseleave', () => { searchBtn.style.background = 'rgba(159,176,255,.08)'; searchBtn.style.borderColor = 'rgba(159,176,255,.35)'; });
+      const searchTrack = document.createElement('div');
+      searchTrack.style.cssText = 'display:none;width:min(260px,80%);height:8px;border-radius:999px;background:rgba(159,176,255,.15);overflow:hidden';
+      const searchFill = document.createElement('div');
+      searchFill.style.cssText = 'width:0%;height:100%;background:linear-gradient(90deg,#9fb0ff,#f2c200);transition:width .16s ease';
+      searchTrack.appendChild(searchFill);
+      const searchLabel = document.createElement('div');
+      searchLabel.style.cssText = 'display:none;color:#9fb0ff;font-size:12px';
+      searchWrap.append(searchBtn, searchTrack, searchLabel);
+      searchWrap.addEventListener('click', ev => ev.stopPropagation()); // don't open the file picker
       const style = document.createElement('style');
       style.textContent = `@keyframes m2j-bob{0%,100%{transform:translateY(0)}50%{transform:translateY(-6px)}}
         @keyframes m2j-shake{0%,100%{transform:translateX(0)}20%,60%{transform:translateX(-8px)}40%,80%{transform:translateX(8px)}}`;
@@ -519,7 +571,7 @@ function buildDom(cfg: ShellConfig) {
       manifest.append(sum, list);
       manifest.addEventListener('click', ev => ev.stopPropagation()); // don't open the file picker
 
-      zone.append(style, icon, big, small, note, manifest);
+      zone.append(style, icon, big, small, note, searchWrap, manifest);
       overlay.appendChild(zone);
       const idle = () => {
         zone.style.transform = '';
@@ -584,6 +636,26 @@ function buildDom(cfg: ShellConfig) {
             zone.style.boxShadow = '0 0 34px rgba(94,207,122,.45)';
           }
         },
+        search: {
+          button: searchBtn,
+          start: () => {
+            searchBtn.style.display = 'none';
+            searchTrack.style.display = 'block';
+            searchLabel.style.display = 'block';
+            searchFill.style.width = '0%';
+            searchLabel.textContent = `Searching the web for ${game}.zip…`;
+          },
+          progress: (frac: number, label?: string) => {
+            searchFill.style.width = `${Math.min(100, Math.round(frac * 100))}%`;
+            if (label) searchLabel.textContent = label;
+          },
+          reset: () => {
+            searchTrack.style.display = 'none';
+            searchLabel.style.display = 'none';
+            searchBtn.style.display = '';
+          },
+          hide: () => { searchWrap.style.display = 'none'; },
+        },
       };
     },
     setBezel: (bmp: ImageBitmap | HTMLCanvasElement, win: ArtWindow) => {
@@ -619,28 +691,67 @@ function waitForZip(
   zone: DropZone,
   specs: RomRegionSpec[],
   critical: Set<string>,
+  game: string,
 ): Promise<Map<string, Uint8Array>> {
   return new Promise(resolve => {
     const pick = document.createElement('input');
     pick.type = 'file';
     pick.accept = '.zip';
     let accepted = false;
-    const handle = async (file: File) => {
-      if (accepted) return;
-      zone.busy(file.name);
-      const raw = new Uint8Array(await file.arrayBuffer());
+    const ingest = async (name: string, raw: Uint8Array): Promise<boolean> => {
+      if (accepted) return true;
+      zone.busy(name);
       let files: Map<string, Uint8Array>;
       try { files = await readZip(raw); }
-      catch { zone.error(`${file.name} isn’t a readable zip — try the original romset.`); return; }
+      catch { zone.error(`${name} isn’t a readable zip — try the original romset.`); return false; }
       // grade the set against the manifest BEFORE booting: ticks in the
       // list, and a wrong set bounces back here instead of hanging
       const check = checkRomSet(specs, files, critical);
       zone.verdict(check);
-      if (check.missingCritical.length) return; // stay in the loop for a retry
+      if (check.missingCritical.length) return false; // stay in the loop for a retry
       accepted = true;
       setTimeout(() => resolve(files), 1100); // let the verdict land before the screen lights up
+      return true;
     };
+    const handle = async (file: File) => ingest(file.name, new Uint8Array(await file.arrayBuffer()));
     pick.addEventListener('change', () => { if (pick.files?.[0]) void handle(pick.files[0]); });
+
+    // "Try web search": probe the mirror bucket while the bar plays out a
+    // little theatre — it crawls toward 92% on its own and only lands at
+    // 100% when the fetch really returned bytes.
+    let searching = false;
+    zone.search.button.addEventListener('click', () => {
+      if (searching || accepted) return;
+      searching = true;
+      zone.search.start();
+      const started = performance.now();
+      let frac = 0;
+      const ticker = setInterval(() => {
+        frac = Math.min(0.92, frac + (0.92 - frac) * 0.045);
+        zone.search.progress(frac,
+          frac < 0.35 ? `Searching the web for ${game}.zip…`
+          : frac < 0.65 ? 'Checking archive mirrors…'
+          : 'Downloading a candidate set…');
+      }, 100);
+      // even an instant response gets the full ~2.4s story arc
+      const finish = (fn: () => void) => setTimeout(() => {
+        clearInterval(ticker);
+        searching = false;
+        fn();
+      }, Math.max(0, 2400 - (performance.now() - started)));
+      fetchRomSet(game).then(
+        raw => finish(() => {
+          zone.search.progress(1, `Found ${game}.zip!`);
+          setTimeout(() => {
+            void ingest(`${game}.zip`, raw).then(ok => ok ? zone.search.hide() : zone.search.reset());
+          }, 500);
+        }),
+        () => finish(() => {
+          zone.search.reset();
+          zone.error(`Couldn’t find ${game}.zip on the web — drop your own dump.`);
+        }),
+      );
+    });
     ui.overlay.addEventListener('click', () => pick.click());
     // dragenter/leave fire on every child crossed — depth-count to know when
     // the file has truly left the window
