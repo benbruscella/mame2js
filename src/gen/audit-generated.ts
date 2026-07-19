@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import type { GeneratedMachine } from '../runtime/generated-machine.ts';
@@ -43,8 +43,17 @@ export function auditGenerated(outRoot: string): GeneratedAudit {
       failures.push(`handwritten MAME hardware copy remains: src/runtime/${name}.ts`);
     }
   }
+  if (existsSync(join(projectRoot, 'src/runtime/capabilities.ts'))) {
+    failures.push('handwritten runtime hardware capability table remains');
+  }
 
   let executableHardware = 0;
+  let hardwareEntries: {
+    type: string;
+    status: string;
+    executable?: boolean;
+    uses?: { game: string }[];
+  }[] = [];
   const manifestPath = join(outRoot, 'runtime/generated/hardware-manifest.json');
   if (!existsSync(manifestPath)) {
     failures.push('generated hardware manifest is missing');
@@ -52,11 +61,14 @@ export function auditGenerated(outRoot: string): GeneratedAudit {
     const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as {
       hardware?: {
         type: string;
+        status: string;
         executable?: boolean;
         executableKind?: 'cpu' | 'device';
         executableArtifact?: string;
+        uses?: { game: string }[];
       }[];
     };
+    hardwareEntries = manifest.hardware ?? [];
     executableHardware = manifest.hardware?.filter(hardware => hardware.executable).length ?? 0;
     const z80 = manifest.hardware?.find(hardware => hardware.type === 'Z80');
     if (!z80?.executable || !z80.executableArtifact) {
@@ -121,6 +133,40 @@ export function auditGenerated(outRoot: string): GeneratedAudit {
       failures.push(`${target}: generated board module has no createBoard factory`);
     }
     if (boardSource.includes('import BoardAdapter')) familyAdapters++;
+    if (boardSource.includes('import BoardAdapter')) {
+      failures.push(`${target}: generated board imports a handwritten adapter`);
+    }
+
+    const reportPath = join(dir, 'runtime-report.json');
+    if (existsSync(reportPath)) {
+      const report = JSON.parse(readFileSync(reportPath, 'utf8')) as {
+        schemaVersion?: number;
+        boardMode?: string;
+        generationGaps?: string[];
+        requirements?: {
+          composition?: { status: string }[];
+        };
+      };
+      if (report.schemaVersion !== 2 || report.boardMode !== 'generated') {
+        failures.push(`${target}: generation report does not describe generated composition`);
+      }
+      if (report.requirements?.composition?.some(item => item.status !== 'generated')) {
+        failures.push(`${target}: generation report retains non-generated board composition`);
+      }
+      const expectedGaps = hardwareEntries
+        .filter(entry => entry.uses?.some(use => use.game === target))
+        .filter(entry => entry.status !== 'declarative-host' && !entry.executable)
+        .map(entry => entry.type)
+        .sort();
+      const actualGapTypes = (report.generationGaps ?? [])
+        .map(gap => gap.slice(gap.indexOf(':') + 1))
+        .sort();
+      for (const gap of expectedGaps) {
+        if (!actualGapTypes.includes(gap)) {
+          failures.push(`${target}: generation report omits hardware gap ${gap}`);
+        }
+      }
+    }
 
     const machine = JSON.parse(
       readFileSync(join(dir, 'machine.ir.json'), 'utf8'),
@@ -175,8 +221,28 @@ export function auditGenerated(outRoot: string): GeneratedAudit {
       }
     }
 
-    if (!registry.includes(`./${target}/board.ts`)) {
+    if (!registry.includes(`./${target}/board.js`)) {
       failures.push(`${target}: missing from unified generated registry`);
+    }
+  }
+  const appDir = join(outRoot, 'app');
+  if (existsSync(join(appDir, '.build'))) {
+    failures.push('compiled app retains its temporary source build directory');
+  }
+  const modulesDir = join(appDir, 'modules');
+  if (existsSync(modulesDir)) {
+    for (const file of recursiveFiles(modulesDir).filter(path => path.endsWith('.js'))) {
+      const source = readFileSync(file, 'utf8');
+      for (const match of source.matchAll(
+        /(?:from\s+|import\s*\()\s*['"]([^'"]+)['"]/g,
+      )) {
+        const specifier = match[1]!;
+        if (specifier.startsWith('/') || /(^|\/)src(\/|$)/.test(specifier)) {
+          failures.push(
+            `compiled app has non-self-contained import ${specifier} in ${file.slice(appDir.length + 1)}`,
+          );
+        }
+      }
     }
   }
   return {
@@ -189,6 +255,20 @@ export function auditGenerated(outRoot: string): GeneratedAudit {
     executableHardware,
     failures,
   };
+}
+
+function recursiveFiles(root: string): string[] {
+  const files: string[] = [];
+  const stack = [root];
+  while (stack.length) {
+    const directory = stack.pop()!;
+    for (const entry of readdirSync(directory)) {
+      const path = join(directory, entry);
+      if (statSync(path).isDirectory()) stack.push(path);
+      else files.push(path);
+    }
+  }
+  return files;
 }
 
 function main(): void {

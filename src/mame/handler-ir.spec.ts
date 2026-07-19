@@ -41,6 +41,13 @@ const unsupported = compileMameHandler('for (int i = 0; i < 3; i++) m_values[i] 
 assert.deepEqual(unsupported.diagnostics, []);
 assert.equal(unsupported.operations[0]?.op, 'for');
 
+const compoundFor = compileMameHandler(`
+  for (offset >>= 1; offset < 0x400; offset += 32)
+    m_values[offset] = data;
+`);
+assert.deepEqual(compoundFor.diagnostics, []);
+assert.equal(compoundFor.operations[0]?.op, 'for');
+
 const bitmap = compileMameHandler(`
   uint8_t x = 0xff;
   while (1) {
@@ -61,4 +68,4 @@ const bitmapPointers = compileMameHandler(`
 `);
 assert.deepEqual(bitmapPointers.diagnostics, []);
 
-console.log('handler-ir.spec: 9 passed');
+console.log('handler-ir.spec: 11 passed');

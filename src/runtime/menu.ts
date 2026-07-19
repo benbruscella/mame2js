@@ -16,7 +16,7 @@
 import { readZip, crc32 } from './zip.ts';
 import { decodeGfx, type GfxLayout } from './gfx.ts';
 import { loadArtwork } from './artwork.ts';
-import { createBoard } from './boards/index.ts';
+import { createBoard } from './generated-board.ts';
 import { openCartStore } from './cartstore.ts';
 
 interface GameEntry {
@@ -32,6 +32,8 @@ interface GameEntry {
   hasArt: boolean;
   /** the compiled app contains this game's board module (games.json) */
   supported?: boolean;
+  /** KG-reachable MAME hardware types without executable generated artifacts. */
+  generationGaps?: string[];
   // "learn" modal facts (from the driver header + MAME git history)
   driverFile?: string;
   license?: string;
@@ -280,7 +282,13 @@ export async function runMenu(): Promise<void> {
         letter-spacing:1px;padding:4px 0;box-shadow:0 2px 6px rgba(0,0,0,.5)`);
       // a game generated before its board compiles must never offer Play
       // (stale-bundle crash, see gotchas) — story card still opens
-      ribbon.textContent = entry.supported === false ? 'IN DEVELOPMENT' : 'INSERT ROM';
+      const gapCount = entry.generationGaps?.length ?? 0;
+      ribbon.textContent = entry.supported === false
+        ? `BLOCKED${gapCount ? ` · ${gapCount}` : ''}`
+        : 'INSERT ROM';
+      if (entry.generationGaps?.length) {
+        ribbon.title = `Missing generated hardware: ${entry.generationGaps.join(', ')}`;
+      }
       box.appendChild(ribbon);
     }
 
@@ -472,8 +480,12 @@ export async function runMenu(): Promise<void> {
     if (entry.supported !== false) {
       links.appendChild(mkBtn('▶ Play', `g/${game}/`, true));
     } else {
-      const soon = el('span', 'padding:9px 18px;border-radius:8px;font-weight:700;border:2px solid #555;color:#888');
-      soon.textContent = '🛠 In development';
+      const soon = el('span', `padding:9px 18px;border-radius:8px;font-weight:700;
+        border:2px solid #555;color:#aaa;max-width:100%;overflow-wrap:anywhere`);
+      const gaps = entry.generationGaps ?? [];
+      soon.textContent = gaps.length
+        ? `Generation blocked: ${gaps.join(', ')}`
+        : 'Generation blocked';
       links.appendChild(soon);
     }
     const viewer = mkBtn('Explore the knowledge graph', `../${game}/viewer.html`, false);

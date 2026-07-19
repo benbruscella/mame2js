@@ -2,7 +2,7 @@
 // keyboard input, audio bring-up, and the fixed-timestep run loop.
 // Pure DOM — no libraries.
 
-import { createBoard } from './boards/index.ts';
+import { createBoard } from './generated-board.ts';
 import { loadArtwork, type ArtWindow } from './artwork.ts';
 import { KeyboardInput, type FieldBinding, type DipDefault, type PortSpec } from './input.ts';
 import { AudioOutput } from './audio.ts';

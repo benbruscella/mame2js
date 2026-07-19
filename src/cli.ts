@@ -135,13 +135,22 @@ if (buildAppOnly || buildRuntimeOnly) {
   console.log(`mamekit: resolving MAME hardware used by ${targetGraphs.length} targets`);
   const closure = buildHardwareClosure(mameSrc, targetGraphs);
   emitHardwareClosure(closure, outRoot);
+  const { refreshRuntimeReports } = await import('./gen/runtime-report.ts');
+  const refreshedReports = refreshRuntimeReports(outRoot);
   console.log(
     `generated hardware closure: ${closure.summary.sourceResolved}/${closure.summary.types} ` +
-    `types source-resolved, ${closure.summary.unresolved} unresolved`,
+    `types source-resolved, ${closure.summary.unresolved} unresolved; ` +
+    `${refreshedReports} generation reports refreshed`,
   );
   if (!buildAppOnly) process.exit(0);
   const { buildApp } = await import('./gen/generate.ts');
-  if (!buildApp(outRoot)) process.exitCode = 1;
+  if (!buildApp(outRoot)) {
+    process.exitCode = 1;
+  } else {
+    const { gamesManifest } = await import('./serve.ts');
+    writeFileSync(join(outRoot, 'games.json'),
+      await gamesManifest(outRoot, join(projectRoot, 'artwork')));
+  }
 } else if (serveOnly) {
   const { buildApp } = await import('./gen/generate.ts');
   buildApp(outRoot);

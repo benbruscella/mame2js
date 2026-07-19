@@ -441,7 +441,7 @@ export function emitHardwareClosure(closure: HardwareClosure, outRoot: string): 
       writeFileSync(join(devicesDir, `${slug}.ts`), `// GENERATED from MAME Z80 source and opcode DSL; do not edit.
 import type { GeneratedCpuDefinition } from '../../../app/modules/runtime/generated-cpu.js';
 
-export const cpu = ${JSON.stringify(z80, null, 2)} as GeneratedCpuDefinition;
+export const cpu = ${JSON.stringify(z80, null, 2)} as unknown as GeneratedCpuDefinition;
 export default cpu;
 `);
       continue;
@@ -454,7 +454,7 @@ export default cpu;
       writeFileSync(join(devicesDir, `${slug}.ts`), `// GENERATED from MAME device source; do not edit.
 import type { GeneratedDeviceDefinition } from '../../../app/modules/runtime/generated-device.js';
 
-export const device = ${JSON.stringify(ls259, null, 2)} as GeneratedDeviceDefinition;
+export const device = ${JSON.stringify(ls259, null, 2)} as unknown as GeneratedDeviceDefinition;
 export default device;
 `);
       continue;

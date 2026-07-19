@@ -295,6 +295,15 @@ class HandlerParser {
   private parseMutation(terminator: string): GeneratedHandlerOperation | undefined {
     const target = this.parseExpression();
     if (!target) return undefined;
+    if (target.kind === 'assignment') {
+      if (!this.consume(terminator)) return undefined;
+      return {
+        op: 'assign',
+        target: target.target,
+        operator: target.operator,
+        value: target.value,
+      };
+    }
     let operator = this.peek().text;
     let value: GeneratedExpression | undefined;
     if (ASSIGNMENT_OPERATORS.has(operator)) {

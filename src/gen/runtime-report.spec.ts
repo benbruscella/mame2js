@@ -1,4 +1,4 @@
-import { buildRuntimeReport } from './runtime-report.ts';
+import { buildRuntimeReport, runtimeReportMarkdown } from './runtime-report.ts';
 import type { KnowledgeGraph } from '../kg/types.ts';
 
 const graph: KnowledgeGraph = {
@@ -46,16 +46,35 @@ const report = buildRuntimeReport(graph, {
     }],
     ranges: [],
   },
+}, {
+  hardware: [
+    {
+      type: 'Z80',
+      status: 'source-resolved',
+      executable: true,
+      executableKind: 'cpu',
+      executableArtifact: 'devices/z80.cpu.ir.json',
+      definition: { sourceFile: 'src/devices/cpu/z80/z80.cpp', sourceLine: 1 },
+    },
+    {
+      type: 'LS259',
+      status: 'source-resolved',
+      executable: true,
+      executableKind: 'device',
+      executableArtifact: 'devices/ls259.device.ir.json',
+      definition: { sourceFile: 'src/devices/machine/74259.cpp', sourceLine: 1 },
+    },
+  ],
 });
 
 if (report.requirements.handlers.find(h => h.name === 'port.IN0')?.status !== 'generated') {
   throw new Error('port handler should be generated');
 }
-if (report.requirements.handlers.find(h => h.name === 'latch.write_d0')?.status !== 'runtime') {
-  throw new Error('LS259 handler should resolve to a runtime primitive');
+if (report.requirements.handlers.find(h => h.name === 'latch.write_d0')?.status !== 'executable') {
+  throw new Error('LS259 handler should resolve to generated executable hardware');
 }
-if (report.requirements.handlers.find(h => h.name === 'test_state.video_w')?.status !== 'family') {
-  throw new Error('driver-state handler should remain family behavior');
+if (report.requirements.handlers.find(h => h.name === 'test_state.video_w')?.status !== 'missing') {
+  throw new Error('uncompiled driver-state handler should remain a generation gap');
 }
 if (report.requirements.handlers.find(h => h.name === 'test_state.read')?.status !== 'generated') {
   throw new Error('compiled driver-state handler should be generated');
@@ -65,11 +84,15 @@ if (report.handlerCompiler.usedCompiledHandlers !== 1) {
 }
 if (report.parserGaps[0]?.construct !== 'lw8') throw new Error('lw8 parser gap should be reported');
 if (report.requirements.callbacks.length !== 1) throw new Error('callback wiring should be reported');
-if (report.boardMode !== 'generated-plan-with-adapter') {
-  throw new Error('board adapter dependency should be reported');
+if (report.boardMode !== 'generated') {
+  throw new Error('board composition should be generated');
 }
-if (report.requirements.composition[0]?.status !== 'family') {
-  throw new Error('handwritten board composition should remain family behavior');
+if (report.requirements.composition[0]?.status !== 'generated') {
+  throw new Error('board composition should not depend on family code');
+}
+const markdown = runtimeReportMarkdown(report);
+if (markdown.includes('handwritten') || markdown.includes('Runtime primitives')) {
+  throw new Error('report should only describe source-generation stages');
 }
 
-console.log('runtime-report.spec: 9 passed, 0 failed');
+console.log('runtime-report.spec: 10 passed, 0 failed');

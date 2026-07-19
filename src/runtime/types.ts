@@ -1,6 +1,5 @@
-// Shared runtime contracts. Everything in src/runtime is game-agnostic
-// (engine + device library); game-specific wiring is generated from the
-// knowledge graph into out/<game>/app.
+// Shared runtime contracts. Everything in src/runtime is hardware-neutral;
+// machine and hardware behavior is generated from MAME source.
 
 /** Loaded ROM regions, keyed by MAME region tag ("maincpu", "gfx1", "proms", ...). */
 export type Regions = Record<string, Uint8Array>;
@@ -34,14 +33,14 @@ export interface InputPorts {
 }
 
 // ---------------------------------------------------------------------------
-// board contracts (shared by the shell and every boards/<family> module)
+// board contracts shared by the shell and generated machine composition
 // ---------------------------------------------------------------------------
 
 import type { RangeSpec } from './bus.ts';
 
 export interface CpuSpec {
   tag: string;
-  /** runtime core: 'z80' | 'konami1' | 'i8039' (from the device type in the graph) */
+  /** Generated CPU definition key derived from the MAME device type. */
   type?: string;
   clock: number;
   region: string;
@@ -56,10 +55,10 @@ export interface CpuSpec {
 export interface BoardConfig {
   /** generated machine module key, injected by the shell from ShellConfig.game */
   game?: string;
-  /** driver family from the graph (galaga, pacman, galaxian, gyruss) — selects the board module */
+  /** Driver family provenance from the graph. */
   family: string;
   cpus: CpuSpec[];
-  /** cpu[0]'s program map (legacy shared-map alias for the galaga family) */
+  /** cpu[0]'s program map alias retained in the generated config format. */
   ranges: RangeSpec[];
   /** cpu[0]'s io space (pacman IM2 vector port) */
   io?: { ranges: RangeSpec[]; globalMask?: number };

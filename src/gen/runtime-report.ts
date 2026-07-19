@@ -1,10 +1,11 @@
-import type { KnowledgeGraph, KGNode } from '../kg/types.ts';
 import {
-  DECLARATIVE_DEVICE_TYPES,
-  GENERIC_HANDLER_PREFIXES,
-  RUNTIME_CPU_TYPES,
-  RUNTIME_DEVICE_TYPES,
-} from '../runtime/capabilities.ts';
+  existsSync,
+  readFileSync,
+  readdirSync,
+  writeFileSync,
+} from 'node:fs';
+import { join } from 'node:path';
+import type { KnowledgeGraph, KGNode } from '../kg/types.ts';
 import { compileMameHandler } from '../mame/handler-ir.ts';
 
 interface RuntimeRange {
@@ -30,17 +31,44 @@ export interface RuntimeConfigShape {
   };
 }
 
+export interface HardwareGenerationEntry {
+  type: string;
+  status: 'source-resolved' | 'declarative-host' | 'unresolved';
+  executable?: boolean;
+  executableKind?: 'cpu' | 'device';
+  executableArtifact?: string;
+  definition?: {
+    sourceFile: string;
+    sourceLine: number;
+  };
+  uses?: { game: string; tags: string[] }[];
+}
+
+export interface HardwareGenerationManifest {
+  hardware?: HardwareGenerationEntry[];
+}
+
+export type GenerationStatus =
+  | 'executable'
+  | 'generated'
+  | 'declarative-host'
+  | 'blocked'
+  | 'missing';
+
 export interface RuntimeRequirement {
   name: string;
-  status: 'generated' | 'runtime' | 'family' | 'missing';
+  status: GenerationStatus;
   source?: string;
+  reason?: string;
 }
 
 export interface RuntimeReport {
-  schemaVersion: 1;
+  schemaVersion: 2;
   game: string;
   family: string;
-  boardMode: 'generated-plan-with-adapter' | 'generated' | 'missing';
+  boardMode: 'generated' | 'missing';
+  playable: boolean;
+  generationGaps: string[];
   sourceCoverage: { covered: number; total: number; percent: number };
   requirements: {
     cpus: RuntimeRequirement[];
@@ -64,17 +92,34 @@ export interface RuntimeReport {
     screenUpdateCompiled: boolean;
     screenUpdateDiagnostics: string[];
   };
-  summary: {
-    generatedFacts: number;
-    runtimePrimitives: number;
-    familyBehaviors: number;
-    missing: number;
-  };
+  summary: Record<GenerationStatus, number>;
+}
+
+const GENERIC_HANDLER_PREFIXES = ['port.', 'bank.', 'watchdog.'];
+
+function hardwareStatus(entry: HardwareGenerationEntry | undefined): {
+  status: GenerationStatus;
+  reason?: string;
+} {
+  if (!entry) return { status: 'missing', reason: 'not present in generated hardware closure' };
+  if (entry.executable) return { status: 'executable' };
+  if (entry.status === 'declarative-host') return { status: 'declarative-host' };
+  if (entry.status === 'source-resolved') {
+    return { status: 'blocked', reason: 'MAME source resolved but executable lowering is incomplete' };
+  }
+  return { status: 'missing', reason: 'MAME hardware implementation was not resolved' };
+}
+
+function hardwareSource(entry: HardwareGenerationEntry | undefined): string | undefined {
+  return entry?.definition
+    ? `${entry.definition.sourceFile}:${entry.definition.sourceLine}`
+    : undefined;
 }
 
 export function buildRuntimeReport(
   graph: KnowledgeGraph,
   config: RuntimeConfigShape,
+  manifest: HardwareGenerationManifest = {},
 ): RuntimeReport {
   const sourceNodes = graph.nodes.filter(node => node.label !== 'SourceFile');
   const covered = sourceNodes.filter(node => typeof node.props.sourceFile === 'string').length;
@@ -82,24 +127,34 @@ export function buildRuntimeReport(
     typeof node.props.sourceFile === 'string'
       ? `${node.props.sourceFile}:${node.props.sourceLine ?? '?'}`
       : undefined;
+  const hardwareByType = new Map(
+    (manifest.hardware ?? []).map(entry => [entry.type, entry]),
+  );
+  const deviceNodes = graph.nodes.filter(node => node.label === 'Device');
+  const deviceByTag = new Map(deviceNodes.map(node => [String(node.props.tag), node]));
 
-  const cpus: RuntimeRequirement[] = config.board.cpus.map(cpu => ({
-    name: `${cpu.tag}:${cpu.type ?? 'z80'}`,
-    status: RUNTIME_CPU_TYPES.has(cpu.type ?? 'z80') ? 'runtime' : 'missing',
-  }));
+  const requirementForDevice = (tag: string, type: string): RuntimeRequirement => {
+    const entry = hardwareByType.get(type);
+    const resolved = hardwareStatus(entry);
+    return {
+      name: `${tag}:${type}`,
+      status: resolved.status,
+      ...(hardwareSource(entry) ? { source: hardwareSource(entry) } : {}),
+      ...(resolved.reason ? { reason: resolved.reason } : {}),
+    };
+  };
 
-  const devices: RuntimeRequirement[] = graph.nodes
-    .filter(node => node.label === 'Device')
-    .filter(node => !config.board.cpus.some(cpu => cpu.tag === String(node.props.tag)))
-    .map(node => {
-      const type = String(node.props.type);
-      const status = RUNTIME_DEVICE_TYPES.has(type)
-        ? 'runtime'
-        : DECLARATIVE_DEVICE_TYPES.has(type)
-          ? 'generated'
-          : 'family';
-      return { name: `${node.props.tag}:${type}`, status, source: nodeSource(node) };
-    });
+  const cpus: RuntimeRequirement[] = config.board.cpus.map(cpu => {
+    const type = String(deviceByTag.get(cpu.tag)?.props.type ?? cpu.type ?? 'Z80').toUpperCase();
+    return requirementForDevice(cpu.tag, type);
+  });
+  const cpuTags = new Set(config.board.cpus.map(cpu => cpu.tag));
+  const devices = deviceNodes
+    .filter(node => !cpuTags.has(String(node.props.tag)))
+    .map(node => requirementForDevice(String(node.props.tag), String(node.props.type)));
+  const deviceRequirementByTag = new Map(
+    [...cpus, ...devices].map(requirement => [requirement.name.split(':')[0]!, requirement]),
+  );
 
   const allRanges = config.board.cpus.flatMap(cpu => [
     ...(cpu.ranges ?? []),
@@ -108,9 +163,6 @@ export function buildRuntimeReport(
   const handlerNames = [...new Set(allRanges.flatMap(range =>
     [range.read, range.write].filter((name): name is string => !!name),
   ))].sort();
-  const deviceTags = new Set(graph.nodes
-    .filter(node => node.label === 'Device' && RUNTIME_DEVICE_TYPES.has(String(node.props.type)))
-    .map(node => String(node.props.tag)));
   const sourceHandlers = graph.nodes
     .filter(node => node.label === 'Handler' && typeof node.props.sourceBody === 'string')
     .map(node => ({
@@ -120,16 +172,31 @@ export function buildRuntimeReport(
     }));
   const sourceHandlerByKey = new Map(sourceHandlers.map(handler => [handler.key, handler]));
   const handlers: RuntimeRequirement[] = handlerNames.map(name => {
-    const prefix = name.split('.')[0];
+    const prefix = name.split('.')[0]!;
     const sourceHandler = sourceHandlerByKey.get(name);
-    const status = GENERIC_HANDLER_PREFIXES.some(generic => name.startsWith(generic))
-      ? 'generated'
-      : deviceTags.has(prefix)
-        ? 'runtime'
-        : sourceHandler?.program.diagnostics.length === 0
-          ? 'generated'
-        : 'family';
-    return { name, status, source: sourceHandler ? nodeSource(sourceHandler.node) : undefined };
+    if (GENERIC_HANDLER_PREFIXES.some(generic => name.startsWith(generic))) {
+      return { name, status: 'generated' };
+    }
+    if (sourceHandler?.program.diagnostics.length === 0) {
+      return { name, status: 'generated', source: nodeSource(sourceHandler.node) };
+    }
+    const device = deviceRequirementByTag.get(prefix);
+    if (device) {
+      return {
+        name,
+        status: device.status,
+        ...(device.source ? { source: device.source } : {}),
+        ...(device.reason ? { reason: device.reason } : {}),
+      };
+    }
+    return {
+      name,
+      status: sourceHandler ? 'blocked' : 'missing',
+      ...(sourceHandler ? { source: nodeSource(sourceHandler.node) } : {}),
+      reason: sourceHandler
+        ? sourceHandler.program.diagnostics.join('; ')
+        : 'handler has no generated source program or executable device',
+    };
   });
 
   const callbacks: RuntimeRequirement[] = graph.nodes
@@ -142,16 +209,20 @@ export function buildRuntimeReport(
       status: 'generated',
       source: nodeSource(node),
     }));
-  const composition: RuntimeRequirement[] = [{
-    name: `boards/${config.family}.ts`,
-    status: 'family',
-  }];
+  const composition: RuntimeRequirement[] = config.board.cpus.length
+    ? [{ name: `generated/${config.game}/board.ts`, status: 'generated' }]
+    : [{
+        name: `generated/${config.game}/board.ts`,
+        status: 'missing',
+        reason: 'no CPU execution plan was generated',
+      }];
 
   const mapParserGaps = graph.nodes
     .filter(node => node.label === 'AddressRange')
     .flatMap(node => {
       const raw = String(node.props.raw ?? '');
-      const unsupported = [...raw.matchAll(/\.(l[wr]+8|select|umask\d*)\s*\(/g)].map(match => match[1]);
+      const unsupported = [...raw.matchAll(/\.(l[wr]+8|select|umask\d*)\s*\(/g)]
+        .map(match => match[1]!);
       if (!unsupported.length) return [];
       const hasHandler = graph.edges.some(edge =>
         edge.from === node.id && (edge.rel === 'READS' || edge.rel === 'WRITES'),
@@ -184,12 +255,28 @@ export function buildRuntimeReport(
   ).length;
 
   const every = [...cpus, ...devices, ...handlers, ...callbacks, ...composition];
-  const boardSupported = config.board.cpus.length > 0;
+  const summary = Object.fromEntries(
+    (['executable', 'generated', 'declarative-host', 'blocked', 'missing'] as const)
+      .map(status => [status, every.filter(item => item.status === status).length]),
+  ) as Record<GenerationStatus, number>;
+  const generationGaps = [...cpus, ...devices]
+    .filter(item => item.status === 'blocked' || item.status === 'missing')
+    .map(item => item.name)
+    .sort();
+  const boardMode = config.board.cpus.length ? 'generated' : 'missing';
+  const screenUpdateCompiled = Boolean(screenProgram && screenProgram.diagnostics.length === 0);
+
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     game: config.game,
     family: config.family,
-    boardMode: boardSupported ? 'generated-plan-with-adapter' : 'missing',
+    boardMode,
+    playable: boardMode === 'generated' &&
+      generationGaps.length === 0 &&
+      summary.blocked === 0 &&
+      summary.missing === 0 &&
+      screenUpdateCompiled,
+    generationGaps,
     sourceCoverage: {
       covered,
       total: sourceNodes.length,
@@ -208,31 +295,29 @@ export function buildRuntimeReport(
       cpuPlans: config.board.cpus.length,
       frameCallbacks,
       ...(screenUpdate ? { screenUpdate } : {}),
-      screenUpdateCompiled: Boolean(screenProgram && screenProgram.diagnostics.length === 0),
+      screenUpdateCompiled,
       screenUpdateDiagnostics: screenProgram?.diagnostics ?? ['screen-update source method not found'],
     },
-    summary: {
-      generatedFacts: every.filter(item => item.status === 'generated').length,
-      runtimePrimitives: every.filter(item => item.status === 'runtime').length,
-      familyBehaviors: every.filter(item => item.status === 'family').length,
-      missing: every.filter(item => item.status === 'missing').length + (boardSupported ? 0 : 1),
-    },
+    summary,
   };
 }
 
 export function runtimeReportMarkdown(report: RuntimeReport): string {
   const lines = [
-    `# ${report.game} runtime transpilation report`,
+    `# ${report.game} source-generation report`,
+    '',
+    `Playability: **${report.playable ? 'executable' : 'blocked'}**`,
     '',
     `MAME source coverage: **${report.sourceCoverage.covered}/${report.sourceCoverage.total} ` +
       `nodes (${report.sourceCoverage.percent}%)**`,
     '',
-    '| Layer | Count | Meaning |',
+    '| Stage | Count | Meaning |',
     '|---|---:|---|',
-    `| Generated | ${report.summary.generatedFacts} | Data/wiring emitted from MAME source |`,
-    `| Runtime primitives | ${report.summary.runtimePrimitives} | Reusable CPU/device implementations |`,
-    `| Family behavior | ${report.summary.familyBehaviors} | Behavior still owned by \`boards/${report.family}.ts\` or video code |`,
-    `| Missing | ${report.summary.missing} | Required runtime capability not present |`,
+    `| Executable | ${report.summary.executable} | Hardware lowered from MAME source to executable IR |`,
+    `| Generated | ${report.summary.generated} | Wiring, handlers, schedules and composition emitted from source/KG |`,
+    `| Declarative host | ${report.summary['declarative-host']} | Hardware-neutral browser service configured by generated data |`,
+    `| Blocked | ${report.summary.blocked} | Source found; executable lowering is incomplete |`,
+    `| Missing | ${report.summary.missing} | Required source or generated artifact is absent |`,
     '',
     '## MAME handler compiler',
     '',
@@ -250,17 +335,12 @@ export function runtimeReportMarkdown(report: RuntimeReport): string {
     `Screen update: **${report.executionCompiler.screenUpdate ?? 'missing'}** ` +
       `(${report.executionCompiler.screenUpdateCompiled ? 'compiled' : 'blocked'})`,
     '',
-    '## Family behavior still handwritten',
+    '## Executable generation gaps',
     '',
   ];
 
-  const family = [
-    ...report.requirements.composition,
-    ...report.requirements.devices,
-    ...report.requirements.handlers,
-  ].filter(item => item.status === 'family');
-  if (family.length) {
-    for (const item of family) lines.push(`- \`${item.name}\`${item.source ? ` - ${item.source}` : ''}`);
+  if (report.generationGaps.length) {
+    for (const gap of report.generationGaps) lines.push(`- \`${gap}\``);
   } else {
     lines.push('- None');
   }
@@ -283,4 +363,24 @@ export function runtimeReportMarkdown(report: RuntimeReport): string {
     lines.push('- None extracted');
   }
   return lines.join('\n') + '\n';
+}
+
+export function refreshRuntimeReports(outRoot: string): number {
+  const manifestPath = join(outRoot, 'runtime/generated/hardware-manifest.json');
+  const manifest = existsSync(manifestPath)
+    ? JSON.parse(readFileSync(manifestPath, 'utf8')) as HardwareGenerationManifest
+    : {};
+  let refreshed = 0;
+  for (const entry of readdirSync(outRoot)) {
+    const graphPath = join(outRoot, entry, 'graph.json');
+    const configPath = join(outRoot, entry, 'config.json');
+    if (!existsSync(graphPath) || !existsSync(configPath)) continue;
+    const graph = JSON.parse(readFileSync(graphPath, 'utf8')) as KnowledgeGraph;
+    const config = JSON.parse(readFileSync(configPath, 'utf8')) as RuntimeConfigShape;
+    const report = buildRuntimeReport(graph, config, manifest);
+    writeFileSync(join(outRoot, entry, 'runtime-report.json'), JSON.stringify(report, null, 2));
+    writeFileSync(join(outRoot, entry, 'runtime-report.md'), runtimeReportMarkdown(report));
+    refreshed++;
+  }
+  return refreshed;
 }

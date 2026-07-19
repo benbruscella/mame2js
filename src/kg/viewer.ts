@@ -365,7 +365,7 @@ function showOverview() {
     <div class="metric"><span>ROM chips / bytes</span><strong>\${roms.length} / \${romBytes.toLocaleString()}</strong></div>
     <div class="metric"><span>Callback wires extracted</span><strong>\${callbacks.length}</strong></div>
     <div class="metric"><span>Source provenance</span><strong>\${covered}/\${sourceable.length}</strong></div>
-    <div class="metric"><span>Family behavior entry points</span><strong>\${driverHandlers.length}</strong></div>
+    <div class="metric"><span>MAME driver source handlers</span><strong>\${driverHandlers.length}</strong></div>
     <div class="metric"><span>Detected parser gaps</span><strong class="\${gaps.length ? 'warn' : ''}">\${gaps.length}</strong></div>
     <div class="lbl">Compiler outputs</div>
     \${gameSource}

@@ -14,7 +14,9 @@
     "audit:generated": "node src/gen/audit-generated.ts",
     "deploy": "bash scripts/deploy-pages.sh --artwork",
     "deploy:noart": "bash scripts/deploy-pages.sh",
-    "test": "tsc --noEmit && for f in $(find src/mame src/kg src/gen src/runtime -name '*.spec.ts' -type f | sort); do node $f > /dev/null || { echo \"FAIL $f\"; exit 1; }; echo \"PASS $f\"; done"
+    "test": "npm run test:unit && npm run test:generation",
+    "test:unit": "tsc --noEmit && for f in $(find src/mame src/kg src/gen src/runtime -name '*.spec.ts' -type f | sort); do node $f > /dev/null || { echo \"FAIL $f\"; exit 1; }; echo \"PASS $f\"; done",
+    "test:generation": "node src/gen/test-generation.ts"
   },
   "engines": {
     "node": ">=23.6"
