@@ -35,7 +35,7 @@ export interface HardwareGenerationEntry {
   type: string;
   status: 'source-resolved' | 'declarative-host' | 'unresolved';
   executable?: boolean;
-  executableKind?: 'cpu' | 'device';
+  executableKind?: 'cpu' | 'device' | 'audio';
   executableArtifact?: string;
   definition?: {
     sourceFile: string;

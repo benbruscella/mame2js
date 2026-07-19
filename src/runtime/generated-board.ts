@@ -7,7 +7,12 @@ import {
 } from './generated-device.ts';
 import { GeneratedFrameRunner } from './generated-frame.ts';
 import {
+  GeneratedMameVideoPrimitives,
+  GeneratedVideoRenderer,
+} from './generated-video.ts';
+import {
   dispatchGeneratedCallback,
+  executeGeneratedCallbackHandler,
   generatedHandlerRegistry,
   wireGeneratedDevice,
   type GeneratedHandlerBindings,
@@ -112,6 +117,7 @@ class IrBoard implements Board {
       write: { ...sourceHandlers.write },
     };
     this.installDeviceHandlers(machine, registry);
+    this.installGeneratedSoundHandlers(machine, sinks, registry);
     this.installDeclarativeHandlers(machine, config, inputs, registry);
 
     for (const specification of machine.execution.cpus) {
@@ -143,8 +149,19 @@ class IrBoard implements Board {
         out: bus.out,
       });
       this.cpus.set(specification.tag, cpu);
+      const acknowledge = machine.callbacks.find(callback =>
+        callback.ownerTag === specification.tag &&
+        callback.signal === 'set_irq_acknowledge_callback');
+      const interruptVector = (): number =>
+        acknowledge
+          ? executeGeneratedCallbackHandler(
+              machine,
+              acknowledge,
+              this.bindings,
+            ) ?? 0xff
+          : 0xff;
       calls[`m_${specification.tag}.set_input_line`] = (_line, state) =>
-        cpu.setIrqLine(state !== 0);
+        cpu.setIrqLine(state !== 0, interruptVector());
       calls[`m_${specification.tag}.pulse_input_line`] = line => {
         if (line < 0) cpu.nmi();
         else {
@@ -152,6 +169,13 @@ class IrBoard implements Board {
           cpu.setIrqLine(false);
         }
       };
+    }
+    for (const [tag, bytes] of Object.entries(this.shares)) {
+      this.state[`m_${tag}`] = bytes;
+      Object.defineProperty(bytes, 'bytes', {
+        value: () => bytes.length,
+        configurable: true,
+      });
     }
 
     const callbackEndpoints = this.callbackEndpoints(sinks);
@@ -168,6 +192,12 @@ class IrBoard implements Board {
       }
     }
 
+    const video = machine.video
+      ? new GeneratedVideoRenderer(
+          machine,
+          new GeneratedMameVideoPrimitives(machine, regions, this.state, this.bindings),
+        )
+      : undefined;
     this.frameRunner = new GeneratedFrameRunner({
       machine,
       processors: machine.execution.cpus.map(specification => ({
@@ -183,6 +213,7 @@ class IrBoard implements Board {
           callbackEndpoints,
         );
       },
+      video,
     });
   }
 
@@ -271,6 +302,21 @@ class IrBoard implements Board {
     }
   }
 
+  private installGeneratedSoundHandlers(
+    machine: GeneratedMachine,
+    sinks: BoardSinks,
+    registry: HandlerRegistry,
+  ): void {
+    const sound = machine.sound;
+    if (!sound) return;
+    for (const method of sound.writeMethods) {
+      const key = `${sound.deviceTag}.${method}`;
+      registry.write[key] = (_address, offset, data) => {
+        sinks.soundWrite(offset, data);
+      };
+    }
+  }
+
   private callbackEndpoints(sinks: BoardSinks): Record<string, (state: number) => void> {
     const endpoints: Record<string, (state: number) => void> = {};
     for (const callback of this.machine.callbacks) {
@@ -295,6 +341,15 @@ class IrBoard implements Board {
       }
       if (callback.targetTag === 'speaker') {
         endpoints[target] = state => sinks.soundWrite(callback.slot ?? 0, state);
+      }
+      const sound = this.machine.sound;
+      if (
+        sound &&
+        callback.targetTag === sound.deviceTag &&
+        callback.targetMethod &&
+        sound.enableMethods.includes(callback.targetMethod)
+      ) {
+        endpoints[target] = state => sinks.soundWrite(sound.controlOffset, state);
       }
     }
     return endpoints;

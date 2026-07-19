@@ -13,7 +13,12 @@ import { parseMameSource, type MameMacro, type MameTranslationUnit } from './ast
 import { compileMameHandler } from './handler-ir.ts';
 import { parseZ80OpcodeDsl } from './opcode-dsl.ts';
 import { compileMameZ80 } from './cpu-compiler.ts';
+import { generatedCpuExecutableSource } from './cpu-codegen.ts';
 import { compileMameDevice } from './device-compiler.ts';
+import {
+  compileNamcoWsg,
+  generatedNamcoWsgWorkletSource,
+} from './audio-compiler.ts';
 
 export interface HardwareUse {
   game: string;
@@ -73,6 +78,7 @@ const DECLARATIVE_HOST_TYPES = new Set([
   'PALETTE',
   'SCREEN',
   'SPEAKER',
+  'WATCHDOG_TIMER',
 ]);
 
 /**
@@ -191,11 +197,12 @@ export function buildHardwareClosure(
       const usedBy = [...games.entries()]
         .sort(([left], [right]) => left.localeCompare(right))
         .map(([game, tags]) => ({ game, tags: [...tags].sort() }));
-      if (!definition) {
+      if (!definition || DECLARATIVE_HOST_TYPES.has(type)) {
         return {
           type,
           uses: usedBy,
           status: DECLARATIVE_HOST_TYPES.has(type) ? 'declarative-host' : 'unresolved',
+          ...(definition ? { definition } : {}),
           methods: [],
           dslFiles: [],
           sourceFiles: [],
@@ -382,6 +389,10 @@ export function emitHardwareClosure(closure: HardwareClosure, outRoot: string): 
   const ls259 = ls259Entry?.definition
     ? compileMameDevice(closure.mameSource, ls259Entry.definition)
     : undefined;
+  const namcoEntry = closure.hardware.find(entry => entry.type === 'NAMCO_WSG');
+  const namcoWsg = namcoEntry?.definition
+    ? compileNamcoWsg(closure.mameSource, namcoEntry.definition)
+    : undefined;
   if (ls259Entry && ls259) {
     const previousMethods = ls259Entry.methods;
     ls259Entry.methods = ls259.methods.map(method => ({
@@ -404,6 +415,7 @@ export function emitHardwareClosure(closure: HardwareClosure, outRoot: string): 
   const executableTypes = new Set<string>([
     ...(z80 ? ['Z80'] : []),
     ...(ls259 ? ['LS259'] : []),
+    ...(namcoWsg ? ['NAMCO_WSG'] : []),
   ]);
   const compact = {
     ...closure,
@@ -417,8 +429,13 @@ export function emitHardwareClosure(closure: HardwareClosure, outRoot: string): 
           }
         : entry.type === 'LS259'
           ? {
-              executableKind: 'device',
-              executableArtifact: 'devices/ls259.device.ir.json',
+            executableKind: 'device',
+            executableArtifact: 'devices/ls259.device.ir.json',
+          }
+        : entry.type === 'NAMCO_WSG'
+          ? {
+              executableKind: 'audio',
+              executableArtifact: 'audio/wsg-worklet.ts',
             }
         : {}),
     })),
@@ -428,6 +445,15 @@ export function emitHardwareClosure(closure: HardwareClosure, outRoot: string): 
     join(root, 'hardware-graph.json'),
     JSON.stringify(hardwareKnowledgeGraph(closure, executableTypes), null, 2),
   );
+  if (namcoWsg) {
+    const audioDir = join(root, 'audio');
+    mkdirSync(audioDir, { recursive: true });
+    writeFileSync(
+      join(audioDir, 'namco-wsg.audio.ir.json'),
+      JSON.stringify(namcoWsg, null, 2),
+    );
+    writeFileSync(join(audioDir, 'wsg-worklet.ts'), generatedNamcoWsgWorkletSource(namcoWsg));
+  }
 
   for (const entry of closure.hardware) {
     const slug = entry.type.toLowerCase();
@@ -438,12 +464,7 @@ export function emitHardwareClosure(closure: HardwareClosure, outRoot: string): 
         join(devicesDir, 'z80.cpu.ir.json'),
         JSON.stringify(z80, null, 2),
       );
-      writeFileSync(join(devicesDir, `${slug}.ts`), `// GENERATED from MAME Z80 source and opcode DSL; do not edit.
-import type { GeneratedCpuDefinition } from '../../../app/modules/runtime/generated-cpu.js';
-
-export const cpu = ${JSON.stringify(z80, null, 2)} as unknown as GeneratedCpuDefinition;
-export default cpu;
-`);
+      writeFileSync(join(devicesDir, `${slug}.ts`), generatedCpuExecutableSource(z80));
       continue;
     }
     if (entry.type === 'LS259' && ls259) {

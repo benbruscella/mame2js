@@ -149,7 +149,7 @@ export function parseMameSource(file: string, source: string): MameTranslationUn
   }
 
   const memberMacroRe =
-    /\b(TIMER_CALLBACK_MEMBER|TIMER_DEVICE_CALLBACK_MEMBER|IRQ_CALLBACK_MEMBER)\s*\(\s*(\w+)::(\w+)\s*\)\s*\{/g;
+    /\b(TIMER_CALLBACK_MEMBER|TIMER_DEVICE_CALLBACK_MEMBER|IRQ_CALLBACK_MEMBER|TILEMAP_MAPPER_MEMBER|TILE_GET_INFO_MEMBER)\s*\(\s*(\w+)::(\w+)\s*\)\s*\{/g;
   while ((fm = memberMacroRe.exec(masked)) !== null) {
     const braceStart = masked.indexOf('{', fm.index + fm[0].length - 1);
     const braceEnd = matchPair(masked, braceStart, '{', '}');
@@ -159,7 +159,7 @@ export function parseMameSource(file: string, source: string): MameTranslationUn
       kind: 'function',
       className: fm[2],
       name: fm[3],
-      parameters: fm[1] === 'IRQ_CALLBACK_MEMBER' ? 'int irqline' : 'int param',
+      parameters: memberMacroParameters(fm[1]),
       body: source.slice(bodyStart, braceEnd),
       statements: parseStatements(file, source, masked, bodyStart, braceEnd, lineStarts),
       span: span(fm.index, braceEnd + 1),
@@ -167,6 +167,27 @@ export function parseMameSource(file: string, source: string): MameTranslationUn
     });
     occupied.push([fm.index, braceEnd + 1]);
     memberMacroRe.lastIndex = braceEnd + 1;
+  }
+
+  const videoStartRe =
+    /\bVIDEO_START_MEMBER\s*\(\s*(\w+)\s*,\s*(\w+)\s*\)\s*\{/g;
+  while ((fm = videoStartRe.exec(masked)) !== null) {
+    const braceStart = masked.indexOf('{', fm.index + fm[0].length - 1);
+    const braceEnd = matchPair(masked, braceStart, '{', '}');
+    if (braceEnd < 0) continue;
+    const bodyStart = braceStart + 1;
+    functions.push({
+      kind: 'function',
+      className: fm[1],
+      name: `video_start_${fm[2]}`,
+      parameters: '',
+      body: source.slice(bodyStart, braceEnd),
+      statements: parseStatements(file, source, masked, bodyStart, braceEnd, lineStarts),
+      span: span(fm.index, braceEnd + 1),
+      bodySpan: span(bodyStart, braceEnd),
+    });
+    occupied.push([fm.index, braceEnd + 1]);
+    videoStartRe.lastIndex = braceEnd + 1;
   }
 
   const classes: MameClass[] = [];
@@ -212,6 +233,17 @@ export function parseMameSource(file: string, source: string): MameTranslationUn
   }
 
   return { file, source, masked, macros, classes, functions };
+}
+
+function memberMacroParameters(name: string): string {
+  if (name === 'IRQ_CALLBACK_MEMBER') return 'int irqline';
+  if (name === 'TILEMAP_MAPPER_MEMBER') {
+    return 'u32 col, u32 row, u32 num_cols, u32 num_rows';
+  }
+  if (name === 'TILE_GET_INFO_MEMBER') {
+    return 'tilemap_t &tilemap, tile_data &tileinfo, tilemap_memory_index tile_index';
+  }
+  return 'int param';
 }
 
 export function parseMameAst(files: { file: string; source: string }[]): MameAst {

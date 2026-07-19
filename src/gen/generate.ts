@@ -14,6 +14,7 @@ import {
 } from './runtime-report.ts';
 import { emitGeneratedMachine } from './emit-machine.ts';
 import type { BoardConfig } from '../runtime/types.ts';
+import { compileMameVideo } from '../mame/video-compiler.ts';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const projectRoot = resolve(here, '../..');
@@ -616,12 +617,14 @@ export async function generate(graph: KnowledgeGraph, opts: GenerateOptions): Pr
   const runtimeReport = buildRuntimeReport(graph, config as unknown as RuntimeConfigShape);
   writeFileSync(join(opts.outDir, 'runtime-report.json'), JSON.stringify(runtimeReport, null, 2));
   writeFileSync(join(opts.outDir, 'runtime-report.md'), runtimeReportMarkdown(runtimeReport));
+  const compiledVideo = compileMameVideo(graph, opts.mameSrc, machine.id);
   emitGeneratedMachine(
     graph,
     opts.game,
     family,
     opts.outDir,
     config.board as unknown as BoardConfig,
+    compiledVideo,
   );
 
   // the full dossier: everything above as a standalone markdown document,
@@ -793,7 +796,7 @@ export function buildApp(outRoot: string): boolean {
       hardware?: {
         type: string;
         executable?: boolean;
-        executableKind?: 'cpu' | 'device';
+        executableKind?: 'cpu' | 'device' | 'audio';
       }[];
     };
     const sourceDir = join(outRoot, 'runtime/generated/devices');
@@ -802,6 +805,16 @@ export function buildApp(outRoot: string): boolean {
     for (const hardware of manifest.hardware ?? []) {
       if (!hardware.executable) continue;
       const slug = hardware.type.toLowerCase();
+      if (hardware.executableKind === 'audio') {
+        const worklet = join(outRoot, 'runtime/generated/audio/wsg-worklet.ts');
+        if (existsSync(worklet)) {
+          writeFileSync(
+            join(srcDir, 'runtime/wsg-worklet.ts'),
+            readFileSync(worklet, 'utf8'),
+          );
+        }
+        continue;
+      }
       const sourceFile = join(sourceDir, `${slug}.ts`);
       if (!existsSync(sourceFile)) continue;
       const binding = hardware.executableKind === 'device'

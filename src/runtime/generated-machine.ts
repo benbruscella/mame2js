@@ -162,6 +162,76 @@ export interface GeneratedExecutionPlan {
   };
 }
 
+export interface GeneratedGfxLayout {
+  width: number;
+  height: number;
+  total: number | string;
+  planes: number;
+  planeOffsets: (number | string)[];
+  xOffsets: (number | string)[];
+  yOffsets: (number | string)[];
+  charIncrement: number;
+}
+
+export interface GeneratedGfxEntry {
+  region: string;
+  offset: number;
+  colorBase: number;
+  colorCount: number;
+  xscale: number;
+  yscale: number;
+  layout: GeneratedGfxLayout;
+}
+
+export interface GeneratedPromPalettePlan {
+  region: string;
+  colorCount: number;
+  min: number;
+  max: number;
+  scaler: number;
+  channels: {
+    channel: 'r' | 'g' | 'b';
+    bits: number[];
+    resistances: number[];
+    pulldown: number;
+    pullup: number;
+  }[];
+  lookupOffset: number;
+  lookupCount: number;
+  lookupMask: number;
+  banks: { penOffset: number; colorOr: number }[];
+  transparentIndirect: number;
+  source?: GeneratedSourceRef;
+}
+
+export interface GeneratedTilemapPlan {
+  member: string;
+  tileWidth: number;
+  tileHeight: number;
+  columns: number;
+  rows: number;
+  mapper: string;
+  tileInfo: string;
+  source?: GeneratedSourceRef;
+}
+
+export interface GeneratedVideoPlan {
+  gfx: GeneratedGfxEntry[];
+  palette: GeneratedPromPalettePlan;
+  tilemaps: GeneratedTilemapPlan[];
+  initialState: Record<string, number>;
+  source?: GeneratedSourceRef;
+}
+
+export interface GeneratedSoundBinding {
+  kind: string;
+  deviceTag: string;
+  deviceType: string;
+  writeMethods: string[];
+  enableMethods: string[];
+  controlOffset: number;
+}
+
 export interface GeneratedMachine {
   schemaVersion: 2;
   game: string;
@@ -172,6 +242,8 @@ export interface GeneratedMachine {
   devices?: GeneratedDevice[];
   handlers?: GeneratedHandler[];
   maps?: GeneratedAddressMap[];
+  video?: GeneratedVideoPlan;
+  sound?: GeneratedSoundBinding;
 }
 
 export type SignalEndpoint = (state: number) => void;

@@ -12,7 +12,8 @@ interface Token {
 }
 
 const TYPE_WORDS = new Set([
-  'auto', 'bool', 'char', 'const', 'int', 'offs_t', 'pen_t',
+  'auto', 'bool', 'char', 'const', 'double', 'int', 'offs_t', 'pen_t',
+  'rectangle', 'tilemap_memory_index',
   's8', 's16', 's32', 'u8', 'u16', 'u32',
   'int8_t', 'int16_t', 'int32_t', 'uint8_t', 'uint16_t', 'uint32_t', 'unsigned',
 ]);
@@ -321,11 +322,19 @@ class HandlerParser {
   }
 
   private isDeclaration(): boolean {
-    return this.peek().kind === 'identifier' && TYPE_WORDS.has(this.peek().text);
+    if (this.peek().kind !== 'identifier') return false;
+    if (TYPE_WORDS.has(this.peek().text)) return true;
+    let cursor = this.index + 1;
+    while (this.tokens[cursor]?.text === '*' || this.tokens[cursor]?.text === '&') cursor++;
+    return this.tokens[cursor]?.kind === 'identifier' &&
+      ['=', '(', '[', ',', ';'].includes(this.tokens[cursor + 1]?.text ?? '');
   }
 
   private parseDeclaration(): GeneratedHandlerOperation[] {
     const typeWords: string[] = [];
+    if (this.peek().kind === 'identifier' && !TYPE_WORDS.has(this.peek().text)) {
+      typeWords.push(this.take().text);
+    }
     while (this.peek().kind === 'identifier' && TYPE_WORDS.has(this.peek().text)) {
       typeWords.push(this.take().text);
     }
@@ -346,6 +355,18 @@ class HandlerParser {
       this.take();
       let value: GeneratedExpression | undefined;
       if (this.consume('=')) value = this.parseExpression();
+      else if (this.consume('(')) {
+        const args = this.parseArguments();
+        if (!args) {
+          this.unsupportedStatement(`invalid constructor declaration of "${name.text}"`);
+          return declarations;
+        }
+        value = {
+          kind: 'call',
+          callee: { kind: 'identifier', name: valueType ?? typeWords[0] ?? '' },
+          args,
+        };
+      }
       declarations.push({
         op: 'declare',
         name: name.text,

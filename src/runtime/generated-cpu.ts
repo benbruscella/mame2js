@@ -56,6 +56,15 @@ export interface GeneratedCpuDefinition {
   };
 }
 
+export interface GeneratedCpuExecutable {
+  type: string;
+  summary: {
+    diagnostics: number;
+    [name: string]: number;
+  };
+  create(bus: CpuBus): Cpu;
+}
+
 export interface Cpu {
   reset(): void;
   step(): number;
@@ -67,9 +76,11 @@ export interface Cpu {
   invoke(name: string, ...args: number[]): number;
 }
 
-const DEFINITIONS = new Map<string, GeneratedCpuDefinition>();
+type GeneratedCpuRegistration = GeneratedCpuDefinition | GeneratedCpuExecutable;
 
-export function registerGeneratedCpu(definition: GeneratedCpuDefinition): void {
+const DEFINITIONS = new Map<string, GeneratedCpuRegistration>();
+
+export function registerGeneratedCpu(definition: GeneratedCpuRegistration): void {
   if (definition.summary.diagnostics) {
     throw new Error(
       `cannot register ${definition.type}: ${definition.summary.diagnostics} compiler diagnostics`,
@@ -89,6 +100,7 @@ export function hasGeneratedCpu(type: string): boolean {
 export function createCpu(type: string, bus: CpuBus): Cpu {
   const definition = DEFINITIONS.get(type.toUpperCase());
   if (!definition) throw new Error(`generated CPU "${type}" was not registered`);
+  if ('create' in definition) return definition.create(bus);
   return new IrCpu(definition, bus);
 }
 

@@ -300,44 +300,61 @@ function makeWriteHandler(
   };
 }
 
-function executeGeneratedMachineHandler(
+export function executeGeneratedMachineProgram(
   machine: GeneratedMachine,
   handler: GeneratedHandler,
   bindings: GeneratedHandlerBindings,
   args: Record<string, unknown>,
-): number | undefined {
+): { returned: boolean; value?: unknown } {
   const compiled = (machine.handlers ?? []).filter(candidate =>
     candidate.program && candidate.program.diagnostics.length === 0);
-  let generatedBindings: GeneratedHandlerBindings;
-  const calls = { ...bindings.calls };
+  const referenceCalls = { ...bindings.referenceCalls };
+  const callParameters = { ...bindings.callParameters };
   const resolve = (ownerClass: string, method: string): GeneratedHandler | undefined =>
     compiled.find(candidate => candidate.ownerClass === ownerClass && candidate.method === method) ??
     compiled.find(candidate => candidate.method === method);
   for (const candidate of compiled) {
-    if (calls[candidate.method]) continue;
-    calls[candidate.method] = (...values) => {
+    const invoke = (...values: GeneratedCallArgument[]) => {
       const target = resolve(handler.ownerClass, candidate.method);
       if (!target?.program) return 0;
       const names = parameterNames(target.parameters);
-      return executeGeneratedMachineHandler(
+      return executeGeneratedMachineProgram(
         machine,
         target,
         bindings,
         Object.fromEntries(names.map((name, index) => [name, values[index] ?? 0])),
-      ) ?? 0;
+      ).value ?? 0;
     };
+    for (const key of [candidate.method, `${candidate.ownerClass}.${candidate.method}`]) {
+      if (!referenceCalls[key]) referenceCalls[key] = invoke;
+      callParameters[key] = (candidate.parameters ?? '')
+        .split(',')
+        .map(parameter => parameter.trim())
+        .filter(Boolean);
+    }
   }
   const suffix = /_(\d+)$/.exec(handler.method);
-  generatedBindings = {
+  const generatedBindings: GeneratedHandlerBindings = {
     ...bindings,
     constants: {
       ...handler.constants,
       ...bindings.constants,
       ...(suffix ? { Which: Number(suffix[1]) } : {}),
     },
-    calls,
+    referenceCalls,
+    callParameters,
   };
-  return executeGeneratedHandler(handler.program!, generatedBindings, args);
+  return executeGeneratedProgram(handler.program!, generatedBindings, args);
+}
+
+function executeGeneratedMachineHandler(
+  machine: GeneratedMachine,
+  handler: GeneratedHandler,
+  bindings: GeneratedHandlerBindings,
+  args: Record<string, unknown>,
+): number | undefined {
+  const result = executeGeneratedMachineProgram(machine, handler, bindings, args);
+  return result.returned && result.value !== undefined ? toNumber(result.value) : undefined;
 }
 
 function parameterNames(parameters: string | undefined): string[] {
@@ -427,8 +444,10 @@ function evaluate(expression: GeneratedExpression, context: ExecutionContext): u
     return constant ?? reference(expression.name);
   }
   if (expression.kind === 'unary') {
-    const value = toNumber(evaluate(expression.operand, context));
-    if (expression.operator === '!') return value ? 0 : 1;
+    const raw = evaluate(expression.operand, context);
+    if (expression.operator === '&' || expression.operator === '*') return raw;
+    if (expression.operator === '!') return truthy(raw) ? 0 : 1;
+    const value = toNumber(raw);
     if (expression.operator === '~') return ~value;
     if (expression.operator === '-') return -value;
     return value;
@@ -442,10 +461,20 @@ function evaluate(expression: GeneratedExpression, context: ExecutionContext): u
     return evaluate(expression.target, context);
   }
   if (expression.kind === 'binary') {
-    const left = toNumber(evaluate(expression.left, context));
-    if (expression.operator === '&&') return left && toNumber(evaluate(expression.right, context)) ? 1 : 0;
-    if (expression.operator === '||') return left || toNumber(evaluate(expression.right, context)) ? 1 : 0;
-    const right = toNumber(evaluate(expression.right, context));
+    const leftValue = evaluate(expression.left, context);
+    if (expression.operator === '&&') {
+      return truthy(leftValue) && truthy(evaluate(expression.right, context)) ? 1 : 0;
+    }
+    if (expression.operator === '||') {
+      return truthy(leftValue) || truthy(evaluate(expression.right, context)) ? 1 : 0;
+    }
+    const rightValue = evaluate(expression.right, context);
+    if (expression.operator === '==' || expression.operator === '!=') {
+      const equal = comparableValue(leftValue) === comparableValue(rightValue);
+      return expression.operator === '==' ? Number(equal) : Number(!equal);
+    }
+    const left = toNumber(leftValue);
+    const right = toNumber(rightValue);
     return binary(expression.operator, left, right);
   }
   if (expression.kind === 'conditional') {
@@ -619,11 +648,21 @@ function assignCallResult(
 
 function assignmentValue(operator: string, current: unknown, value: unknown): unknown {
   if (operator === '=') return value;
+  if (
+    operator === '&=' &&
+    current &&
+    typeof current === 'object' &&
+    typeof (current as { intersect?: unknown }).intersect === 'function'
+  ) {
+    (current as { intersect: (other: unknown) => void }).intersect(value);
+    return current;
+  }
   return binary(operator.slice(0, -1), toNumber(current), toNumber(value));
 }
 
 function wrapValue(valueType: string | undefined, value: unknown): unknown {
   if (valueType === 'auto' || valueType?.includes('*') || valueType?.includes('&')) return value;
+  if (value && typeof value === 'object') return value;
   valueType = valueType?.replace(/\bconst\b/g, '').trim();
   const number = toNumber(value);
   if (valueType === 'uint8_t' || valueType === 'u8') return number & 0xff;
@@ -670,7 +709,16 @@ function toNumber(value: unknown): number {
   return Number(value) || 0;
 }
 
+function comparableValue(value: unknown): unknown {
+  if (isLValue(value)) return comparableValue(value.get());
+  if (value && typeof value === 'object' && !isReference(value)) return value;
+  return toNumber(value);
+}
+
 function truthy(value: unknown): boolean {
+  if (value && typeof value === 'object' && !isReference(value) && !isLValue(value)) {
+    return true;
+  }
   return toNumber(value) !== 0;
 }
 

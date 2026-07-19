@@ -63,7 +63,7 @@ export function auditGenerated(outRoot: string): GeneratedAudit {
         type: string;
         status: string;
         executable?: boolean;
-        executableKind?: 'cpu' | 'device';
+        executableKind?: 'cpu' | 'device' | 'audio';
         executableArtifact?: string;
         uses?: { game: string }[];
       }[];

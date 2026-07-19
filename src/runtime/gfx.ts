@@ -52,7 +52,7 @@ function resolveOffset(value: number | string, regionBits: number): number {
   return bits;
 }
 
-export function decodeGfx(layout: GfxLayout, rom: Uint8Array): GfxSet {
+export function decodeGfx(layout: GfxLayout, rom: Uint8Array, byteOffset = 0): GfxSet {
   const regionBits = rom.length * 8;
   const { width, height, planes, charIncrement } = layout;
 
@@ -74,7 +74,7 @@ export function decodeGfx(layout: GfxLayout, rom: Uint8Array): GfxSet {
   const pixels = new Uint8Array(count * width * height);
 
   for (let elem = 0; elem < count; elem++) {
-    const base = elem * charIncrement;
+    const base = byteOffset * 8 + elem * charIncrement;
     const dstBase = elem * width * height;
     for (let p = 0; p < planes; p++) {
       const planebit = 1 << (planes - 1 - p);       // plane 0 = MSB, per MAME

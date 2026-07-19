@@ -3,6 +3,8 @@
 // No test framework; prints PASS/FAIL per section and sets process.exitCode.
 
 import { compileMameZ80 } from './cpu-compiler.ts';
+import { generatedCpuExecutableSource } from './cpu-codegen.ts';
+import * as ts from 'typescript';
 import {
   clearGeneratedCpus,
   createCpu,
@@ -12,10 +14,21 @@ import {
 } from '../runtime/generated-cpu.ts';
 
 clearGeneratedCpus();
-registerGeneratedCpu(compileMameZ80('../mame'));
+const definition = compileMameZ80('../mame');
+const executableSource = generatedCpuExecutableSource(definition);
+const executableJavaScript = ts.transpileModule(executableSource, {
+  compilerOptions: {
+    target: ts.ScriptTarget.ES2022,
+    module: ts.ModuleKind.ESNext,
+  },
+}).outputText;
+const executableModule = await import(
+  `data:text/javascript;base64,${Buffer.from(executableJavaScript).toString('base64')}`
+) as { default: Parameters<typeof registerGeneratedCpu>[0] };
+registerGeneratedCpu(executableModule.default);
 
 // Test-only compatibility surface for the historical conformance vectors.
-// It contains no CPU behavior; every operation executes the generated IR.
+// It contains no CPU behavior; every operation executes emitted MAME-derived code.
 class Z80 {
   private readonly core: Cpu;
 

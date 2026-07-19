@@ -9,6 +9,7 @@ import type {
   GeneratedHandler,
   GeneratedMachine,
   GeneratedSourceRef,
+  GeneratedVideoPlan,
 } from '../runtime/generated-machine.ts';
 import type { BoardConfig } from '../runtime/types.ts';
 import { compileMameHandler } from '../mame/handler-ir.ts';
@@ -18,6 +19,7 @@ export function lowerGeneratedMachine(
   game: string,
   family: string,
   board: BoardConfig,
+  compiledVideo?: { plan: GeneratedVideoPlan; handlers: GeneratedHandler[] },
 ): GeneratedMachine {
   const callbacks: GeneratedCallback[] = graph.nodes
     .filter(node => node.label === 'Callback')
@@ -87,6 +89,12 @@ export function lowerGeneratedMachine(
         ...(sourceRef(node.props) ? { source: sourceRef(node.props) } : {}),
       };
     });
+  for (const handler of compiledVideo?.handlers ?? []) {
+    const existing = handlers.find(candidate =>
+      candidate.ownerClass === handler.ownerClass && candidate.method === handler.method);
+    if (existing) Object.assign(existing, handler);
+    else handlers.push(handler);
+  }
   const byId = new Map(graph.nodes.map(node => [node.id, node]));
   const maps: GeneratedAddressMap[] = graph.nodes
     .filter(node => node.label === 'AddressMap')
@@ -147,6 +155,22 @@ export function lowerGeneratedMachine(
       },
     } : {}),
   };
+  const soundDevice = devices.find(device => device.type === 'NAMCO_WSG');
+  const sound = soundDevice
+    ? {
+        kind: 'wsg',
+        deviceTag: soundDevice.tag,
+        deviceType: soundDevice.type,
+        writeMethods: [...new Set(maps.flatMap(map => map.ranges)
+          .map(range => range.write)
+          .filter((key): key is string => Boolean(key?.startsWith(`${soundDevice.tag}.`)))
+          .map(key => key.slice(soundDevice.tag.length + 1)))],
+        enableMethods: [...new Set(callbacks
+          .filter(callback => callback.targetTag === soundDevice.tag && callback.targetMethod)
+          .map(callback => callback.targetMethod!))],
+        controlOffset: -1,
+      }
+    : undefined;
   return {
     schemaVersion: 2,
     game,
@@ -157,6 +181,8 @@ export function lowerGeneratedMachine(
     devices,
     handlers,
     maps,
+    ...(compiledVideo ? { video: compiledVideo.plan } : {}),
+    ...(sound ? { sound } : {}),
   };
 }
 
@@ -233,6 +259,8 @@ function generatedModuleSources(machine: GeneratedMachine): Record<string, strin
     execution: machine.execution,
     devices: machine.devices,
     maps: machine.maps,
+    video: machine.video,
+    sound: machine.sound,
   };
   const runtimeImport = '../../app/modules/runtime/generated-machine.js';
   return {
@@ -298,8 +326,9 @@ export function emitGeneratedMachine(
   family: string,
   outDir: string,
   board: BoardConfig,
+  compiledVideo?: { plan: GeneratedVideoPlan; handlers: GeneratedHandler[] },
 ): GeneratedMachine {
-  const machine = lowerGeneratedMachine(graph, game, family, board);
+  const machine = lowerGeneratedMachine(graph, game, family, board, compiledVideo);
   const generatedDir = join(outDir, 'generated');
   mkdirSync(generatedDir, { recursive: true });
   for (const [file, source] of Object.entries(generatedModuleSources(machine))) {
