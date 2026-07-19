@@ -74,34 +74,43 @@ export async function runMenu(): Promise<void> {
   document.body.appendChild(root);
 
   // --- marquee header ---------------------------------------------------------
-  const header = el('div', `display:flex;align-items:center;gap:24px;flex-wrap:wrap;
+  const header = el('div', `position:relative;display:flex;align-items:center;gap:24px;flex-wrap:wrap;
     padding:26px 36px 18px;border-bottom:4px solid #f2c200;
     background:linear-gradient(#141838,#0c0f24);box-shadow:0 6px 30px rgba(242,194,0,.15)`);
   const marquee = el('div', 'display:flex;flex-direction:column;gap:2px');
   const title = el('div', `font-size:34px;font-weight:800;letter-spacing:3px;
     color:#f2c200;text-shadow:0 0 18px rgba(242,194,0,.55), 0 2px 0 #7a5c00;font-family:ui-monospace,monospace`);
-  title.textContent = 'MAME HISTORY';
+  title.textContent = 'MAME History';
   const sub = el('div', 'color:#7f8ac9;letter-spacing:6px;font-size:11px;font-weight:600');
-  sub.textContent = 'VIDEO · ARCADE';
+  sub.textContent = 'Arcade · Consoles';
   marquee.append(title, sub);
 
-  // corner sash to the source — this whole site is generated from the repo
+  // corner sash to the source — band centered on the viewport's top-right
+  // diagonal inside an overflow:hidden square, so both ends clip cleanly at
+  // the edges (same geometry as the tiles' INSERT ROM ribbon)
+  // anchored in the header and clipped to its height, so the band never
+  // drapes past the bottom border — the shorter label is what fits the
+  // smaller diagonal (the full URL lives in the tooltip)
+  const sashClip = el('div', 'position:absolute;top:0;right:0;bottom:0;width:150px;overflow:hidden;z-index:40;pointer-events:none');
   const sash = document.createElement('a');
   sash.href = 'https://github.com/benbruscella/mamekit';
   sash.target = '_blank';
   sash.rel = 'noopener';
-  sash.textContent = '★ OPEN SOURCE ON GITHUB';
-  sash.title = 'github.com/benbruscella/mamekit';
-  sash.style.cssText = `position:fixed;top:0;right:0;z-index:40;
-    transform:translate(29%,66%) rotate(40deg);transform-origin:center;
-    background:#f2c200;color:#1b1b1b;font-weight:800;font-size:11px;letter-spacing:1px;
-    padding:7px 80px;box-shadow:0 4px 16px rgba(0,0,0,.5);text-decoration:none`;
-  document.body.appendChild(sash);
+  sash.textContent = '★ ON GITHUB';
+  sash.title = 'Open source — github.com/benbruscella/mamekit';
+  sash.style.cssText = `position:absolute;top:23px;right:-65px;width:200px;text-align:center;
+    transform:rotate(45deg);pointer-events:auto;
+    background:#f2c200;color:#1b1b1b;font-weight:800;font-size:10px;letter-spacing:1px;
+    padding:7px 0;box-shadow:0 4px 16px rgba(0,0,0,.5);text-decoration:none`;
+  sashClip.appendChild(sash);
+  header.appendChild(sashClip);
 
   const search = document.createElement('input');
   search.type = 'search';
   search.placeholder = 'Search titles, makers, years…';
-  search.style.cssText = `margin-left:auto;min-width:260px;padding:10px 14px;border-radius:20px;
+  // centered in the header bar; absolute so the marquee doesn't skew it
+  search.style.cssText = `position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);
+    min-width:260px;padding:10px 14px;border-radius:20px;
     border:2px solid #2a3160;background:#0a0c1c;color:#eee;font:14px ui-sans-serif,system-ui;outline:none`;
   search.addEventListener('focus', () => { search.style.borderColor = '#f2c200'; });
   search.addEventListener('blur', () => { search.style.borderColor = '#2a3160'; });
@@ -238,21 +247,19 @@ export async function runMenu(): Promise<void> {
     const item = el('div', 'display:flex;flex-direction:column;align-items:center;cursor:pointer');
 
     // Netflix-scale tile: big cover, slim label
-    const box = el('div', `position:relative;width:320px;height:480px;border-radius:8px 12px 12px 8px;
+    const box = el('div', `position:relative;width:320px;height:490px;border-radius:12px;
       background:linear-gradient(105deg,#1b2148,#242c63 55%,#1b2148);
       box-shadow:inset 6px 0 10px -6px #000, inset -2px 0 6px -3px rgba(255,255,255,.25), 0 14px 30px rgba(0,0,0,.6);
       transition:transform .18s ease, box-shadow .18s ease;overflow:hidden`);
-    // spine highlight (VHS box left edge)
-    box.appendChild(el('div', `position:absolute;left:0;top:0;bottom:0;width:12px;
-      background:linear-gradient(90deg, rgba(255,255,255,.22), rgba(0,0,0,.4));pointer-events:none;z-index:3`));
-
     const cover = document.createElement('canvas');
     cover.width = 600; cover.height = 800; // 2x backing for crisp flyer art
     cover.style.cssText = 'display:block;width:300px;height:400px;margin:10px auto 0;background:#000;border:2px solid #0006';
     box.appendChild(cover);
 
-    const label = el('div', `position:absolute;left:12px;right:0;bottom:0;height:66px;padding:9px 14px 0;
-      background:linear-gradient(#f7f3e8,#e8e0c8);color:#1b1b1b;border-top:3px solid #c9b98b`);
+    // footer sits inside the tile's frame: same 10px gutter as the cover art
+    const label = el('div', `position:absolute;left:10px;right:10px;bottom:10px;height:66px;padding:9px 14px 0;
+      background:linear-gradient(#f7f3e8,#e8e0c8);color:#1b1b1b;border-top:3px solid #c9b98b;
+      border-radius:0 0 6px 6px;box-sizing:border-box`);
     const name = el('div', 'font-weight:800;font-size:17px;line-height:1.15;overflow:hidden;max-height:36px');
     // shelf label: drop the set/licence suffix and MAME's dual-name form
     // ("Space Invaders / Space Invaders M" — the story card keeps the full name)
@@ -279,7 +286,7 @@ export async function runMenu(): Promise<void> {
 
     if (entry.kind === 'console') {
       // async cart-count badge from the visitor's own cart library
-      const badge = el('div', `position:absolute;left:12px;right:0;bottom:66px;z-index:2;
+      const badge = el('div', `position:absolute;left:10px;right:10px;bottom:76px;z-index:2;
         padding:6px 14px;font-size:11px;font-weight:600;letter-spacing:.6px;color:#f2c200;
         background:linear-gradient(transparent, rgba(4,5,12,.9) 45%);pointer-events:none`);
       badge.setAttribute('data-cart-badge', entry.game);
@@ -310,9 +317,11 @@ export async function runMenu(): Promise<void> {
     const game = encodeURIComponent(entry.game);
     const backdrop = el('div', `position:fixed;inset:0;z-index:50;background:rgba(3,4,10,.86);
       display:flex;align-items:center;justify-content:center;padding:24px`);
+    // the modal hangs off document.body (outside root's font scope) — set
+    // the family here or the card falls back to the browser's default serif
     const card = el('div', `max-width:880px;width:100%;max-height:92vh;border-radius:12px;
       background:linear-gradient(#141838,#0c0f24);border:2px solid #f2c200;
-      box-shadow:0 24px 80px rgba(0,0,0,.8);font-size:14px;line-height:1.55;
+      box-shadow:0 24px 80px rgba(0,0,0,.8);font:14px/1.55 ui-sans-serif,system-ui;
       display:flex;flex-direction:column;overflow:hidden`);
     backdrop.appendChild(card);
     // everything scrolls inside this; the CTA footer below stays pinned
