@@ -28,6 +28,7 @@ export interface GeneratedDevice {
   id: string;
   tag: string;
   type: string;
+  member?: string;
   clock?: number;
   source?: GeneratedSourceRef;
 }
@@ -134,6 +135,8 @@ export interface GeneratedExecutionCpu {
 export interface GeneratedScreen {
   width: number;
   height: number;
+  visibleMinX?: number;
+  visibleMinY?: number;
   refresh: number;
   vtotal: number;
   vbstart: number;
@@ -153,6 +156,15 @@ export interface GeneratedFrameEvent {
 
 export interface GeneratedExecutionPlan {
   cpus: GeneratedExecutionCpu[];
+  banks?: {
+    tag: string;
+    region: string;
+    firstEntry: number;
+    entries: number;
+    offset: number;
+    stride: number;
+    source?: GeneratedSourceRef;
+  }[];
   screen: GeneratedScreen;
   customs?: { port: string; mask: number; member: string }[];
   frameEvents: GeneratedFrameEvent[];
@@ -184,7 +196,10 @@ export interface GeneratedGfxEntry {
 }
 
 export interface GeneratedPromPalettePlan {
-  region: string;
+  kind?: 'prom' | 'ram' | 'fixed';
+  region?: string;
+  share?: string;
+  colors?: number[];
   colorCount: number;
   min: number;
   max: number;
@@ -192,15 +207,41 @@ export interface GeneratedPromPalettePlan {
   channels: {
     channel: 'r' | 'g' | 'b';
     bits: number[];
-    resistances: number[];
-    pulldown: number;
-    pullup: number;
+    offsets?: number[];
+    weights?: number[];
+    resistances?: number[];
+    pulldown?: number;
+    pullup?: number;
   }[];
   lookupOffset: number;
   lookupCount: number;
   lookupMask: number;
-  banks: { penOffset: number; colorOr: number }[];
+  banks: {
+    penOffset: number;
+    colorOr: number;
+    lookupOffset?: number;
+    lookupCount?: number;
+  }[];
   transparentIndirect: number;
+  source?: GeneratedSourceRef;
+}
+
+export interface GeneratedPackedBitmapPlan {
+  share: string;
+  paletteShare?: string;
+  bytesPerRow: number;
+  logicalWidth: number;
+  logicalHeight: number;
+  xscale: number;
+  pixelsPerByte: number;
+  bitsPerPixel: number;
+  lowPixelFirst: boolean;
+  dataXOffset?: number;
+  dataYOffset?: number;
+  flipXMember?: string;
+  flipYMember?: string;
+  scrollMember?: string;
+  scrollColumns?: number;
   source?: GeneratedSourceRef;
 }
 
@@ -219,6 +260,7 @@ export interface GeneratedVideoPlan {
   gfx: GeneratedGfxEntry[];
   palette: GeneratedPromPalettePlan;
   tilemaps: GeneratedTilemapPlan[];
+  bitmap?: GeneratedPackedBitmapPlan;
   initialState: Record<string, number>;
   source?: GeneratedSourceRef;
 }
@@ -226,6 +268,7 @@ export interface GeneratedVideoPlan {
 export interface GeneratedSoundBinding {
   kind: string;
   deviceTag: string;
+  deviceTags?: string[];
   deviceType: string;
   writeMethods: string[];
   enableMethods: string[];

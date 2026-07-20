@@ -7,7 +7,8 @@ import {
   registerGeneratedDevice,
 } from '../runtime/generated-device.ts';
 
-const definition = indexMameHardware('../mame').get('LS259');
+const definitions = indexMameHardware('../mame');
+const definition = definitions.get('LS259');
 assert.ok(definition, 'MAME hardware index should resolve LS259');
 
 const generated = compileMameDevice('../mame', definition);
@@ -34,4 +35,13 @@ latch.call('write_d0', 3, 0);
 assert.equal(latch.call('output_state'), 0);
 assert.deepEqual(states, [1, 0]);
 
-console.log('device-compiler.spec: 12 passed');
+const genericDefinition = definitions.get('GENERIC_LATCH_8');
+assert.ok(genericDefinition, 'MAME hardware index should resolve GENERIC_LATCH_8');
+const genericGenerated = compileMameDevice('../mame', genericDefinition);
+assert.equal(genericGenerated.summary.diagnostics, 0);
+registerGeneratedDevice(genericGenerated);
+const genericLatch = createDevice('GENERIC_LATCH_8');
+genericLatch.call('write', 0x5a);
+assert.equal(genericLatch.call('read'), 0x5a);
+
+console.log('device-compiler.spec: 16 passed');

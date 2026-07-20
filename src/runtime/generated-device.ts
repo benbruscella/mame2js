@@ -44,6 +44,7 @@ export interface Device {
   call(name: string, ...args: number[]): number;
   get(name: string): number;
   set(name: string, value: number): void;
+  arity(name: string): number;
   methodNames(): readonly string[];
   signalNames(): readonly string[];
   on(signal: string, listener: DeviceCallbackListener, slot?: number): Device;
@@ -148,6 +149,11 @@ class IrDevice implements Device {
 
   set(name: string, value: number): void {
     this.members[name] = wrap(value, this.memberBits.get(name));
+  }
+
+  arity(name: string): number {
+    const method = this.methods.get(name);
+    return method ? splitParameters(method.parameters).length : 0;
   }
 
   methodNames(): readonly string[] {

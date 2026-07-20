@@ -19,4 +19,11 @@ export const REQUIRED_TARGETS = [
  * acceptance contract passes. Other required targets must remain explicitly
  * blocked until their complete executable closure exists.
  */
-export const PLAYABLE_TARGETS = ['pacman'] as const;
+export const PLAYABLE_TARGETS = [
+  'pacman',
+  'gyruss',
+  'junofrst',
+  'rocnrope',
+  'pooyan',
+  'timeplt',
+] as const;

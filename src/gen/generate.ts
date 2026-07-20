@@ -111,6 +111,7 @@ export async function generate(graph: KnowledgeGraph, opts: GenerateOptions): Pr
   const mapPatches: { space: string; tag: string; mapId: string }[] = [];
   /** SOFTWARE_LIST declarations (consoles/computers) in chain order */
   const softlistNodes: KGNode[] = [];
+  const bankNodes: KGNode[] = [];
   {
     const seen = new Set<string>();
     const queue = [machine.id];
@@ -131,6 +132,7 @@ export async function generate(graph: KnowledgeGraph, opts: GenerateOptions): Pr
         });
       }
       softlistNodes.push(...g.out(id, 'HAS_SOFTLIST').map(s => s.node));
+      bankNodes.push(...g.out(id, 'HAS_BANK').map(bank => bank.node));
       queue.push(...g.out(id, 'CALLS').map(c => c.node.id));
     }
   }
@@ -217,6 +219,14 @@ export async function generate(graph: KnowledgeGraph, opts: GenerateOptions): Pr
   // shared `ranges` field mirrors cpu[0] for the galaga family's shared map
   const ranges = cpus[0].ranges;
   const io = cpus[0].io;
+  const banks = bankNodes.map(bank => ({
+    tag: String(bank.props.tag),
+    region: String(bank.props.region),
+    firstEntry: Number(bank.props.firstEntry),
+    entries: Number(bank.props.entries),
+    offset: Number(bank.props.offset),
+    stride: Number(bank.props.stride),
+  }));
 
   // --- screen ------------------------------------------------------------------
   // Arcade drivers use set_raw; consoles (nes.cpp) use the
@@ -263,6 +273,8 @@ export async function generate(graph: KnowledgeGraph, opts: GenerateOptions): Pr
   const screen = {
     width: (hbstart - hbend) / xscale,
     height: vbstart - vbend,
+    visibleMinX: hbend / xscale,
+    visibleMinY: vbend,
     refresh: pixclock / (htotal * vtotal),
     vtotal,
     vbstart,
@@ -278,6 +290,10 @@ export async function generate(graph: KnowledgeGraph, opts: GenerateOptions): Pr
   // sound device -> runtime SoundCore kind (device-library mapping, not game-specific)
   const ayChips = devices.filter(d => d.props.type === 'AY8910');
   const ymChips = devices.filter(d => d.props.type === 'YM2203');
+  const dac = devices.find(d => String(d.props.type).startsWith('DAC_'));
+  const dacGain = dac
+    ? routeGain((dac.props.config as string[] | undefined) ?? [])
+    : undefined;
   // Per-family analog mix weights, hand-derived from each driver's discrete
   // resistor network — the one MAME layer the graph can't carry yet (the
   // nets are data tables inside DISCRETE_SOUND_START, not device wiring).
@@ -306,7 +322,13 @@ export async function generate(graph: KnowledgeGraph, opts: GenerateOptions): Pr
         : ymChips.length
           ? { kind: 'ym2203', clock: Number(ymChips[0].props.clock), chips: ymChips.length }
           : ayChips.length
-            ? { kind: 'ay8910', clock: Number(ayChips[0].props.clock), chips: ayChips.length, ...AY_MIX[soundFamily] }
+            ? {
+                kind: 'ay8910',
+                clock: Number(ayChips[0].props.clock),
+                chips: ayChips.length,
+                ...AY_MIX[soundFamily],
+                ...(dacGain !== undefined ? { dacGain } : {}),
+              }
             : { kind: 'none' };
 
   // --- roms ----------------------------------------------------------------------
@@ -347,6 +369,7 @@ export async function generate(graph: KnowledgeGraph, opts: GenerateOptions): Pr
         offset: Number(rom.props.offset),
         size: Number(rom.props.size),
         crc,
+        ...(rom.props.noDump ? { noDump: true } : {}),
         ...(alts.length ? { alt: alts } : {}),
         ...(rom.props.reloadOffsets ? { reloadOffsets: rom.props.reloadOffsets as number[] } : {}),
       };
@@ -530,7 +553,16 @@ export async function generate(graph: KnowledgeGraph, opts: GenerateOptions): Pr
     title,
     family,
     ...(kind ? { kind } : {}),
-    board: { family, cpus, ranges, ...(io ? { io } : {}), ...(customs.length ? { customs } : {}), screen, clocks },
+    board: {
+      family,
+      cpus,
+      ranges,
+      ...(io ? { io } : {}),
+      ...(banks.length ? { banks } : {}),
+      ...(customs.length ? { customs } : {}),
+      screen,
+      clocks,
+    },
     sound,
     roms,
     ...(romPatches ? { romPatches } : {}),
@@ -652,6 +684,18 @@ export async function generate(graph: KnowledgeGraph, opts: GenerateOptions): Pr
   if (!existsSync(join(projectRoot, 'roms', `${opts.game}.zip`))) {
     console.log(`note: put ${opts.game}.zip in ${join(projectRoot, 'roms')}/ to auto-load ROMs (or drop the zip onto the page)`);
   }
+}
+
+function routeGain(config: string[]): number | undefined {
+  for (const statement of config) {
+    for (const match of statement.matchAll(
+      /\.add_route\s*\([^,]+,\s*"[^"]+"\s*,\s*([^)]+)\)/g,
+    )) {
+      const gain = Number(match[1]);
+      if (Number.isFinite(gain)) return gain;
+    }
+  }
+  return undefined;
 }
 
 /**
@@ -804,7 +848,8 @@ export function buildApp(outRoot: string): boolean {
       hardware?: {
         type: string;
         executable?: boolean;
-        executableKind?: 'cpu' | 'device' | 'audio';
+        executableKind?: 'cpu' | 'device' | 'audio' | 'composition';
+        executableArtifact?: string;
       }[];
     };
     const sourceDir = join(outRoot, 'runtime/generated/devices');
@@ -814,15 +859,18 @@ export function buildApp(outRoot: string): boolean {
       if (!hardware.executable) continue;
       const slug = hardware.type.toLowerCase();
       if (hardware.executableKind === 'audio') {
-        const worklet = join(outRoot, 'runtime/generated/audio/wsg-worklet.ts');
+        const worklet = hardware.executableArtifact
+          ? join(outRoot, 'runtime/generated', hardware.executableArtifact)
+          : '';
         if (existsSync(worklet)) {
           writeFileSync(
-            join(srcDir, 'runtime/wsg-worklet.ts'),
+            join(srcDir, 'runtime', worklet.split('/').at(-1)!),
             readFileSync(worklet, 'utf8'),
           );
         }
         continue;
       }
+      if (hardware.executableKind === 'composition') continue;
       const sourceFile = join(sourceDir, `${slug}.ts`);
       if (!existsSync(sourceFile)) continue;
       const binding = hardware.executableKind === 'device'

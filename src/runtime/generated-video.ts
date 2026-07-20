@@ -30,6 +30,8 @@ export class GeneratedVideoRenderer implements VideoRenderer {
   private readonly machine: GeneratedMachine;
   private readonly primitives: GeneratedVideoPrimitives;
   private readonly screenUpdate: NonNullable<GeneratedMachine['callbacks']>[number];
+  private readonly visibleMinX: number;
+  private readonly visibleMinY: number;
 
   constructor(machine: GeneratedMachine, primitives: GeneratedVideoPrimitives) {
     const screenUpdate = machine.callbacks.find(callback =>
@@ -42,6 +44,8 @@ export class GeneratedVideoRenderer implements VideoRenderer {
     this.screenUpdate = screenUpdate;
     this.width = primitives.width;
     this.height = primitives.height;
+    this.visibleMinX = machine.execution.screen.visibleMinX ?? 0;
+    this.visibleMinY = machine.execution.screen.visibleMinY ?? 0;
   }
 
   vblank(): void {
@@ -49,17 +53,23 @@ export class GeneratedVideoRenderer implements VideoRenderer {
   }
 
   render(frame: Uint32Array): void {
+    if (this.machine.video?.bitmap) {
+      this.primitives.render(frame);
+      return;
+    }
     const cliprect = {
-      min_x: 0,
-      max_x: this.width - 1,
-      min_y: 0,
-      max_y: this.height - 1,
+      min_x: this.visibleMinX,
+      max_x: this.visibleMinX + this.width - 1,
+      min_y: this.visibleMinY,
+      max_y: this.visibleMinY + this.height - 1,
     };
     const bitmap = {
       fill: (color: number) => frame.fill(color >>> 0),
       'pix=': (y: number, x: number, color: number) => {
-        if (x >= 0 && x < this.width && y >= 0 && y < this.height) {
-          frame[y * this.width + x] = color >>> 0;
+        const targetX = x - this.visibleMinX;
+        const targetY = y - this.visibleMinY;
+        if (targetX >= 0 && targetX < this.width && targetY >= 0 && targetY < this.height) {
+          frame[targetY * this.width + targetX] = color >>> 0;
         }
       },
     };
@@ -92,6 +102,7 @@ interface TileInfo {
   code: number;
   color: number;
   flags: number;
+  category: number;
 }
 
 class GeneratedRectangle {
@@ -121,40 +132,65 @@ class GeneratedPalette {
   readonly colors: Uint32Array;
   readonly indirect: Uint16Array;
   private readonly transparentIndirect: number;
+  private readonly plan: GeneratedPromPalettePlan;
+  private readonly weights: ReturnType<typeof computeWeights>;
+  private readonly ram?: Uint8Array;
 
-  constructor(plan: GeneratedPromPalettePlan, regions: Regions) {
-    const prom = regions[plan.region];
-    if (!prom) throw new Error(`generated palette: missing ROM region "${plan.region}"`);
-    const weights = computeWeights(plan);
+  constructor(
+    plan: GeneratedPromPalettePlan,
+    regions: Regions,
+    state: Record<string, unknown>,
+  ) {
+    this.plan = plan;
+    this.weights = computeWeights(plan);
+    if (plan.kind === 'fixed') {
+      this.colors = Uint32Array.from(plan.colors ?? []);
+      this.indirect = Uint16Array.from(
+        Array.from({ length: this.colors.length }, (_, index) => index),
+      );
+      this.transparentIndirect = plan.transparentIndirect;
+      return;
+    }
+    if (plan.kind === 'ram') {
+      const share = plan.share ?? 'palette';
+      this.ram = state[`m_${share}`] as Uint8Array | undefined;
+      if (!this.ram) throw new Error(`generated palette: missing RAM share "${share}"`);
+      this.colors = new Uint32Array(plan.colorCount);
+      this.indirect = new Uint16Array(plan.colorCount);
+      for (let index = 0; index < plan.colorCount; index++) this.indirect[index] = index;
+      this.transparentIndirect = plan.transparentIndirect;
+      return;
+    }
+    const region = plan.region;
+    const prom = region ? regions[region] : undefined;
+    if (!prom) throw new Error(`generated palette: missing ROM region "${region ?? ''}"`);
     const core = new Uint32Array(plan.colorCount);
     for (let index = 0; index < core.length; index++) {
-      const rgb = { r: 0, g: 0, b: 0 };
-      for (const channel of plan.channels) {
-        const values = weights[channel.channel];
-        let value = 0;
-        for (let bit = 0; bit < channel.bits.length; bit++) {
-          value += values[bit]! * ((prom[index]! >> channel.bits[bit]!) & 1);
-        }
-        rgb[channel.channel] = Math.floor(value + 0.5);
-      }
-      core[index] = packRgb(rgb.r, rgb.g, rgb.b);
+      core[index] = this.color(index, prom);
     }
     const penCount = Math.max(
       1,
-      ...plan.banks.map(bank => bank.penOffset + plan.lookupCount),
+      ...plan.banks.map(bank => bank.penOffset + (bank.lookupCount ?? plan.lookupCount)),
     );
     this.colors = new Uint32Array(penCount);
     this.indirect = new Uint16Array(penCount);
     for (const bank of plan.banks) {
-      for (let index = 0; index < plan.lookupCount; index++) {
+      const lookupOffset = bank.lookupOffset ?? plan.lookupOffset;
+      const lookupCount = bank.lookupCount ?? plan.lookupCount;
+      for (let index = 0; index < lookupCount; index++) {
         const indirect = bank.colorOr |
-          ((prom[plan.lookupOffset + index] ?? 0) & plan.lookupMask);
+          ((prom[lookupOffset + index] ?? 0) & plan.lookupMask);
         const pen = bank.penOffset + index;
         this.indirect[pen] = indirect;
         this.colors[pen] = core[indirect] ?? 0xff000000;
       }
     }
     this.transparentIndirect = plan.transparentIndirect;
+  }
+
+  pen_color(index: number): number {
+    if (this.ram) return this.color(index, this.ram);
+    return this.colors[index] ?? 0xff000000;
   }
 
   transpen_mask(gfx: GeneratedGfxElement, color: number, transparent: number): number {
@@ -164,6 +200,20 @@ class GeneratedPalette {
       if (this.indirect[base + pen] === transparent) mask |= 1 << pen;
     }
     return mask;
+  }
+
+  private color(index: number, bytes: Uint8Array): number {
+    const rgb = { r: 0, g: 0, b: 0 };
+    for (const channel of this.plan.channels) {
+      const values = this.weights[channel.channel];
+      let value = 0;
+      for (let bit = 0; bit < channel.bits.length; bit++) {
+        const offset = channel.offsets?.[bit] ?? 0;
+        value += values[bit]! * ((bytes[index + offset]! >> channel.bits[bit]!) & 1);
+      }
+      rgb[channel.channel] = Math.floor(value + 0.5);
+    }
+    return packRgb(rgb.r, rgb.g, rgb.b);
   }
 }
 
@@ -192,6 +242,20 @@ class GeneratedGfxElement {
     transparentMask: number,
   ): void {
     this.draw(bitmap, clip, code, color, flipX, flipY, sx, sy, transparentMask);
+  }
+
+  transpen(
+    bitmap: BitmapTarget,
+    clip: GeneratedRectangle,
+    code: number,
+    color: number,
+    flipX: number,
+    flipY: number,
+    sx: number,
+    sy: number,
+    transparentPen: number,
+  ): void {
+    this.draw(bitmap, clip, code, color, flipX, flipY, sx, sy, 1 << transparentPen);
   }
 
   draw(
@@ -232,7 +296,7 @@ class GeneratedGfxElement {
 
 class GeneratedTilemap {
   private readonly plan: GeneratedTilemapPlan;
-  private readonly mapper: GeneratedHandler;
+  private readonly mapper?: GeneratedHandler;
   private readonly tileInfo: GeneratedHandler;
   private readonly machine: GeneratedMachine;
   private readonly bindings: () => GeneratedHandlerBindings;
@@ -249,7 +313,9 @@ class GeneratedTilemap {
     this.machine = machine;
     this.bindings = bindings;
     this.gfx = gfx;
-    this.mapper = requiredHandler(machine, plan.mapper);
+    this.mapper = standardMapper(plan.mapper)
+      ? undefined
+      : requiredHandler(machine, plan.mapper);
     this.tileInfo = requiredHandler(machine, plan.tileInfo);
   }
 
@@ -268,36 +334,62 @@ class GeneratedTilemap {
   ): void {
     for (let row = 0; row < this.plan.rows; row++) {
       for (let column = 0; column < this.plan.columns; column++) {
-        const mapped = executeGeneratedMachineProgram(
-          this.machine,
-          this.mapper,
-          this.bindings(),
-          {
-            col: column,
-            row,
-            num_cols: this.plan.columns,
-            num_rows: this.plan.rows,
-          },
-        );
-        const tile: TileInfo = { gfx: 0, code: 0, color: 0, flags: 0 };
+        const mapped = this.mapper
+          ? executeGeneratedMachineProgram(
+              this.machine,
+              this.mapper,
+              this.bindings(),
+              {
+                col: column,
+                row,
+                num_cols: this.plan.columns,
+                num_rows: this.plan.rows,
+              },
+            ).value
+          : mapStandardTile(this.plan.mapper, column, row, this.plan.columns, this.plan.rows);
+        const tile: TileInfo = { gfx: 0, code: 0, color: 0, flags: 0, category: 0 };
         const tileinfo = {
           set: (gfx: number, code: number, color: number, flags: number) => {
             Object.assign(tile, { gfx, code, color, flags });
+          },
+          get category() {
+            return tile.category;
+          },
+          set category(value: number) {
+            tile.category = value;
           },
         };
         executeGeneratedMachineProgram(
           this.machine,
           this.tileInfo,
           this.bindings(),
-          { tilemap: this, tileinfo, tile_index: Number(mapped.value) || 0 },
+          { tilemap: this, tileinfo, tile_index: Number(mapped) || 0 },
         );
+        if (tile.category !== (_flags & 0xff)) continue;
         const gfx = this.gfx[tile.gfx];
         if (!gfx) continue;
-        const flipX = Boolean(this.flip & 1);
-        const flipY = Boolean(this.flip & 2);
+        const members = this.bindings().members ?? {};
+        const globalFlip = Number(members.__flip_screen ?? 0)
+          ? 3
+          : Number(members.__flip_screen_x ?? 0) |
+            (Number(members.__flip_screen_y ?? 0) << 1);
+        const mapFlip = this.flip | globalFlip;
+        const flipX = Boolean(mapFlip & 1);
+        const flipY = Boolean(mapFlip & 2);
+        const tileFlipX = Boolean(tile.flags & 1) !== flipX;
+        const tileFlipY = Boolean(tile.flags & 2) !== flipY;
         const x = (flipX ? this.plan.columns - 1 - column : column) * this.plan.tileWidth;
         const y = (flipY ? this.plan.rows - 1 - row : row) * this.plan.tileHeight;
-        gfx.draw(bitmap, clip, tile.code, tile.color, Number(flipX), Number(flipY), x, y);
+        gfx.draw(
+          bitmap,
+          clip,
+          tile.code,
+          tile.color,
+          Number(tileFlipX),
+          Number(tileFlipY),
+          x,
+          y,
+        );
       }
     }
   }
@@ -330,7 +422,7 @@ export class GeneratedMameVideoPrimitives implements GeneratedVideoPrimitives, R
     for (const [member, value] of Object.entries(machine.video.initialState)) {
       if (!Object.hasOwn(state, member)) state[member] = value;
     }
-    this.palette = new GeneratedPalette(machine.video.palette, regions);
+    this.palette = new GeneratedPalette(machine.video.palette, regions, state);
     this.gfx = machine.video.gfx.map(entry => {
       const region = regions[entry.region];
       if (!region) throw new Error(`${machine.game}: missing gfx region "${entry.region}"`);
@@ -348,6 +440,19 @@ export class GeneratedMameVideoPrimitives implements GeneratedVideoPrimitives, R
     };
     this.bindings = {
       ...bindings,
+      calls: {
+        ...bindings.calls,
+        flip_screen: () => Number(state.__flip_screen ?? 0),
+        flip_screen_set: value => {
+          state.__flip_screen = value ? 1 : 0;
+        },
+        flip_screen_x_set: value => {
+          state.__flip_screen_x = value ? 1 : 0;
+        },
+        flip_screen_y_set: value => {
+          state.__flip_screen_y = value ? 1 : 0;
+        },
+      },
       members: state,
       referenceCalls,
     };
@@ -367,7 +472,49 @@ export class GeneratedMameVideoPrimitives implements GeneratedVideoPrimitives, R
     return this.bindings;
   }
 
-  render(_frame: Uint32Array): void {}
+  render(frame: Uint32Array): void {
+    const plan = this.machine.video?.bitmap;
+    if (!plan) return;
+    const video = this.state[`m_${plan.share}`] as Uint8Array | undefined;
+    if (!video) throw new Error(`${this.machine.game}: missing bitmap share "${plan.share}"`);
+    frame.fill(0xff000000);
+    const visibleMinX = this.machine.execution.screen.visibleMinX ?? 0;
+    const visibleMinY = this.machine.execution.screen.visibleMinY ?? 0;
+    const flipX = Number(this.state[plan.flipXMember ?? ''] ?? 0) ? 0xff : 0;
+    const flipY = Number(this.state[plan.flipYMember ?? ''] ?? 0) ? 0xff : 0;
+    const scroll = plan.scrollMember
+      ? this.state[plan.scrollMember] as Uint8Array | number | undefined
+      : undefined;
+    const scrollValue = typeof scroll === 'number' ? scroll : scroll?.[0] ?? 0;
+    for (let targetY = 0; targetY < this.height; targetY++) {
+      const y = targetY + visibleMinY;
+      for (let logicalX = 0; logicalX < plan.logicalWidth; logicalX++) {
+        const dataX = logicalX - (plan.dataXOffset ?? 0);
+        const effectiveX = dataX < 0 ? -1 : (dataX ^ flipX) & 0xff;
+        const yscroll = effectiveX < (plan.scrollColumns ?? 0) ? scrollValue : 0;
+        const effectiveY = (((y + (plan.dataYOffset ?? 0)) ^ flipY) + yscroll) & 0xff;
+        const packed = effectiveX < 0
+          ? 0
+          : video[effectiveY * plan.bytesPerRow +
+            Math.floor(effectiveX / plan.pixelsPerByte)] ?? 0;
+        const pixelInByte = effectiveX < 0 ? 0 : effectiveX % plan.pixelsPerByte;
+        const shift = plan.lowPixelFirst
+          ? pixelInByte * plan.bitsPerPixel
+          : (plan.pixelsPerByte - 1 - pixelInByte) * plan.bitsPerPixel;
+        const pen = effectiveX < 0
+          ? 0
+          : (packed >>> shift) & ((1 << plan.bitsPerPixel) - 1);
+        const color = this.palette.pen_color(pen);
+        const physicalX = logicalX * plan.xscale - visibleMinX;
+        for (let repeat = 0; repeat < plan.xscale; repeat++) {
+          const targetX = physicalX + repeat;
+          if (targetX >= 0 && targetX < this.width) {
+            frame[targetY * this.width + targetX] = color;
+          }
+        }
+      }
+    }
+  }
 
   vblank(): void {}
 }
@@ -381,17 +528,42 @@ function requiredHandler(machine: GeneratedMachine, key: string): GeneratedHandl
   return handler;
 }
 
+function standardMapper(key: string): boolean {
+  return key === 'TILEMAP_SCAN_ROWS' || key === 'TILEMAP_SCAN_COLS';
+}
+
+function mapStandardTile(
+  key: string,
+  column: number,
+  row: number,
+  columns: number,
+  rows: number,
+): number {
+  if (key === 'TILEMAP_SCAN_ROWS') return row * columns + column;
+  if (key === 'TILEMAP_SCAN_COLS') return column * rows + row;
+  return 0;
+}
+
 function computeWeights(
   plan: GeneratedPromPalettePlan,
 ): Record<'r' | 'g' | 'b', number[]> {
   const raw: Record<'r' | 'g' | 'b', number[]> = { r: [], g: [], b: [] };
   let maximum = 0;
   for (const channel of plan.channels) {
-    const values = channel.resistances.map((_, selected) => {
+    if (channel.weights) {
+      raw[channel.channel] = channel.weights;
+      maximum = Math.max(
+        maximum,
+        channel.weights.reduce((sum, value) => sum + value, 0),
+      );
+      continue;
+    }
+    const resistances = channel.resistances ?? [];
+    const values = resistances.map((_, selected) => {
       let r0 = channel.pulldown ? 1 / channel.pulldown : 1 / 1e12;
       let r1 = channel.pullup ? 1 / channel.pullup : 1 / 1e12;
-      for (let index = 0; index < channel.resistances.length; index++) {
-        const resistance = channel.resistances[index]!;
+      for (let index = 0; index < resistances.length; index++) {
+        const resistance = resistances[index]!;
         if (!resistance) continue;
         if (index === selected) r1 += 1 / resistance;
         else r0 += 1 / resistance;
@@ -406,7 +578,7 @@ function computeWeights(
     raw[channel.channel] = values;
     maximum = Math.max(maximum, values.reduce((sum, value) => sum + value, 0));
   }
-  const scale = plan.scaler < 0 ? plan.max / maximum : plan.scaler;
+  const scale = plan.scaler < 0 && maximum ? plan.max / maximum : plan.scaler;
   for (const channel of ['r', 'g', 'b'] as const) {
     raw[channel] = raw[channel].map(value => value * scale);
   }

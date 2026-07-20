@@ -11,6 +11,8 @@ import type { Regions, BoardConfig } from './types.ts';
 
 export interface RomLoad {
   file: string; offset: number; size: number; crc: string;
+  /** MAME marks this physical chip as undumped; its region remains zero-filled. */
+  noDump?: boolean;
   /** same-slot chips from sibling sets (other revisions of the same game) */
   alt?: { file: string; crc: string }[];
   reloadOffsets?: number[];
@@ -114,6 +116,7 @@ export function checkRomSet(
   const check: RomCheck = { perFile: [], missingCritical: [], missingOther: [], crcMismatch: [] };
   for (const spec of specs) {
     for (const load of spec.loads) {
+      if (load.noDump) continue;
       const isCrit = critical.has(spec.region);
       const { bytes, exact } = findRomBytes(load, files, byCrc);
       let status: 'ok' | 'crc' | 'missing';
@@ -313,6 +316,7 @@ export function assembleRegions(
   for (const spec of specs) {
     const bytes = new Uint8Array(spec.size);
     for (const load of spec.loads) {
+      if (load.noDump) continue;
       // primary chip by name/swapped-name/CRC, else a clone-revision
       // alternate from the same slot (see findRomBytes)
       const { bytes: f, exact } = findRomBytes(load, files, byCrc);

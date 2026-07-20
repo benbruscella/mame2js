@@ -13,6 +13,7 @@ import type {
 } from '../runtime/generated-machine.ts';
 import type { BoardConfig } from '../runtime/types.ts';
 import { compileMameHandler } from '../mame/handler-ir.ts';
+import { normalizeMameExecutionSource } from '../mame/cpu-compiler.ts';
 
 export function lowerGeneratedMachine(
   graph: KnowledgeGraph,
@@ -66,6 +67,7 @@ export function lowerGeneratedMachine(
       id: node.id,
       tag: String(node.props.tag),
       type: String(node.props.type),
+      ...(deviceMember(node.props) ? { member: deviceMember(node.props) } : {}),
       ...(typeof node.props.clock === 'number' ? { clock: node.props.clock } : {}),
       ...(sourceRef(node.props) ? { source: sourceRef(node.props) } : {}),
     }));
@@ -85,7 +87,9 @@ export function lowerGeneratedMachine(
         ...(node.props.sourceParameters ? { parameters: String(node.props.sourceParameters) } : {}),
         ...(node.props.sourceBody ? { body: String(node.props.sourceBody) } : {}),
         ...(Object.keys(constants).length ? { constants } : {}),
-        ...(node.props.sourceBody ? { program: compileMameHandler(String(node.props.sourceBody)) } : {}),
+        ...(node.props.sourceBody ? {
+          program: compileMameHandler(normalizeMameExecutionSource(String(node.props.sourceBody))),
+        } : {}),
         ...(sourceRef(node.props) ? { source: sourceRef(node.props) } : {}),
       };
     });
@@ -132,9 +136,14 @@ export function lowerGeneratedMachine(
   const execution: GeneratedExecutionPlan = {
     cpus: board.cpus.map(cpu => ({
       ...cpu,
-      cycleClock: cpu.type === 'mc6809' ? cpu.clock / 4 : cpu.clock,
+      cycleClock: ['mc6809', 'konami1'].includes(cpu.type ?? '')
+        ? cpu.clock / 4
+        : cpu.type === 'i8039'
+          ? cpu.clock / 15
+          : cpu.clock,
       ...(deviceByTag.get(cpu.tag)?.source ? { source: deviceByTag.get(cpu.tag)!.source } : {}),
     })),
+    ...(board.banks?.length ? { banks: board.banks } : {}),
     screen: {
       ...board.screen,
       ...(deviceByTag.get('screen')?.source ? { source: deviceByTag.get('screen')!.source } : {}),
@@ -156,6 +165,7 @@ export function lowerGeneratedMachine(
     } : {}),
   };
   const soundDevice = devices.find(device => device.type === 'NAMCO_WSG');
+  const ayDevices = devices.filter(device => device.type === 'AY8910');
   const sound = soundDevice
     ? {
         kind: 'wsg',
@@ -170,7 +180,17 @@ export function lowerGeneratedMachine(
           .map(callback => callback.targetMethod!))],
         controlOffset: -1,
       }
-    : undefined;
+    : ayDevices.length
+      ? {
+          kind: 'ay8910',
+          deviceTag: ayDevices[0]!.tag,
+          deviceTags: ayDevices.map(device => device.tag),
+          deviceType: 'AY8910',
+          writeMethods: ['address_w', 'data_w'],
+          enableMethods: [],
+          controlOffset: -1,
+        }
+      : undefined;
   return {
     schemaVersion: 2,
     game,
@@ -184,6 +204,11 @@ export function lowerGeneratedMachine(
     ...(compiledVideo ? { video: compiledVideo.plan } : {}),
     ...(sound ? { sound } : {}),
   };
+}
+
+function deviceMember(props: Record<string, unknown>): string | undefined {
+  const config = Array.isArray(props.config) ? props.config.map(String).join('\n') : '';
+  return /\(\s*config\s*,\s*(m_\w+)/.exec(config)?.[1];
 }
 
 function lowerFrameEvents(

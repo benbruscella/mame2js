@@ -7,6 +7,7 @@ import {
 import { join } from 'node:path';
 import type { KnowledgeGraph, KGNode } from '../kg/types.ts';
 import { compileMameHandler } from '../mame/handler-ir.ts';
+import { normalizeMameExecutionSource } from '../mame/cpu-compiler.ts';
 
 interface RuntimeRange {
   kind: string;
@@ -180,7 +181,7 @@ export function buildRuntimeReport(
     .map(node => ({
       node,
       key: `${node.props.ownerClass}.${node.props.method}`,
-      program: compileMameHandler(String(node.props.sourceBody)),
+      program: compileMameHandler(normalizeMameExecutionSource(String(node.props.sourceBody))),
     }));
   const sourceHandlerByKey = new Map(sourceHandlers.map(handler => [handler.key, handler]));
   const handlers: RuntimeRequirement[] = handlerNames.map(name => {

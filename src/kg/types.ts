@@ -7,6 +7,7 @@ export type NodeLabel =
   | 'SourceFile'    // a MAME source file we parsed
   | 'Game'          // one GAME(...) macro row (galaga, galagao, ...)
   | 'MachineConfig' // void cls::name(machine_config&)
+  | 'MemoryBank'    // configure_entries facts from machine_start
   | 'Device'        // a device instantiated inside a machine config (Z80, LS259, SCREEN, ...)
   | 'AddressMap'    // void cls::name(address_map&)
   | 'AddressRange'  // one map(start,end)... statement
@@ -37,6 +38,7 @@ export type RelType =
                       // console control ports whose fields live on the default slot device
   | 'USES_ROMSET'     // Game -> RomSet
   | 'HAS_DEVICE'      // MachineConfig -> Device
+  | 'HAS_BANK'        // MachineConfig -> MemoryBank
   | 'HAS_MAP'         // Device(cpu) -> AddressMap        props: { space }
   | 'HAS_RANGE'       // AddressMap -> AddressRange
   | 'READS'           // AddressRange -> Handler

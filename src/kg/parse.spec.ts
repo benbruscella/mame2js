@@ -5,7 +5,13 @@
 // setter trio (set_refresh_hz/set_size/set_visarea), and slot-device default
 // option capture — plus a GAME-row regression so the arcade path can't drift.
 
-import { parseGames, parseMachineConfigs, parseDefines, parseAddressMaps } from './parse.ts';
+import {
+  parseAddressMaps,
+  parseDefines,
+  parseGames,
+  parseMachineConfigs,
+  parseRomSets,
+} from './parse.ts';
 
 let totalPass = 0;
 let totalFail = 0;
@@ -138,6 +144,26 @@ void timeplt_state::main_map(address_map &map)
   eq('lw8 inline handler name', handler?.method, '__inline_main_map_c300_lw8');
   eq('lw8 inline parameters', handler?.inlineParameters, 'offs_t offset, u8 data');
   eq('lw8 inline body', handler?.inlineBody, 'm_mainlatch->write_d0(offset >> 1, data);');
+}
+
+// --- ROM dump status survives parsing ----------------------------------------
+{
+  const [set] = parseRomSets(`
+ROM_START( test )
+  ROM_REGION( 0x100, "maincpu", 0 )
+  ROM_LOAD( "program.bin", 0x00, 0x80, CRC(1234abcd) SHA1(0123456789abcdef) )
+#if 0
+  ROM_LOAD( "disabled.bin", 0x80, 0x80, CRC(bad00000) SHA1(0000000000000000) )
+#endif
+  ROM_REGION( 0x01, "pal", 0 )
+  ROM_LOAD( "unknown.pal", 0x00, 0x01, NO_DUMP )
+ROM_END
+`);
+  eq('regular ROM is dumped', set.regions[0]?.loads[0]?.noDump, false);
+  eq('regular ROM crc', set.regions[0]?.loads[0]?.crc, '1234abcd');
+  eq('disabled ROM omitted', set.regions[0]?.loads.length, 1);
+  eq('NO_DUMP ROM is marked', set.regions[1]?.loads[0]?.noDump, true);
+  eq('NO_DUMP ROM has no crc', set.regions[1]?.loads[0]?.crc, '');
 }
 
 console.log(`\nparse.spec: ${totalPass} passed, ${totalFail} failed`);

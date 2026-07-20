@@ -12,6 +12,7 @@ import {
 } from './generated-video.ts';
 import {
   dispatchGeneratedCallback,
+  dispatchGeneratedCallbacks,
   executeGeneratedCallbackHandler,
   generatedHandlerRegistry,
   wireGeneratedDevice,
@@ -81,6 +82,7 @@ class IrBoard implements Board {
   private readonly cpus = new Map<string, Cpu>();
   private readonly cpuCycles = new Map<string, number>();
   private readonly devices = new Map<string, Device>();
+  private readonly bankEntries = new Map<string, number>();
   private readonly state: Record<string, unknown> = {};
   private readonly shares: Record<string, Uint8Array> = {};
   private readonly frameRunner: GeneratedFrameRunner;
@@ -106,17 +108,37 @@ class IrBoard implements Board {
     const calls: NonNullable<GeneratedHandlerBindings['calls']> = {};
     this.bindings = { members: this.state, inputs, calls };
     for (const [tag, device] of this.devices) {
+      const specification = machine.devices?.find(candidate => candidate.tag === tag);
       for (const method of device.methodNames()) {
         const invoke = (...args: number[]) => device.call(method, ...args);
         calls[`${tag}.${method}`] = invoke;
         calls[`m_${tag}.${method}`] = invoke;
+        if (specification?.member) calls[`${specification.member}.${method}`] = invoke;
       }
+    }
+    for (const bank of machine.execution.banks ?? []) {
+      this.bankEntries.set(bank.tag, bank.firstEntry);
+      const select = (entry: number): void => {
+        const last = bank.firstEntry + bank.entries - 1;
+        this.bankEntries.set(bank.tag, Math.max(bank.firstEntry, Math.min(last, entry)));
+      };
+      calls[`m_${bank.tag}.set_entry`] = select;
+      calls[`${bank.tag}.set_entry`] = select;
     }
     const sourceHandlers = generatedHandlerRegistry(machine, this.bindings);
     const registry: HandlerRegistry = {
       read: { ...sourceHandlers.read },
       write: { ...sourceHandlers.write },
     };
+    for (const bank of machine.execution.banks ?? []) {
+      registry.read[`bank.${bank.tag}`] = (_address, offset) => {
+        const region = regions[bank.region];
+        if (!region) return 0xff;
+        const entry = this.bankEntries.get(bank.tag) ?? bank.firstEntry;
+        const address = bank.offset + (entry - bank.firstEntry) * bank.stride + offset;
+        return region[address] ?? 0xff;
+      };
+    }
     this.installDeviceHandlers(machine, registry);
     this.installGeneratedSoundHandlers(machine, sinks, registry);
     this.installDeclarativeHandlers(machine, config, inputs, registry);
@@ -128,7 +150,9 @@ class IrBoard implements Board {
           `${machine.game}: CPU ${specification.tag}:${type} has no generated executable definition`,
         );
       }
-      const rom = regions[specification.region];
+      const rom = regions[specification.region] ??
+        regions[Object.keys(regions).find(name =>
+          name.endsWith(`:${specification.region}`)) ?? ''];
       if (!rom) throw new Error(`${machine.game}: missing ROM region ${specification.region}`);
       const bus = new Bus(
         specification.ranges ?? [],
@@ -148,6 +172,33 @@ class IrBoard implements Board {
         write: (address, data) => bus.write(address & mask, data),
         in: bus.in,
         out: bus.out,
+        readSignal: (signal, index) => {
+          const callback = machine.callbacks.find(candidate =>
+            candidate.ownerTag === specification.tag &&
+            candidate.signal === cpuPinSignal(signal, index, 'in'));
+          if (!callback) return signal === 'test' ? 0 : 0xff;
+          if (callback.targetTag && callback.targetMethod) {
+            const device = this.devices.get(callback.targetTag);
+            if (device?.methodNames().includes(callback.targetMethod)) {
+              return device.call(callback.targetMethod);
+            }
+          }
+          return executeGeneratedCallbackHandler(
+            machine,
+            callback,
+            this.bindings,
+          ) ?? 0xff;
+        },
+        writeSignal: (signal, value, index) => {
+          dispatchGeneratedCallbacks(
+            machine,
+            specification.tag,
+            cpuPinSignal(signal, index, 'out'),
+            value,
+            this.bindings,
+            this.callbackEndpoints(sinks),
+          );
+        },
       });
       this.cpus.set(specification.tag, cpu);
       this.cpuCycles.set(specification.tag, 0);
@@ -162,8 +213,26 @@ class IrBoard implements Board {
               this.bindings,
             ) ?? 0xff
           : 0xff;
-      calls[`m_${specification.tag}.set_input_line`] = (_line, state) =>
-        cpu.setIrqLine(state !== 0, interruptVector());
+      const setInputLine = (line: number, state: number): void => {
+        if (line < 0) {
+          if (state !== 0) cpu.nmi();
+          return;
+        }
+        cpu.setIrqLine(state !== 0, interruptVector);
+      };
+      calls[`m_${specification.tag}.set_input_line`] = setInputLine;
+      if (deviceByTag(machine, specification.tag)?.member) {
+        const member = deviceByTag(machine, specification.tag)!.member!;
+        calls[`${member}.set_input_line`] = setInputLine;
+        calls[`${member}.pulse_input_line`] = line => {
+          if (line < 0) cpu.nmi();
+          else {
+            cpu.setIrqLine(true);
+            cpu.setIrqLine(false);
+          }
+        };
+        calls[`${member}.total_cycles`] = () => this.cpuCycles.get(specification.tag) ?? 0;
+      }
       calls[`m_${specification.tag}.pulse_input_line`] = line => {
         if (line < 0) cpu.nmi();
         else {
@@ -173,11 +242,7 @@ class IrBoard implements Board {
       };
     }
     for (const [tag, bytes] of Object.entries(this.shares)) {
-      this.state[`m_${tag}`] = bytes;
-      Object.defineProperty(bytes, 'bytes', {
-        value: () => bytes.length,
-        configurable: true,
-      });
+      bindGeneratedShareState(this.state, tag, bytes);
     }
 
     const callbackEndpoints = this.callbackEndpoints(sinks);
@@ -234,6 +299,9 @@ class IrBoard implements Board {
     for (const device of this.devices.values()) device.reset();
     for (const cpu of this.cpus.values()) cpu.reset();
     for (const tag of this.cpuCycles.keys()) this.cpuCycles.set(tag, 0);
+    for (const bank of this.machine.execution.banks ?? []) {
+      this.bankEntries.set(bank.tag, bank.firstEntry);
+    }
     this.frameRunner.reset();
   }
 
@@ -271,10 +339,12 @@ class IrBoard implements Board {
           const device = this.devices.get(tag);
           if (!device || !device.methodNames().includes(method)) continue;
           if (kind === 'read') {
-            registry.read[key] = (_address, offset) => device.call(method, offset);
+            registry.read[key] = (_address, offset) =>
+              device.arity(method) ? device.call(method, offset) : device.call(method);
           } else {
             registry.write[key] = (_address, offset, data) => {
-              device.call(method, offset, data);
+              if (device.arity(method) <= 1) device.call(method, data);
+              else device.call(method, offset, data);
             };
           }
         }
@@ -295,9 +365,14 @@ class IrBoard implements Board {
     for (const key of usedHandlers(machine, 'write')) {
       if (registry.write[key]) continue;
       if (key.startsWith('watchdog.')) registry.write[key] = () => {};
+      else if (key.startsWith('palette.')) registry.write[key] = () => {};
     }
     for (const key of usedHandlers(machine, 'read')) {
       if (registry.read[key]) continue;
+      if (key.startsWith('watchdog.')) {
+        registry.read[key] = () => 0xff;
+        continue;
+      }
       const custom = config.customs?.find(candidate => candidate.member === key.split('.').at(-1));
       if (custom) registry.read[key] = () => inputs.read(custom.port) & custom.mask;
     }
@@ -320,6 +395,56 @@ class IrBoard implements Board {
   ): void {
     const sound = machine.sound;
     if (!sound) return;
+    if (sound.kind === 'ay8910') {
+      const tags = sound.deviceTags ?? [sound.deviceTag];
+      const addresses = new Map(tags.map(tag => [tag, 0]));
+      const registers = new Map(tags.map(tag => [tag, new Uint8Array(16)]));
+      tags.forEach((tag, chip) => {
+        registry.write[`${tag}.address_w`] = (_address, _offset, data) => {
+          addresses.set(tag, data & 0x0f);
+        };
+        registry.write[`${tag}.data_w`] = (_address, _offset, data) => {
+          const register = addresses.get(tag) ?? 0;
+          registers.get(tag)![register] = data;
+          sinks.soundWrite(chip * 16 + register, data);
+          if (register === 14 || register === 15) {
+            dispatchGeneratedCallbacks(
+              machine,
+              tag,
+              register === 14 ? 'port_a_write_callback' : 'port_b_write_callback',
+              data,
+              this.bindings,
+              this.callbackEndpoints(sinks),
+            );
+          }
+        };
+        registry.read[`${tag}.data_r`] = () => {
+          const register = addresses.get(tag) ?? 0;
+          const callback = machine.callbacks.find(candidate =>
+            candidate.ownerTag === tag &&
+            candidate.signal === (register === 14
+              ? 'port_a_read_callback'
+              : register === 15
+                ? 'port_b_read_callback'
+                : ''));
+          if (callback?.targetTag && callback.targetMethod) {
+            const device = this.devices.get(callback.targetTag);
+            if (device?.methodNames().includes(callback.targetMethod)) {
+              return device.call(callback.targetMethod);
+            }
+          }
+          if (callback?.targetClass && callback.targetMethod) {
+            return executeGeneratedCallbackHandler(
+              machine,
+              callback,
+              this.bindings,
+            ) ?? 0xff;
+          }
+          return registers.get(tag)![register] ?? 0xff;
+        };
+      });
+      return;
+    }
     for (const method of sound.writeMethods) {
       const key = `${sound.deviceTag}.${method}`;
       registry.write[key] = (_address, offset, data) => {
@@ -331,8 +456,26 @@ class IrBoard implements Board {
   private callbackEndpoints(sinks: BoardSinks): Record<string, (state: number) => void> {
     const endpoints: Record<string, (state: number) => void> = {};
     for (const callback of this.machine.callbacks) {
-      if (!callback.targetTag || !callback.targetMethod) continue;
-      const target = `${callback.targetTag}.${callback.targetMethod}`;
+      if (!callback.targetMethod) continue;
+      const target = callback.targetTag
+        ? `${callback.targetTag}.${callback.targetMethod}`
+        : callback.targetClass
+          ? `${callback.targetClass}.${callback.targetMethod}`
+          : callback.targetMethod;
+      if (callback.targetMethod === 'flip_screen_set') {
+        endpoints[target] = state => {
+          this.state.__flip_screen = state ? 1 : 0;
+        };
+      } else if (callback.targetMethod === 'flip_screen_x_set') {
+        endpoints[target] = state => {
+          this.state.__flip_screen_x = state ? 1 : 0;
+        };
+      } else if (callback.targetMethod === 'flip_screen_y_set') {
+        endpoints[target] = state => {
+          this.state.__flip_screen_y = state ? 1 : 0;
+        };
+      }
+      if (!callback.targetTag) continue;
       const device = this.devices.get(callback.targetTag);
       if (device?.methodNames().includes(callback.targetMethod)) {
         endpoints[target] = state => {
@@ -353,6 +496,10 @@ class IrBoard implements Board {
       if (callback.targetTag === 'speaker') {
         endpoints[target] = state => sinks.soundWrite(callback.slot ?? 0, state);
       }
+      const targetType = deviceByTag(this.machine, callback.targetTag)?.type;
+      if (targetType?.startsWith('DAC_')) {
+        endpoints[target] = state => sinks.soundWrite(0x80, state);
+      }
       const sound = this.machine.sound;
       if (
         sound &&
@@ -367,10 +514,42 @@ class IrBoard implements Board {
   }
 }
 
+export function bindGeneratedShareState(
+  state: Record<string, unknown>,
+  tag: string,
+  bytes: Uint8Array,
+): void {
+  Object.defineProperty(bytes, 'bytes', {
+    value: () => bytes.length,
+    configurable: true,
+  });
+  state[`m_${tag}`] = bytes;
+  const indexed = /^(.+)\[(\d+)\]$/.exec(tag);
+  if (!indexed) return;
+  const member = `m_${indexed[1]}`;
+  const values = Array.isArray(state[member]) ? state[member] as unknown[] : [];
+  values[Number(indexed[2])] = bytes;
+  state[member] = values;
+}
+
 function usedHandlers(
   machine: GeneratedMachine,
   kind: 'read' | 'write',
 ): string[] {
   return (machine.maps ?? []).flatMap(map =>
     map.ranges.flatMap(range => range[kind] ? [range[kind]!] : []));
+}
+
+function deviceByTag(machine: GeneratedMachine, tag: string) {
+  return machine.devices?.find(device => device.tag === tag);
+}
+
+function cpuPinSignal(
+  signal: string,
+  index: number | undefined,
+  direction: 'in' | 'out',
+): string {
+  if (signal === 'port') return `p${index ?? 0}_${direction}_cb`;
+  if (signal === 'test') return `t${index ?? 0}_${direction}_cb`;
+  return `${signal}_${direction}_cb`;
 }

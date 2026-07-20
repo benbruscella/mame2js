@@ -269,7 +269,9 @@ function unquote(s: string): string {
 // ---------------------------------------------------------------------------
 
 export interface RomLoad {
-  file: string; offset: number; size: number; crc: string; sha1: string; reloadOffsets: number[];
+  file: string; offset: number; size: number; crc: string; sha1: string;
+  noDump: boolean;
+  reloadOffsets: number[];
 }
 export interface RomRegionDef {
   tag: string; size: number; flags: string; loads: RomLoad[];
@@ -278,6 +280,7 @@ export interface RomSetDef { name: string; regions: RomRegionDef[]; }
 
 export function parseRomSets(src: string): RomSetDef[] {
   const out: RomSetDef[] = [];
+  src = stripDisabledPreprocessorBlocks(src);
   const re = /ROM_START\(\s*(\w+)\s*\)([\s\S]*?)ROM_END/g;
   let m: RegExpExecArray | null;
   while ((m = re.exec(src)) !== null) {
@@ -313,6 +316,7 @@ export function parseRomSets(src: string): RomSetDef[] {
             size: evalExpr(args[2]) ?? 0,
             crc: crc ? crc[1] : '',
             sha1: sha1 ? sha1[1] : '',
+            noDump: /\bNO_DUMP\b/.test(args[3] ?? ''),
             reloadOffsets: [],
           };
           region.loads.push(lastLoad);
@@ -329,6 +333,37 @@ export function parseRomSets(src: string): RomSetDef[] {
     out.push(set);
   }
   return out;
+}
+
+function stripDisabledPreprocessorBlocks(source: string): string {
+  const frames: { parent: boolean; condition: boolean; active: boolean }[] = [];
+  let active = true;
+  return source.split('\n').map(line => {
+    const directive = /^\s*#\s*(if|ifdef|ifndef|elif|else|endif)\b(.*)$/.exec(line);
+    if (!directive) return active ? line : '';
+    const [, kind, expression] = directive;
+    if (kind === 'if' || kind === 'ifdef' || kind === 'ifndef') {
+      const condition = kind === 'if' ? expression.trim() !== '0' : true;
+      frames.push({ parent: active, condition, active: active && condition });
+      active = frames.at(-1)!.active;
+    } else if (kind === 'else') {
+      const frame = frames.at(-1);
+      if (frame) {
+        frame.active = frame.parent && !frame.condition;
+        active = frame.active;
+      }
+    } else if (kind === 'elif') {
+      const frame = frames.at(-1);
+      if (frame) {
+        frame.active = frame.parent && !frame.condition && expression.trim() !== '0';
+        active = frame.active;
+      }
+    } else {
+      frames.pop();
+      active = frames.at(-1)?.active ?? true;
+    }
+    return '';
+  }).join('\n');
 }
 
 // ---------------------------------------------------------------------------

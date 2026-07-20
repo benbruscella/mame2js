@@ -12,11 +12,18 @@ import { GraphBuilder, type KnowledgeGraph } from '../kg/types.ts';
 import { parseMameSource, type MameMacro, type MameTranslationUnit } from './ast.ts';
 import { compileMameHandler } from './handler-ir.ts';
 import { parseZ80OpcodeDsl } from './opcode-dsl.ts';
-import { compileMameZ80 } from './cpu-compiler.ts';
+import {
+  compileMame8080,
+  compileMame6809,
+  compileMameMcs48,
+  compileMameZ80,
+} from './cpu-compiler.ts';
 import { generatedCpuExecutableSource } from './cpu-codegen.ts';
 import { compileMameDevice } from './device-compiler.ts';
 import {
+  compileAy8910,
   compileNamcoWsg,
+  generatedAy8910WorkletSource,
   generatedNamcoWsgWorkletSource,
 } from './audio-compiler.ts';
 
@@ -73,7 +80,9 @@ export interface HardwareClosure {
 }
 
 const DECLARATIVE_HOST_TYPES = new Set([
+  'DAC_8BIT_R2R',
   'DISCRETE',
+  'FILTER_RC',
   'GFXDECODE',
   'PALETTE',
   'SCREEN',
@@ -385,17 +394,44 @@ export function emitHardwareClosure(closure: HardwareClosure, outRoot: string): 
   const z80 = closure.hardware.some(entry => entry.type === 'Z80')
     ? compileMameZ80(closure.mameSource)
     : undefined;
-  const ls259Entry = closure.hardware.find(entry => entry.type === 'LS259');
-  const ls259 = ls259Entry?.definition
-    ? compileMameDevice(closure.mameSource, ls259Entry.definition)
-    : undefined;
+  const generatedCpus = new Map<string, ReturnType<typeof compileMameZ80>>([
+    ...(z80 ? [['Z80', z80] as const] : []),
+    ...(closure.hardware.some(entry => entry.type === 'MC6809')
+      ? [['MC6809', compileMame6809(closure.mameSource, 'MC6809')] as const]
+      : []),
+    ...(closure.hardware.some(entry => entry.type === 'KONAMI1')
+      ? [['KONAMI1', compileMame6809(closure.mameSource, 'KONAMI1')] as const]
+      : []),
+    ...(closure.hardware.some(entry => entry.type === 'I8039')
+      ? [['I8039', compileMameMcs48(closure.mameSource)] as const]
+      : []),
+    ...(closure.hardware.some(entry => entry.type === 'I8080')
+      ? [['I8080', compileMame8080(closure.mameSource)] as const]
+      : []),
+  ]);
+  const generatedDevices = new Map(
+    closure.hardware
+      .filter(entry => ['GENERIC_LATCH_8', 'LS259', 'MB14241'].includes(entry.type))
+      .flatMap(entry => {
+        if (!entry.definition) return [];
+        const device = compileMameDevice(closure.mameSource, entry.definition);
+        if (device.summary.diagnostics) return [];
+        return [[entry.type, device] as const];
+      }),
+  );
   const namcoEntry = closure.hardware.find(entry => entry.type === 'NAMCO_WSG');
   const namcoWsg = namcoEntry?.definition
     ? compileNamcoWsg(closure.mameSource, namcoEntry.definition)
     : undefined;
-  if (ls259Entry && ls259) {
-    const previousMethods = ls259Entry.methods;
-    ls259Entry.methods = ls259.methods.map(method => ({
+  const ayEntry = closure.hardware.find(entry => entry.type === 'AY8910');
+  const ay8910 = ayEntry?.definition
+    ? compileAy8910(closure.mameSource, ayEntry.definition)
+    : undefined;
+  for (const entry of closure.hardware) {
+    const device = generatedDevices.get(entry.type);
+    if (!device) continue;
+    const previousMethods = entry.methods;
+    entry.methods = device.methods.map(method => ({
       name: method.name,
       parameters: method.parameters,
       sourceFile: method.source.file,
@@ -403,39 +439,50 @@ export function emitHardwareClosure(closure: HardwareClosure, outRoot: string): 
       body: '',
       program: method.program,
     }));
-    ls259Entry.sourceFiles = ls259.sourceFiles;
-    closure.summary.methods += ls259Entry.methods.length - previousMethods.length;
+    entry.sourceFiles = device.sourceFiles;
+    closure.summary.methods += entry.methods.length - previousMethods.length;
     closure.summary.compiledMethods +=
-      ls259Entry.methods.filter(method => !method.program.diagnostics.length).length -
+      entry.methods.filter(method => !method.program.diagnostics.length).length -
       previousMethods.filter(method => !method.program.diagnostics.length).length;
     closure.summary.blockedMethods +=
-      ls259Entry.methods.filter(method => method.program.diagnostics.length).length -
+      entry.methods.filter(method => method.program.diagnostics.length).length -
       previousMethods.filter(method => method.program.diagnostics.length).length;
   }
   const executableTypes = new Set<string>([
-    ...(z80 ? ['Z80'] : []),
-    ...(ls259 ? ['LS259'] : []),
+    ...generatedCpus.keys(),
+    ...generatedDevices.keys(),
     ...(namcoWsg ? ['NAMCO_WSG'] : []),
+    ...(ay8910 ? ['AY8910', 'TIMEPLT_AUDIO'] : []),
   ]);
   const compact = {
     ...closure,
     hardware: closure.hardware.map(entry => ({
       ...compactEntry(entry),
       executable: executableTypes.has(entry.type),
-      ...(entry.type === 'Z80'
+      ...(generatedCpus.has(entry.type)
         ? {
             executableKind: 'cpu',
-            executableArtifact: 'devices/z80.cpu.ir.json',
+            executableArtifact: `devices/${entry.type.toLowerCase()}.cpu.ir.json`,
           }
-        : entry.type === 'LS259'
+        : generatedDevices.has(entry.type)
           ? {
             executableKind: 'device',
-            executableArtifact: 'devices/ls259.device.ir.json',
+            executableArtifact: `devices/${entry.type.toLowerCase()}.device.ir.json`,
           }
         : entry.type === 'NAMCO_WSG'
           ? {
               executableKind: 'audio',
               executableArtifact: 'audio/wsg-worklet.ts',
+            }
+        : entry.type === 'AY8910'
+          ? {
+              executableKind: 'audio',
+              executableArtifact: 'audio/ay8910-worklet.ts',
+            }
+        : entry.type === 'TIMEPLT_AUDIO' && ay8910
+          ? {
+              executableKind: 'composition',
+              executableArtifact: 'generated machine handlers',
             }
         : {}),
     })),
@@ -454,28 +501,49 @@ export function emitHardwareClosure(closure: HardwareClosure, outRoot: string): 
     );
     writeFileSync(join(audioDir, 'wsg-worklet.ts'), generatedNamcoWsgWorkletSource(namcoWsg));
   }
+  if (ay8910) {
+    const audioDir = join(root, 'audio');
+    mkdirSync(audioDir, { recursive: true });
+    writeFileSync(
+      join(audioDir, 'ay8910.audio.ir.json'),
+      JSON.stringify(ay8910, null, 2),
+    );
+    writeFileSync(join(audioDir, 'ay8910-worklet.ts'), generatedAy8910WorkletSource(ay8910));
+  }
 
   for (const entry of closure.hardware) {
     const slug = entry.type.toLowerCase();
     const emitted = compactEntry(entry);
     writeFileSync(join(devicesDir, `${slug}.ir.json`), JSON.stringify(emitted, null, 2));
-    if (entry.type === 'Z80' && z80) {
+    const cpu = generatedCpus.get(entry.type);
+    if (cpu) {
       writeFileSync(
-        join(devicesDir, 'z80.cpu.ir.json'),
-        JSON.stringify(z80, null, 2),
+        join(devicesDir, `${slug}.cpu.ir.json`),
+        JSON.stringify(cpu, null, 2),
       );
-      writeFileSync(join(devicesDir, `${slug}.ts`), generatedCpuExecutableSource(z80));
+      writeFileSync(
+        join(devicesDir, `${slug}.ts`),
+        entry.type === 'Z80'
+          ? generatedCpuExecutableSource(cpu)
+          : `// GENERATED from MAME CPU source and operation DSL; do not edit.
+import type { GeneratedCpuDefinition } from '../../../app/modules/runtime/generated-cpu.js';
+
+export const cpu = ${JSON.stringify(cpu, null, 2)} as unknown as GeneratedCpuDefinition;
+export default cpu;
+`,
+      );
       continue;
     }
-    if (entry.type === 'LS259' && ls259) {
+    const device = generatedDevices.get(entry.type);
+    if (device) {
       writeFileSync(
-        join(devicesDir, 'ls259.device.ir.json'),
-        JSON.stringify(ls259, null, 2),
+        join(devicesDir, `${slug}.device.ir.json`),
+        JSON.stringify(device, null, 2),
       );
       writeFileSync(join(devicesDir, `${slug}.ts`), `// GENERATED from MAME device source; do not edit.
 import type { GeneratedDeviceDefinition } from '../../../app/modules/runtime/generated-device.js';
 
-export const device = ${JSON.stringify(ls259, null, 2)} as unknown as GeneratedDeviceDefinition;
+export const device = ${JSON.stringify(device, null, 2)} as unknown as GeneratedDeviceDefinition;
 export default device;
 `);
       continue;

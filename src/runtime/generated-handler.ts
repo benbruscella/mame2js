@@ -45,6 +45,8 @@ interface ExecutionContext {
   localTypes: Record<string, string | undefined>;
 }
 
+const MACHINE_HANDLER_STACK: string[] = [];
+
 interface RuntimeReference {
   reference: string;
 }
@@ -124,17 +126,24 @@ export function generatedHandlerRegistry(
       .filter(handler => handler.program && handler.program.diagnostics.length === 0)
       .map(handler => [`${handler.ownerClass}.${handler.method}`, handler]),
   );
+  const resolve = (key: string): GeneratedHandler | undefined => {
+    const exact = handlers.get(key);
+    if (exact) return exact;
+    const method = key.slice(key.indexOf('.') + 1);
+    const matches = [...handlers.values()].filter(handler => handler.method === method);
+    return matches.length === 1 ? matches[0] : undefined;
+  };
 
   for (const map of machine.maps ?? []) {
     for (const range of map.ranges) {
       if (range.read) {
-        const handler = handlers.get(range.read);
+        const handler = resolve(range.read);
         if (handler?.program && !registry.read[range.read]) {
           registry.read[range.read] = makeReadHandler(machine, handler, bindings);
         }
       }
       if (range.write) {
-        const handler = handlers.get(range.write);
+        const handler = resolve(range.write);
         if (handler?.program && !registry.write[range.write]) {
           registry.write[range.write] = makeWriteHandler(machine, handler, bindings);
         }
@@ -318,12 +327,24 @@ export function executeGeneratedMachineProgram(
       const target = resolve(handler.ownerClass, candidate.method);
       if (!target?.program) return 0;
       const names = parameterNames(target.parameters);
-      return executeGeneratedMachineProgram(
-        machine,
-        target,
-        bindings,
-        Object.fromEntries(names.map((name, index) => [name, values[index] ?? 0])),
-      ).value ?? 0;
+      const key = `${target.ownerClass}.${target.method}`;
+      if (MACHINE_HANDLER_STACK.includes(key) || MACHINE_HANDLER_STACK.length >= 32) {
+        throw new Error(
+          `${machine.game}: recursive generated handler call: ` +
+          [...MACHINE_HANDLER_STACK, key].join(' -> '),
+        );
+      }
+      MACHINE_HANDLER_STACK.push(key);
+      try {
+        return executeGeneratedMachineProgram(
+          machine,
+          target,
+          bindings,
+          Object.fromEntries(names.map((name, index) => [name, values[index] ?? 0])),
+        ).value ?? 0;
+      } finally {
+        MACHINE_HANDLER_STACK.pop();
+      }
     };
     for (const key of [candidate.method, `${candidate.ownerClass}.${candidate.method}`]) {
       if (!referenceCalls[key]) referenceCalls[key] = invoke;
@@ -511,6 +532,14 @@ function evaluateCall(
     }
     const args = expression.args.map(arg => evaluate(arg, context));
     if (name === 'BIT') return (toNumber(args[0]) >> toNumber(args[1])) & 1;
+    if (name === 'TABLE') {
+      const values = args.slice(1);
+      const index = values.length
+        ? ((toNumber(args[0]) % values.length) + values.length) % values.length
+        : 0;
+      return values[index] ?? 0;
+    }
+    if (name === 'TILE_FLIPYX' || name === 'TILE_FLIPXY') return toNumber(args[0]) & 3;
     if (name === 'ioport') return reference(`ioport:${String(args[0] ?? '')}`);
     if (['u8', 'uint8_t'].includes(name)) return toNumber(args[0]) & 0xff;
     if (['s8', 'int8_t'].includes(name)) return (toNumber(args[0]) << 24) >> 24;

@@ -152,6 +152,7 @@ export function buildGraph(mameSrc: string, driverFile: string): KnowledgeGraph 
           file: load.file, offset: load.offset, size: load.size, crc: load.crc, sha1: load.sha1,
           ...spanProps(ast.findMacro('ROM_LOAD', 0, load.file)?.span),
         };
+        if (load.noDump) props.noDump = true;
         if (load.reloadOffsets.length) props.reloadOffsets = load.reloadOffsets;
         g.node('Rom', romId, props);
         g.edge(regId, romId, 'LOADS');
@@ -252,6 +253,26 @@ export function buildGraph(mameSrc: string, driverFile: string): KnowledgeGraph 
       cls: cfg.cls, name: cfg.name, calls: cfg.calls, ...spanProps(cfgFunction?.span),
     });
     definedIn(cfgId, cfgFunction?.span);
+    const machineStart = ast.findFunctionInHierarchy(cfg.cls, 'machine_start');
+    if (machineStart) {
+      const bankRe =
+        /\b(m_\w+)->configure_entries\(\s*([^,]+),\s*([^,]+),\s*memregion\(\s*"([^"]+)"\s*\)->base\(\)\s*\+\s*([^,]+),\s*([^)]+)\)/g;
+      for (const bank of machineStart.body.matchAll(bankRe)) {
+        const tag = bank[1]!.replace(/^m_/, '');
+        const bankId = `${cfgId}/bank:${tag}`;
+        g.node('MemoryBank', bankId, {
+          tag,
+          member: bank[1]!,
+          firstEntry: evalExpr(bank[2]!, consts) ?? 0,
+          entries: evalExpr(bank[3]!, consts) ?? 0,
+          region: bank[4]!,
+          offset: evalExpr(bank[5]!, consts) ?? 0,
+          stride: evalExpr(bank[6]!, consts) ?? 0,
+          ...spanProps(machineStart.span),
+        });
+        g.edge(cfgId, bankId, 'HAS_BANK');
+      }
+    }
     for (const callback of g.nodes.values()) {
       if (callback.label !== 'Callback' || callback.props.signal !== 'timer') continue;
       const targetClass = String(callback.props.targetClass ?? '');

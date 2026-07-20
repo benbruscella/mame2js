@@ -6,6 +6,7 @@ import {
   registerGeneratedMachine,
   wireDeviceCallbacks,
 } from './generated-machine.ts';
+import { bindGeneratedShareState } from './generated-board.ts';
 
 let passed = 0;
 function check(name: string, actual: unknown, expected: unknown): void {
@@ -67,5 +68,17 @@ listeners.get(1)?.(1);
 check('generated callbacks execute with transforms', states, [1, 0]);
 check('bound targets', result.bound, ['fixture_state.irq_w', 'screen.flip_w']);
 check('unimplemented target remains explicit', result.ignored.length, 1);
+
+const shareState: Record<string, unknown> = {};
+const spriteLow = new Uint8Array([1, 2]);
+const spriteHigh = new Uint8Array([3, 4]);
+bindGeneratedShareState(shareState, 'spriteram[0]', spriteLow);
+bindGeneratedShareState(shareState, 'spriteram[1]', spriteHigh);
+check('indexed shares bind as MAME member arrays', shareState.m_spriteram, [
+  spriteLow,
+  spriteHigh,
+]);
+check('indexed shares retain exact generated key', shareState['m_spriteram[1]'], spriteHigh);
+check('shared memory exposes MAME bytes()', (spriteLow as unknown as { bytes(): number }).bytes(), 2);
 
 console.log(`generated-machine.spec: ${passed} passed, 0 failed`);
