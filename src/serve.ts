@@ -28,27 +28,37 @@ const MIME: Record<string, string> = {
  *  availability. ROMs are deliberately NOT scanned: the app never reads ROMs
  *  from the server — the visitor's browser store is the only source.
  *
- * `supported` requires a compiled board and a complete runtime report across
- * ROM-facing composition, inputs, video, audio, and execution hardware. */
+ * `supported` requires both a compiled generated board and a complete
+ * executable hardware closure for that game. The closure comes from the KG,
+ * so source extraction alone can never be mistaken for playability. */
 export async function gamesManifest(outRoot: string, artDir: string): Promise<string> {
   const games: unknown[] = [];
+  const hardware = await readFile(
+    join(outRoot, 'runtime/generated/hardware-manifest.json'),
+    'utf8',
+  ).then(text => JSON.parse(text) as {
+    hardware?: {
+      type: string;
+      status: string;
+      executable?: boolean;
+      uses: { game: string }[];
+    }[];
+  }, () => ({ hardware: [] }));
   for (const entry of await readdir(outRoot).catch(() => [] as string[])) {
     try {
       const meta = JSON.parse(await readFile(join(outRoot, entry, 'meta.json'), 'utf8'));
       await stat(join(outRoot, entry, 'config.json'));
       meta.hasArt = await stat(join(artDir, `${entry}.zip`)).then(() => true, () => false);
-      const report = await readFile(
-        join(outRoot, entry, 'runtime-report.json'),
-        'utf8',
-      ).then(text => JSON.parse(text) as {
-        playable?: boolean;
-        generationGaps?: string[];
-      }, () => ({ playable: false, generationGaps: ['report:missing'] }));
-      const generationGaps = report.generationGaps ?? [];
+      const generationGaps = (hardware.hardware ?? [])
+        .filter(candidate => candidate.uses.some(use => use.game === entry))
+        .filter(candidate =>
+          candidate.status !== 'declarative-host' && !candidate.executable)
+        .map(candidate => candidate.type)
+        .sort();
       const boardCompiled = await stat(
         join(outRoot, 'app/modules/generated', entry, 'board.js'),
       ).then(() => true, () => false);
-      meta.supported = boardCompiled && report.playable === true;
+      meta.supported = boardCompiled && generationGaps.length === 0;
       meta.generationGaps = generationGaps;
       games.push(meta);
     } catch { /* not a generated game dir */ }

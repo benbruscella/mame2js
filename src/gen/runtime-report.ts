@@ -24,9 +24,6 @@ interface RuntimeCpu {
 export interface RuntimeConfigShape {
   game: string;
   family: string;
-  sound?: {
-    kind: string;
-  };
   board: {
     cpus: RuntimeCpu[];
     ranges: RuntimeRange[];
@@ -79,7 +76,6 @@ export interface RuntimeReport {
     handlers: RuntimeRequirement[];
     callbacks: RuntimeRequirement[];
     composition: RuntimeRequirement[];
-    media: RuntimeRequirement[];
   };
   parserGaps: { construct: string; source?: string; raw: string }[];
   handlerCompiler: {
@@ -95,18 +91,11 @@ export interface RuntimeReport {
     screenUpdate?: string;
     screenUpdateCompiled: boolean;
     screenUpdateDiagnostics: string[];
-    videoPlanGenerated: boolean;
-    audioPlanGenerated: boolean;
   };
   summary: Record<GenerationStatus, number>;
 }
 
 const GENERIC_HANDLER_PREFIXES = ['port.', 'bank.', 'watchdog.'];
-
-export interface RuntimeGeneratedArtifacts {
-  video: boolean;
-  audio: boolean;
-}
 
 function hardwareStatus(entry: HardwareGenerationEntry | undefined): {
   status: GenerationStatus;
@@ -131,7 +120,6 @@ export function buildRuntimeReport(
   graph: KnowledgeGraph,
   config: RuntimeConfigShape,
   manifest: HardwareGenerationManifest = {},
-  artifacts: RuntimeGeneratedArtifacts = { video: false, audio: false },
 ): RuntimeReport {
   const sourceNodes = graph.nodes.filter(node => node.label !== 'SourceFile');
   const covered = sourceNodes.filter(node => typeof node.props.sourceFile === 'string').length;
@@ -265,30 +253,13 @@ export function buildRuntimeReport(
     node.label === 'Callback' &&
     ['screen_vblank', 'set_vblank_int', 'set_periodic_int'].includes(String(node.props.signal)),
   ).length;
-  const media: RuntimeRequirement[] = [
-    {
-      name: `video:${screenUpdate ?? 'screen-update'}`,
-      status: artifacts.video ? 'executable' : 'missing',
-      ...(screenCallback ? { source: nodeSource(screenCallback) } : {}),
-      ...(!artifacts.video ? {
-        reason: 'MAME screen behavior has no executable generated video plan',
-      } : {}),
-    },
-    {
-      name: `audio:${config.sound?.kind ?? 'unresolved'}`,
-      status: artifacts.audio ? 'executable' : 'missing',
-      ...(!artifacts.audio ? {
-        reason: 'MAME sound behavior has no executable generated audio plan',
-      } : {}),
-    },
-  ];
 
-  const every = [...cpus, ...devices, ...handlers, ...callbacks, ...composition, ...media];
+  const every = [...cpus, ...devices, ...handlers, ...callbacks, ...composition];
   const summary = Object.fromEntries(
     (['executable', 'generated', 'declarative-host', 'blocked', 'missing'] as const)
       .map(status => [status, every.filter(item => item.status === status).length]),
   ) as Record<GenerationStatus, number>;
-  const generationGaps = [...cpus, ...devices, ...media]
+  const generationGaps = [...cpus, ...devices]
     .filter(item => item.status === 'blocked' || item.status === 'missing')
     .map(item => item.name)
     .sort();
@@ -311,7 +282,7 @@ export function buildRuntimeReport(
       total: sourceNodes.length,
       percent: sourceNodes.length ? Math.round(covered / sourceNodes.length * 1000) / 10 : 100,
     },
-    requirements: { cpus, devices, handlers, callbacks, composition, media },
+    requirements: { cpus, devices, handlers, callbacks, composition },
     parserGaps,
     handlerCompiler: {
       sourceMethods: sourceHandlers.length,
@@ -326,8 +297,6 @@ export function buildRuntimeReport(
       ...(screenUpdate ? { screenUpdate } : {}),
       screenUpdateCompiled,
       screenUpdateDiagnostics: screenProgram?.diagnostics ?? ['screen-update source method not found'],
-      videoPlanGenerated: artifacts.video,
-      audioPlanGenerated: artifacts.audio,
     },
     summary,
   };
@@ -408,14 +377,7 @@ export function refreshRuntimeReports(outRoot: string): number {
     if (!existsSync(graphPath) || !existsSync(configPath)) continue;
     const graph = JSON.parse(readFileSync(graphPath, 'utf8')) as KnowledgeGraph;
     const config = JSON.parse(readFileSync(configPath, 'utf8')) as RuntimeConfigShape;
-    const machinePath = join(outRoot, entry, 'machine.ir.json');
-    const machine = existsSync(machinePath)
-      ? JSON.parse(readFileSync(machinePath, 'utf8')) as { video?: unknown; sound?: unknown }
-      : {};
-    const report = buildRuntimeReport(graph, config, manifest, {
-      video: Boolean(machine.video),
-      audio: Boolean(machine.sound),
-    });
+    const report = buildRuntimeReport(graph, config, manifest);
     writeFileSync(join(outRoot, entry, 'runtime-report.json'), JSON.stringify(report, null, 2));
     writeFileSync(join(outRoot, entry, 'runtime-report.md'), runtimeReportMarkdown(report));
     refreshed++;

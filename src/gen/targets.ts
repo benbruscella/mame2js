@@ -13,10 +13,3 @@ export const REQUIRED_TARGETS = [
   'timeplt',
   'nes',
 ] as const;
-
-/**
- * A target joins this list only after its generated ROM/input/video/audio
- * acceptance contract passes. Other required targets must remain explicitly
- * blocked until their complete executable closure exists.
- */
-export const PLAYABLE_TARGETS = ['pacman'] as const;

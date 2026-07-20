@@ -95,15 +95,7 @@ export interface BoardSinks {
 
 export interface BoardSnapshot {
   frame: number;
-  cpus: {
-    tag: string;
-    pc: number;
-    sp: number;
-    halted: boolean;
-    held?: boolean;
-    /** Total instruction cycles actually executed by the generated CPU. */
-    cycles?: number;
-  }[];
+  cpus: { tag: string; pc: number; sp: number; halted: boolean; held?: boolean }[];
   /** current credit count when the board tracks one (shown in the status line) */
   credits?: number;
   [extra: string]: unknown;

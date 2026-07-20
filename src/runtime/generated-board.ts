@@ -79,7 +79,6 @@ class IrBoard implements Board {
 
   private readonly machine: GeneratedMachine;
   private readonly cpus = new Map<string, Cpu>();
-  private readonly cpuCycles = new Map<string, number>();
   private readonly devices = new Map<string, Device>();
   private readonly state: Record<string, unknown> = {};
   private readonly shares: Record<string, Uint8Array> = {};
@@ -150,7 +149,6 @@ class IrBoard implements Board {
         out: bus.out,
       });
       this.cpus.set(specification.tag, cpu);
-      this.cpuCycles.set(specification.tag, 0);
       const acknowledge = machine.callbacks.find(callback =>
         callback.ownerTag === specification.tag &&
         callback.signal === 'set_irq_acknowledge_callback');
@@ -204,14 +202,7 @@ class IrBoard implements Board {
       machine,
       processors: machine.execution.cpus.map(specification => ({
         tag: specification.tag,
-        run: cycles => {
-          const executed = this.cpus.get(specification.tag)!.run(cycles);
-          this.cpuCycles.set(
-            specification.tag,
-            (this.cpuCycles.get(specification.tag) ?? 0) + executed,
-          );
-          return executed;
-        },
+        run: cycles => this.cpus.get(specification.tag)!.run(cycles),
       })),
       onEvent: event => {
         dispatchGeneratedCallback(
@@ -233,7 +224,6 @@ class IrBoard implements Board {
   reset(): void {
     for (const device of this.devices.values()) device.reset();
     for (const cpu of this.cpus.values()) cpu.reset();
-    for (const tag of this.cpuCycles.keys()) this.cpuCycles.set(tag, 0);
     this.frameRunner.reset();
   }
 
@@ -247,7 +237,6 @@ class IrBoard implements Board {
           pc: cpu.get('PC') || cpu.get('m_pc'),
           sp: cpu.get('SP') || cpu.get('m_s') || cpu.get('m_SP'),
           halted: Boolean(cpu.get('m_halt')),
-          cycles: this.cpuCycles.get(specification.tag) ?? 0,
         };
       }),
       generatedDevices: Object.fromEntries(

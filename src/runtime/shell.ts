@@ -296,7 +296,7 @@ function hex4(v: number): string { return v.toString(16).padStart(4, '0'); }
 
 // ---------------------------------------------------------------------------
 
-export function assembleRegions(
+function assembleRegions(
   specs: RomRegionSpec[],
   files: Map<string, Uint8Array>,
   status: (s: string) => void,

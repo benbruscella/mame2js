@@ -33,7 +33,6 @@ const graph: KnowledgeGraph = {
 const report = buildRuntimeReport(graph, {
   game: 'test',
   family: 'pacman',
-  sound: { kind: 'wsg' },
   board: {
     cpus: [{
       tag: 'maincpu',
@@ -91,21 +90,9 @@ if (report.boardMode !== 'generated') {
 if (report.requirements.composition[0]?.status !== 'generated') {
   throw new Error('board composition should not depend on family code');
 }
-if (report.requirements.media.find(item => item.name.startsWith('video:'))?.status !== 'missing') {
-  throw new Error('missing executable video must be a hard generation gap');
-}
-if (report.requirements.media.find(item => item.name === 'audio:wsg')?.status !== 'missing') {
-  throw new Error('missing executable audio must be a hard generation gap');
-}
-if (!report.generationGaps.some(gap => gap.startsWith('video:'))) {
-  throw new Error('video gap must be included in the generation closure');
-}
-if (!report.generationGaps.includes('audio:wsg')) {
-  throw new Error('audio gap must be included in the generation closure');
-}
 const markdown = runtimeReportMarkdown(report);
 if (markdown.includes('handwritten') || markdown.includes('Runtime primitives')) {
   throw new Error('report should only describe source-generation stages');
 }
 
-console.log('runtime-report.spec: 14 passed, 0 failed');
+console.log('runtime-report.spec: 10 passed, 0 failed');

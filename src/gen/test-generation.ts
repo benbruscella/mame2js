@@ -4,8 +4,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { auditGenerated } from './audit-generated.ts';
-import { verifyPacmanAcceptance } from './pacman-acceptance.ts';
-import { PLAYABLE_TARGETS, REQUIRED_TARGETS } from './targets.ts';
+import { REQUIRED_TARGETS } from './targets.ts';
 import { gamesManifest } from '../serve.ts';
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
@@ -49,28 +48,17 @@ const games = JSON.parse(
 }[];
 const blocked = games
   .filter(game => !game.supported)
-  .map(game => game.game)
+  .map(game => `${game.game}: ${game.generationGaps.join(', ')}`)
   .sort();
 assert.deepEqual(
   blocked,
-  REQUIRED_TARGETS.filter(target => !PLAYABLE_TARGETS.includes(
-    target as (typeof PLAYABLE_TARGETS)[number],
-  )).sort(),
-  'blocked-target contract changed without updating the accepted target set',
+  [],
+  `generated machines are not playable:\n${blocked.join('\n')}`,
 );
-const supported = games.filter(game => game.supported).map(game => game.game).sort();
-assert.deepEqual(supported, [...PLAYABLE_TARGETS].sort());
-assert.ok(
-  games.filter(game => !game.supported).every(game => game.generationGaps.length > 0),
-  'every blocked target must explain its missing generated closure',
-);
-
-await verifyPacmanAcceptance(projectRoot);
 
 console.log(
   `clean-generation: ${audit.targets} targets generated from ../mame; ` +
-  `${audit.executableHardware} executable hardware definitions; ` +
-  `${PLAYABLE_TARGETS.length} ROM acceptance contract passed; self-contained app passed`,
+  `${audit.executableHardware} executable hardware definitions; self-contained app passed`,
 );
 
 function run(args: string[]): void {

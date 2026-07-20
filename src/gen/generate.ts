@@ -614,8 +614,11 @@ export async function generate(graph: KnowledgeGraph, opts: GenerateOptions): Pr
   // the game itself is pure knowledge-graph data — the unified app at
   // out/app loads it at runtime (no per-game compile)
   writeFileSync(join(opts.outDir, 'config.json'), JSON.stringify(config, null, 2));
+  const runtimeReport = buildRuntimeReport(graph, config as unknown as RuntimeConfigShape);
+  writeFileSync(join(opts.outDir, 'runtime-report.json'), JSON.stringify(runtimeReport, null, 2));
+  writeFileSync(join(opts.outDir, 'runtime-report.md'), runtimeReportMarkdown(runtimeReport));
   const compiledVideo = compileMameVideo(graph, opts.mameSrc, machine.id);
-  const generatedMachine = emitGeneratedMachine(
+  emitGeneratedMachine(
     graph,
     opts.game,
     family,
@@ -623,17 +626,6 @@ export async function generate(graph: KnowledgeGraph, opts: GenerateOptions): Pr
     config.board as unknown as BoardConfig,
     compiledVideo,
   );
-  const runtimeReport = buildRuntimeReport(
-    graph,
-    config as unknown as RuntimeConfigShape,
-    {},
-    {
-      video: Boolean(generatedMachine.video),
-      audio: Boolean(generatedMachine.sound),
-    },
-  );
-  writeFileSync(join(opts.outDir, 'runtime-report.json'), JSON.stringify(runtimeReport, null, 2));
-  writeFileSync(join(opts.outDir, 'runtime-report.md'), runtimeReportMarkdown(runtimeReport));
 
   // the full dossier: everything above as a standalone markdown document,
   // readable outside the app (out/<game>/README.md, linked from the modal)

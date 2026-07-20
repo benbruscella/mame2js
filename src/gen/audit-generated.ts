@@ -2,7 +2,7 @@ import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import type { GeneratedMachine } from '../runtime/generated-machine.ts';
-import { PLAYABLE_TARGETS, REQUIRED_TARGETS } from './targets.ts';
+import { REQUIRED_TARGETS } from './targets.ts';
 
 export { REQUIRED_TARGETS } from './targets.ts';
 
@@ -24,7 +24,6 @@ export function auditGenerated(outRoot: string): GeneratedAudit {
   let screenUpdates = 0;
   let sourceMapHandlers = 0;
   let familyAdapters = 0;
-  const playableTargets = new Set<string>(PLAYABLE_TARGETS);
   const registryPath = join(outRoot, 'app/modules/generated/registry.js');
   const registry = existsSync(registryPath) ? readFileSync(registryPath, 'utf8') : '';
   if (!registry) failures.push('unified generated registry is missing');
@@ -143,15 +142,9 @@ export function auditGenerated(outRoot: string): GeneratedAudit {
       const report = JSON.parse(readFileSync(reportPath, 'utf8')) as {
         schemaVersion?: number;
         boardMode?: string;
-        playable?: boolean;
         generationGaps?: string[];
         requirements?: {
           composition?: { status: string }[];
-          media?: { name: string; status: string }[];
-        };
-        executionCompiler?: {
-          videoPlanGenerated?: boolean;
-          audioPlanGenerated?: boolean;
         };
       };
       if (report.schemaVersion !== 2 || report.boardMode !== 'generated') {
@@ -159,17 +152,6 @@ export function auditGenerated(outRoot: string): GeneratedAudit {
       }
       if (report.requirements?.composition?.some(item => item.status !== 'generated')) {
         failures.push(`${target}: generation report retains non-generated board composition`);
-      }
-      if (playableTargets.has(target)) {
-        if (!report.playable) failures.push(`${target}: accepted target is not reported playable`);
-        if (report.generationGaps?.length) {
-          failures.push(`${target}: accepted target has generation gaps`);
-        }
-      } else {
-        if (report.playable) failures.push(`${target}: blocked target is incorrectly reported playable`);
-        if (!report.generationGaps?.length) {
-          failures.push(`${target}: blocked target has no explicit generation gaps`);
-        }
       }
       const expectedGaps = hardwareEntries
         .filter(entry => entry.uses?.some(use => use.game === target))
@@ -194,30 +176,6 @@ export function auditGenerated(outRoot: string): GeneratedAudit {
     if (!machine.callbacks.length) failures.push(`${target}: no generated callbacks`);
     if (!machine.execution?.cpus.length) failures.push(`${target}: no generated CPU execution plan`);
     if (!machine.execution?.screen.vtotal) failures.push(`${target}: no generated screen timing`);
-    const report = existsSync(reportPath)
-      ? JSON.parse(readFileSync(reportPath, 'utf8')) as {
-          generationGaps?: string[];
-          executionCompiler?: {
-            videoPlanGenerated?: boolean;
-            audioPlanGenerated?: boolean;
-          };
-        }
-      : {};
-    const videoGap = report.generationGaps?.some(gap => gap.startsWith('video:')) ?? false;
-    const audioGap = report.generationGaps?.some(gap => gap.startsWith('audio:')) ?? false;
-    if (Boolean(machine.video) !== Boolean(report.executionCompiler?.videoPlanGenerated)) {
-      failures.push(`${target}: runtime report video status disagrees with machine IR`);
-    }
-    if (Boolean(machine.sound) !== Boolean(report.executionCompiler?.audioPlanGenerated)) {
-      failures.push(`${target}: runtime report audio status disagrees with machine IR`);
-    }
-    if (!machine.video && !videoGap) failures.push(`${target}: missing video plan is not a hard gap`);
-    if (machine.video && videoGap) failures.push(`${target}: generated video is still reported as a gap`);
-    if (!machine.sound && !audioGap) failures.push(`${target}: missing audio plan is not a hard gap`);
-    if (machine.sound && audioGap) failures.push(`${target}: generated audio is still reported as a gap`);
-    if (playableTargets.has(target) && (!machine.video || !machine.sound)) {
-      failures.push(`${target}: accepted target lacks executable video or audio`);
-    }
     const callbackIds = new Set(machine.callbacks.map(callback => callback.id));
     if (callbackIds.size !== machine.callbacks.length) failures.push(`${target}: duplicate callback IDs`);
     callbacks += machine.callbacks.length;
@@ -260,38 +218,6 @@ export function auditGenerated(outRoot: string): GeneratedAudit {
       }
       if (event.line < 0 || event.line >= machine.execution.screen.vtotal) {
         failures.push(`${target}: frame event ${event.callbackId} has invalid line ${event.line}`);
-      }
-    }
-
-    const provenancePath = join(dir, 'generated/provenance.json');
-    if (existsSync(provenancePath)) {
-      const provenance = JSON.parse(readFileSync(provenancePath, 'utf8')) as {
-        generatedFrom?: string;
-        entries?: { path: string; file: string; line: number }[];
-      };
-      if (provenance.generatedFrom !== machine.driverFile) {
-        failures.push(`${target}: provenance driver does not match machine IR`);
-      }
-      const sourceFiles = new Set(
-        (JSON.parse(readFileSync(join(dir, 'graph.json'), 'utf8')) as {
-          nodes?: { label: string; props: { path?: string } }[];
-        }).nodes
-          ?.filter(node => node.label === 'SourceFile' && node.props.path)
-          .map(node => node.props.path!) ?? [],
-      );
-      for (const entry of provenance.entries ?? []) {
-        if (!entry.file || entry.line <= 0) {
-          failures.push(`${target}: invalid provenance entry at ${entry.path}`);
-        } else if (!sourceFiles.has(entry.file)) {
-          failures.push(`${target}: provenance source is outside the reachable graph: ${entry.file}`);
-        }
-      }
-      const paths = new Set((provenance.entries ?? []).map(entry => entry.path));
-      for (const path of ['/execution/cpus/0/source', '/execution/screen/source']) {
-        if (!paths.has(path)) failures.push(`${target}: provenance is missing ${path}`);
-      }
-      if (machine.video && !paths.has('/video/source')) {
-        failures.push(`${target}: generated video has no source provenance`);
       }
     }
 

@@ -366,16 +366,6 @@ export function buildGraph(mameSrc: string, driverFile: string): KnowledgeGraph 
     });
   }
 
-  // Source spans are executable dependencies, not annotations. Ensure every
-  // extracted node reaches the exact compilation unit that supplied it so a
-  // per-game traversal retains all files later cited by generated provenance.
-  for (const node of [...g.nodes.values()]) {
-    if (node.label === 'SourceFile' || typeof node.props.sourceFile !== 'string') continue;
-    const sourceFile = node.props.sourceFile;
-    g.node('SourceFile', `file:${sourceFile}`, { path: sourceFile });
-    g.edge(node.id, `file:${sourceFile}`, 'DEFINED_IN');
-  }
-
   return g.toGraph({
     tool: 'mamekit',
     version: VERSION,
