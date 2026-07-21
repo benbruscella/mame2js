@@ -31,13 +31,18 @@ let renders = 0;
 let vblanks = 0;
 const lines: number[] = [];
 const events: string[] = [];
+const timeline: string[] = [];
 const runner = new GeneratedFrameRunner({
   machine,
-  processors: [{ tag: 'maincpu', run: budget => { cycles += budget; return budget; } }],
+  processors: [{ tag: 'maincpu', run: budget => {
+    cycles += budget;
+    timeline.push('cpu');
+    return budget;
+  } }],
   video: {
     width: 1,
     height: 1,
-    render: () => { renders++; },
+    render: () => { renders++; timeline.push('render'); },
     vblank: () => { vblanks++; },
   },
   onLine: (line, phase) => {
@@ -52,9 +57,11 @@ assert.deepEqual(lines, [0, 1, 2]);
 assert.deepEqual(events, ['callback:vblank']);
 assert.equal(vblanks, 1);
 assert.equal(renders, 1);
+assert.deepEqual(timeline, ['cpu', 'cpu', 'cpu', 'render']);
 assert.equal(runner.frameCount, 1);
 
 const scanlines: number[] = [];
+const scanlineTimeline: string[] = [];
 const scanlineMachine: GeneratedMachine = {
   ...machine,
   execution: {
@@ -64,19 +71,26 @@ const scanlineMachine: GeneratedMachine = {
 };
 new GeneratedFrameRunner({
   machine: scanlineMachine,
-  processors: [{ tag: 'maincpu', run: budget => budget }],
+  processors: [{ tag: 'maincpu', run: budget => {
+    scanlineTimeline.push('cpu');
+    return budget;
+  } }],
   video: {
     width: 1,
     height: 1,
     render: () => { throw new Error('scanline mode rendered a full frame'); },
-    renderLine: (_frame, line) => { scanlines.push(line); },
+    renderLine: (_frame, line) => {
+      scanlines.push(line);
+      scanlineTimeline.push(`line:${line}`);
+    },
     vblank: () => {},
   },
 }).frame(new Uint32Array(1));
 assert.deepEqual(scanlines, [0, 1, 2]);
+assert.deepEqual(scanlineTimeline, ['cpu', 'line:0', 'cpu', 'line:1', 'cpu', 'line:2']);
 
 runner.reset();
 assert.equal(runner.frameCount, 0);
 assert.deepEqual(runner.currentCarry, [0]);
 
-console.log('generated-frame.spec: 8 passed');
+console.log('generated-frame.spec: 10 passed');

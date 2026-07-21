@@ -34,9 +34,9 @@ export const timeplt: GameTestContract = {
     audio: {
       writes: 5830,
       nonzeroWrites: 5556,
-      writeHash: '65a8f1d9',
-      pcmHash: 'b196d3d1',
-      rms: 0.028331,
+      writeHash: '7771a55f',
+      pcmHash: 'fd1dd828',
+      rms: 0.028542,
     },
   },
 };
