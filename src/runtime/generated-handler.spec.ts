@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { compileMameHandler } from '../mame/handler-ir.ts';
 import {
   executeGeneratedHandler,
+  executeGeneratedMachineProgram,
   generatedHandlerRegistry,
   wireGeneratedDevice,
 } from './generated-handler.ts';
@@ -130,4 +131,42 @@ wireGeneratedDevice(device, {
 q0?.(1);
 assert.equal(irqMask, 1);
 
-console.log('generated-handler.spec: 10 passed');
+const filterCalls: number[][] = [];
+const filterMachine: GeneratedMachine = {
+  ...machine,
+  handlers: [{
+    id: 'handler:audio:filter_w',
+    ownerClass: 'audio_device',
+    method: 'filter_w',
+    parameters: 'offs_t offset, uint8_t data',
+    program: compileMameHandler('set_filter(0, 0, offset & 3);'),
+  }, {
+    id: 'handler:audio:set_filter',
+    ownerClass: 'audio_device',
+    method: 'set_filter',
+    parameters: 'int no, int ch, int data',
+    program: compileMameHandler(`
+      int C = 0;
+      if (BIT(data, 0)) C += 220000;
+      if (BIT(data, 1)) C += 47000;
+      m_filter[no][ch]->filter_rc_set_RC(
+        filter_rc_device::LOWPASS_3R, 1000, 5100, 0, CAP_P(C));
+    `),
+  }],
+};
+executeGeneratedMachineProgram(
+  filterMachine,
+  filterMachine.handlers![0]!,
+  {
+    members: {
+      m_filter: [[{
+        filter_rc_set_RC: (...values: number[]) => { filterCalls.push(values); },
+      }]],
+    },
+  },
+  { offset: 3, data: 0 },
+);
+assert.deepEqual(filterCalls[0]?.slice(0, 4), [0, 1000, 5100, 0]);
+assert.ok(Math.abs(filterCalls[0]![4]! - 267000e-12) < 1e-15);
+
+console.log('generated-handler.spec: 12 passed');

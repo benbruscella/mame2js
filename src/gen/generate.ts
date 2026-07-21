@@ -11,7 +11,7 @@ import { parseSoftwareList, buildCatalog } from '../kg/softlist.ts';
 import {
   buildRuntimeReport, runtimeReportMarkdown, type RuntimeConfigShape,
 } from './runtime-report.ts';
-import { emitGeneratedMachine } from './emit-machine.ts';
+import { emitGeneratedMachine, lowerAudioRoutes } from './emit-machine.ts';
 import type { BoardConfig } from '../runtime/types.ts';
 import { compileMameVideo } from '../mame/video-compiler.ts';
 import {
@@ -275,6 +275,8 @@ export async function generate(graph: KnowledgeGraph, opts: GenerateOptions): Pr
     vtotal,
     vbstart,
     vbend,
+    updateMode: (screenDev?.props.screenVideoAttributes as string[] | undefined)
+      ?.includes('VIDEO_UPDATE_SCANLINE') ? 'scanline' as const : 'frame' as const,
     rotate: monitor === 'ROT90' ? 90 : monitor === 'ROT270' ? 270 : monitor === 'ROT180' ? 180 : 0,
   };
 
@@ -285,6 +287,10 @@ export async function generate(graph: KnowledgeGraph, opts: GenerateOptions): Pr
   };
   // sound device -> runtime SoundCore kind (device-library mapping, not game-specific)
   const ayChips = devices.filter(d => d.props.type === 'AY8910');
+  const ayRoutes = lowerAudioRoutes(
+    graph,
+    ayChips.map(device => ({ id: device.id, tag: String(device.props.tag) })),
+  );
   const ymChips = devices.filter(d => d.props.type === 'YM2203');
   // Per-family analog mix weights, hand-derived from each driver's discrete
   // resistor network — the one MAME layer the graph can't carry yet (the
@@ -314,7 +320,13 @@ export async function generate(graph: KnowledgeGraph, opts: GenerateOptions): Pr
         : ymChips.length
           ? { kind: 'ym2203', clock: Number(ymChips[0].props.clock), chips: ymChips.length }
           : ayChips.length
-            ? { kind: 'ay8910', clock: Number(ayChips[0].props.clock), chips: ayChips.length, ...AY_MIX[soundFamily] }
+            ? {
+                kind: 'ay8910',
+                clock: Number(ayChips[0].props.clock),
+                chips: ayChips.length,
+                ...(ayRoutes.length ? { routes: ayRoutes } : {}),
+                ...AY_MIX[soundFamily],
+              }
             : { kind: 'none' };
 
   // --- roms ----------------------------------------------------------------------

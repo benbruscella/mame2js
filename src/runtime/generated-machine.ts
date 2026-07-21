@@ -143,6 +143,8 @@ export interface GeneratedScreen {
   vtotal: number;
   vbstart: number;
   vbend?: number;
+  /** Rendering cadence requested by MAME's VIDEO_UPDATE_* screen attributes. */
+  updateMode?: 'frame' | 'scanline';
   rotate: number;
   source?: GeneratedSourceRef;
 }
@@ -197,6 +199,10 @@ export interface GeneratedPromPalettePlan {
   channels: {
     channel: 'r' | 'g' | 'b';
     bits: number[];
+    /** Byte offset from the palette index for each source bit. */
+    offsets?: number[];
+    /** MAME-declared contribution for each bit when the source uses fixed weights. */
+    weights?: number[];
     resistances: number[];
     pulldown: number;
     pullup: number;
@@ -241,6 +247,15 @@ export interface GeneratedSoundBinding {
   writeMethods: string[];
   enableMethods: string[];
   controlOffset: number;
+  routes?: GeneratedAudioRoute[];
+}
+
+export interface GeneratedAudioRoute {
+  chip: number;
+  channel: number;
+  gain: number;
+  target: string;
+  filter?: { index: number; bank: number; channel: number };
 }
 
 export interface GeneratedMachine {

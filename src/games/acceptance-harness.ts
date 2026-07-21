@@ -19,18 +19,21 @@ import type {
 interface SoundWrite {
   offset: number;
   data: number;
+  frac?: number;
 }
 
 interface AudioProbe {
-  apply(write: SoundWrite): void;
-  render(capture: boolean): void;
+  render(writes: readonly SoundWrite[], capture: boolean): void;
   finish(writes: SoundWrite[]): GameAcceptanceGolden['audio'];
 }
 
-interface AyCore {
-  readonly nativeRate: number;
-  write(register: number, data: number): void;
+interface AyMixer {
+  write(offset: number, data: number): void;
   sample(): number;
+}
+
+interface AyFrameRenderer {
+  render(writes: readonly SoundWrite[]): Float32Array;
 }
 
 interface WsgCore {
@@ -84,7 +87,7 @@ export async function runGameAcceptance(
       boardConfig: ShellConfig['board'],
       regions: Regions,
       inputs: KeyboardInput,
-      sinks: { soundWrite(offset: number, data: number): void },
+      sinks: { soundWrite(offset: number, data: number, frac?: number): void },
     ): Board;
   };
 
@@ -100,8 +103,8 @@ export async function runGameAcceptance(
     regions,
     input,
     {
-      soundWrite: (offset, data) => {
-        const write = { offset, data };
+      soundWrite: (offset, data, frac) => {
+        const write = { offset, data, frac };
         pendingWrites.push(write);
         allWrites.push(write);
       },
@@ -114,12 +117,12 @@ export async function runGameAcceptance(
   const framebuffer = new Uint32Array(board.fbWidth * board.fbHeight);
   const checkpoints: GameAcceptanceGolden['checkpoints'] = {};
   const checkpointFrames = new Set(contract.checkpoints);
+  const startedAt = performance.now();
   const runFrame = (): void => {
     pendingWrites.length = 0;
     board.frame(framebuffer);
-    for (const write of pendingWrites) audio.apply(write);
     const snapshot = board.snapshot();
-    audio.render(snapshot.frame >= 120);
+    audio.render(pendingWrites, snapshot.frame >= 120);
     if (checkpointFrames.has(snapshot.frame)) {
       checkpoints[String(snapshot.frame)] = {
         video: hash(new Uint8Array(framebuffer.buffer)),
@@ -139,6 +142,8 @@ export async function runGameAcceptance(
     );
   }
   while (board.snapshot().frame < contract.frames) runFrame();
+  const elapsedSeconds = (performance.now() - startedAt) / 1000;
+  const emulatedFps = contract.frames / elapsedSeconds;
 
   const result: GameAcceptanceGolden = {
     regions: Object.fromEntries(
@@ -153,6 +158,15 @@ export async function runGameAcceptance(
   assert.ok(new Set(Object.values(checkpoints).map(value => value.video)).size >= 3);
   assert.ok(result.audio.writes > 0, `${contract.game}: generated sound has no writes`);
   assert.ok(result.audio.rms > 0.001, `${contract.game}: generated sound is silent`);
+  assert.ok(
+    emulatedFps >= contract.minimumFps,
+    `${contract.game}: ${emulatedFps.toFixed(1)} fps is below the ` +
+      `${contract.minimumFps} fps acceptance floor`,
+  );
+  console.log(
+    `${contract.game}: ${emulatedFps.toFixed(1)} emulated fps ` +
+      `(minimum ${contract.minimumFps})`,
+  );
 
   if (process.env.MAMEKIT_UPDATE_GOLDENS === '1') {
     console.log(`${contract.game}:\n${JSON.stringify(result, null, 2)}`);
@@ -193,28 +207,43 @@ async function createAudioProbe(
   if (config.sound.kind === 'ay8910') {
     const generated = await import(
       moduleUrl(join(outRoot, 'runtime/generated/audio/ay8910-worklet.js'))
-    ) as { GeneratedAy8910Core: new (clock: number) => AyCore };
-    const cores = Array.from(
-      { length: config.sound.chips ?? 1 },
-      () => new generated.GeneratedAy8910Core(config.sound.clock ?? 1_789_772),
+    ) as {
+      GeneratedAy8910Mixer: new (
+        clock: number,
+        chips: number,
+        outputRate: number,
+        routes?: NonNullable<ShellConfig['sound']['routes']>,
+        chipGains?: number[],
+      ) => AyMixer;
+      GeneratedAy8910FrameRenderer: new (
+        mixer: AyMixer,
+        outputRate: number,
+        refresh: number,
+      ) => AyFrameRenderer;
+    };
+    const outputRate = 48_000;
+    const mixer = new generated.GeneratedAy8910Mixer(
+      config.sound.clock ?? 1_789_772,
+      config.sound.chips ?? 1,
+      outputRate,
+      config.sound.routes,
+      config.sound.chipGains,
     );
-    const gains = cores.map((_, index) => config.sound.chipGains?.[index] ?? 1);
-    const gainTotal = gains.reduce((sum, gain) => sum + gain, 0) || 1;
-    let muted = false;
-    return sampledAudioProbe(
-      cores[0]?.nativeRate ?? 1,
+    const renderer = new generated.GeneratedAy8910FrameRenderer(
+      mixer,
+      outputRate,
       config.board.screen.refresh,
-      write => {
-        if (write.offset < 0) muted = write.data !== 0;
-        else cores[write.offset >> 4]?.write(write.offset & 0x0f, write.data);
-      },
-      () => muted
-        ? 0
-        : cores.reduce(
-          (sum, core, index) => sum + core.sample() * gains[index]!,
-          0,
-        ) / gainTotal,
     );
+    const chunks: Float32Array[] = [];
+    return {
+      render(writes, capture) {
+        const samples = renderer.render(writes);
+        if (capture) chunks.push(samples);
+      },
+      finish(writes) {
+        return audioResult(writes, chunks);
+      },
+    };
   }
   if (config.sound.kind === 'wsg') {
     const generated = await import(
@@ -229,11 +258,11 @@ async function createAudioProbe(
     const chunks: Float32Array[] = [];
     let sampleCarry = 0;
     return {
-      apply(write) {
-        if (write.offset < 0) core.soundEnable(write.data);
-        else core.write(write.offset, write.data);
-      },
-      render(capture) {
+      render(writes, capture) {
+        for (const write of writes) {
+          if (write.offset < 0) core.soundEnable(write.data);
+          else core.write(write.offset, write.data);
+        }
         sampleCarry += core.sampleRate / config.board.screen.refresh;
         const count = Math.floor(sampleCarry);
         sampleCarry -= count;
@@ -247,30 +276,6 @@ async function createAudioProbe(
     };
   }
   throw new Error(`${config.game}: unsupported acceptance sound kind ${config.sound.kind}`);
-}
-
-function sampledAudioProbe(
-  nativeRate: number,
-  refresh: number,
-  apply: (write: SoundWrite) => void,
-  sample: () => number,
-): AudioProbe {
-  const chunks: Float32Array[] = [];
-  let sampleCarry = 0;
-  return {
-    apply,
-    render(capture) {
-      sampleCarry += nativeRate / refresh;
-      const count = Math.floor(sampleCarry);
-      sampleCarry -= count;
-      const samples = new Float32Array(count);
-      for (let index = 0; index < count; index++) samples[index] = sample();
-      if (capture) chunks.push(samples);
-    },
-    finish(writes) {
-      return audioResult(writes, chunks);
-    },
-  };
 }
 
 function audioResult(
@@ -350,4 +355,3 @@ function hash(bytes: Uint8Array): string {
 function moduleUrl(path: string): string {
   return pathToFileURL(path).href;
 }
-

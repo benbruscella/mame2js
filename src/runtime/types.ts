@@ -13,6 +13,8 @@ export interface VideoRenderer {
   readonly height: number;   // native visible height (galaga: 224)
   /** Render one full frame as packed ABGR (canvas ImageData byte order). */
   render(frame: Uint32Array): void;
+  /** Render one native raster line when MAME requests scanline updates. */
+  renderLine?(frame: Uint32Array, line: number): void;
   /** Called once per vblank to latch per-frame state (starfield scroll, etc). */
   vblank(): void;
 }

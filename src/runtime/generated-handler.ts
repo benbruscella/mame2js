@@ -54,10 +54,24 @@ interface ExecutionResult {
   value?: unknown;
 }
 
+interface PreparedMachineCalls {
+  referenceCalls: NonNullable<GeneratedHandlerBindings['referenceCalls']>;
+  callParameters: NonNullable<GeneratedHandlerBindings['callParameters']>;
+}
+
+const MACHINE_CALL_CACHE = new WeakMap<
+  GeneratedMachine,
+  WeakMap<GeneratedHandlerBindings, Map<string, PreparedMachineCalls>>
+>();
+
 const DEFAULT_CONSTANTS: Record<string, number> = {
   ASSERT_LINE: 1,
   CLEAR_LINE: 0,
   HOLD_LINE: 2,
+  'filter_rc_device::LOWPASS_3R': 0,
+  'filter_rc_device::LOWPASS': 2,
+  'filter_rc_device::HIGHPASS': 3,
+  'filter_rc_device::AC': 4,
   INPUT_LINE_IRQ0: 0,
   INPUT_LINE_NMI: -1,
   INPUT_LINE_RESET: -2,
@@ -313,33 +327,7 @@ export function executeGeneratedMachineProgram(
   bindings: GeneratedHandlerBindings,
   args: Record<string, unknown>,
 ): { returned: boolean; value?: unknown } {
-  const compiled = (machine.handlers ?? []).filter(candidate =>
-    candidate.program && candidate.program.diagnostics.length === 0);
-  const referenceCalls = { ...bindings.referenceCalls };
-  const callParameters = { ...bindings.callParameters };
-  const resolve = (ownerClass: string, method: string): GeneratedHandler | undefined =>
-    compiled.find(candidate => candidate.ownerClass === ownerClass && candidate.method === method) ??
-    compiled.find(candidate => candidate.method === method);
-  for (const candidate of compiled) {
-    const invoke = (...values: GeneratedCallArgument[]) => {
-      const target = resolve(handler.ownerClass, candidate.method);
-      if (!target?.program) return 0;
-      const names = parameterNames(target.parameters);
-      return executeGeneratedMachineProgram(
-        machine,
-        target,
-        bindings,
-        Object.fromEntries(names.map((name, index) => [name, values[index] ?? 0])),
-      ).value ?? 0;
-    };
-    for (const key of [candidate.method, `${candidate.ownerClass}.${candidate.method}`]) {
-      if (!referenceCalls[key]) referenceCalls[key] = invoke;
-      callParameters[key] = (candidate.parameters ?? '')
-        .split(',')
-        .map(parameter => parameter.trim())
-        .filter(Boolean);
-    }
-  }
+  const prepared = preparedMachineCalls(machine, bindings, handler.ownerClass);
   const suffix = /_(\d+)$/.exec(handler.method);
   const generatedBindings: GeneratedHandlerBindings = {
     ...bindings,
@@ -348,10 +336,67 @@ export function executeGeneratedMachineProgram(
       ...bindings.constants,
       ...(suffix ? { Which: Number(suffix[1]) } : {}),
     },
-    referenceCalls,
-    callParameters,
+    referenceCalls: prepared.referenceCalls,
+    callParameters: prepared.callParameters,
   };
   return executeGeneratedProgram(handler.program!, generatedBindings, args);
+}
+
+function preparedMachineCalls(
+  machine: GeneratedMachine,
+  bindings: GeneratedHandlerBindings,
+  ownerClass: string,
+): PreparedMachineCalls {
+  let byBindings = MACHINE_CALL_CACHE.get(machine);
+  if (!byBindings) {
+    byBindings = new WeakMap();
+    MACHINE_CALL_CACHE.set(machine, byBindings);
+  }
+  let byOwner = byBindings.get(bindings);
+  if (!byOwner) {
+    byOwner = new Map();
+    byBindings.set(bindings, byOwner);
+  }
+  const cached = byOwner.get(ownerClass);
+  if (cached) return cached;
+
+  const compiled = (machine.handlers ?? []).filter(candidate =>
+    candidate.program && candidate.program.diagnostics.length === 0);
+  const referenceCalls = { ...bindings.referenceCalls };
+  const callParameters = { ...bindings.callParameters };
+  const resolve = (method: string): GeneratedHandler | undefined =>
+    compiled.find(candidate => candidate.ownerClass === ownerClass && candidate.method === method) ??
+    compiled.find(candidate => candidate.method === method);
+  const invoke = (target: GeneratedHandler, values: GeneratedCallArgument[]): unknown => {
+    const names = parameterNames(target.parameters);
+    return executeGeneratedMachineProgram(
+      machine,
+      target,
+      bindings,
+      Object.fromEntries(names.map((name, index) => [name, values[index] ?? 0])),
+    ).value ?? 0;
+  };
+  for (const candidate of compiled) {
+    const qualified = `${candidate.ownerClass}.${candidate.method}`;
+    if (!referenceCalls[qualified]) {
+      referenceCalls[qualified] = (...values) => invoke(candidate, values);
+    }
+    if (!referenceCalls[candidate.method]) {
+      referenceCalls[candidate.method] = (...values) => {
+        const target = resolve(candidate.method);
+        return target ? invoke(target, values) : 0;
+      };
+    }
+    const parameters = (candidate.parameters ?? '')
+      .split(',')
+      .map(parameter => parameter.trim())
+      .filter(Boolean);
+    callParameters[qualified] = parameters;
+    callParameters[candidate.method] = parameters;
+  }
+  const prepared = { referenceCalls, callParameters };
+  byOwner.set(ownerClass, prepared);
+  return prepared;
 }
 
 function executeGeneratedMachineHandler(
@@ -518,6 +563,11 @@ function evaluateCall(
     }
     const args = expression.args.map(arg => evaluate(arg, context));
     if (name === 'BIT') return (toNumber(args[0]) >> toNumber(args[1])) & 1;
+    if (name === 'CAP_P') return toNumber(args[0]) * 1e-12;
+    if (name === 'CAP_N') return toNumber(args[0]) * 1e-9;
+    if (name === 'CAP_U') return toNumber(args[0]) * 1e-6;
+    if (name === 'RES_K') return toNumber(args[0]) * 1e3;
+    if (name === 'RES_M') return toNumber(args[0]) * 1e6;
     if (name === 'TILE_FLIPYX') return toNumber(args[0]) & 3;
     if (name === 'TILE_FLIPXY') {
       const value = toNumber(args[0]);

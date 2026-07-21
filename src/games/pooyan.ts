@@ -9,6 +9,7 @@ export const pooyan: GameTestContract = {
   screen: { width: 256, height: 224 },
   soundKind: 'ay8910',
   frames: 600,
+  minimumFps: 45,
   checkpoints: [1, 60, 180, 300, 420, 600],
   actions: [
     { atFrame: 300, code: 'Digit5', heldFrames: 10, releasedFrames: 20 },
@@ -31,11 +32,11 @@ export const pooyan: GameTestContract = {
       600: { video: '359901e1', state: '90658536' },
     },
     audio: {
-      writes: 2264,
-      nonzeroWrites: 1969,
-      writeHash: '60b11ec4',
-      pcmHash: 'a7108945',
-      rms: 0.022053,
+      writes: 2304,
+      nonzeroWrites: 1986,
+      writeHash: '0628171c',
+      pcmHash: 'b886d612',
+      rms: 0.020839,
     },
   },
 };

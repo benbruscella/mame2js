@@ -1,6 +1,10 @@
 import { compileMameHandler } from '../mame/handler-ir.ts';
 import type { GeneratedMachine } from './generated-machine.ts';
-import { GeneratedVideoRenderer, type GeneratedVideoPrimitives } from './generated-video.ts';
+import {
+  createGeneratedTileInfoTarget,
+  GeneratedVideoRenderer,
+  type GeneratedVideoPrimitives,
+} from './generated-video.ts';
 
 const calls: string[] = [];
 const primitives: GeneratedVideoPrimitives = {
@@ -73,4 +77,12 @@ if (calls.join(',') !== 'vblank,background,sprites,foreground') {
 if (frame[0] !== 0xff040506 || !frame.slice(1).every(pixel => pixel === 0xff010203)) {
   throw new Error(`generated visible-area translation is wrong: ${[...frame]}`);
 }
-console.log('generated-video.spec: 3 passed');
+const cachedTile = { gfx: 0, code: 0, color: 0, flags: 0, category: 0 };
+const tileinfo = createGeneratedTileInfoTarget(cachedTile);
+tileinfo.category = 1;
+tileinfo.set(2, 3, 4, 5);
+if (cachedTile.category !== 1) throw new Error('tile category did not reach the render cache');
+if (cachedTile.gfx !== 2 || cachedTile.code !== 3 || cachedTile.color !== 4 || cachedTile.flags !== 5) {
+  throw new Error('tileinfo.set did not reach the render cache');
+}
+console.log('generated-video.spec: 5 passed');

@@ -9,6 +9,7 @@ export const pacman: GameTestContract = {
   screen: { width: 288, height: 224 },
   soundKind: 'wsg',
   frames: 600,
+  minimumFps: 45,
   checkpoints: [1, 60, 180, 300, 420, 600],
   actions: [
     { atFrame: 300, code: 'Digit5', heldFrames: 10, releasedFrames: 20 },

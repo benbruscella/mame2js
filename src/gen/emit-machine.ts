@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import type { KnowledgeGraph } from '../kg/types.ts';
 import type {
   GeneratedAddressMap,
+  GeneratedAudioRoute,
   GeneratedCallback,
   GeneratedDevice,
   GeneratedExpression,
@@ -172,6 +173,7 @@ export function lowerGeneratedMachine(
   };
   const soundDevice = devices.find(device => device.type === 'NAMCO_WSG');
   const ayDevices = devices.filter(device => device.type === 'AY8910');
+  const audioRoutes = lowerAudioRoutes(graph, ayDevices);
   const sound = soundDevice
     ? {
         kind: 'wsg',
@@ -195,6 +197,7 @@ export function lowerGeneratedMachine(
           writeMethods: ['address_w', 'data_w'],
           enableMethods: [],
           controlOffset: -1,
+          ...(audioRoutes.length ? { routes: audioRoutes } : {}),
         }
       : undefined;
   return {
@@ -210,6 +213,42 @@ export function lowerGeneratedMachine(
     ...(compiledVideo ? { video: compiledVideo.plan } : {}),
     ...(sound ? { sound } : {}),
   };
+}
+
+export function lowerAudioRoutes(
+  graph: KnowledgeGraph,
+  devices: { id: string; tag: string }[],
+): GeneratedAudioRoute[] {
+  const byId = new Map(graph.nodes.map(node => [node.id, node]));
+  const filters = new Map<string, number>();
+  const routes: GeneratedAudioRoute[] = [];
+  devices.forEach((device, chip) => {
+    for (const edge of graph.edges.filter(candidate =>
+      candidate.from === device.id && candidate.rel === 'HAS_AUDIO_ROUTE')) {
+      const node = byId.get(edge.to);
+      if (!node) continue;
+      const channel = Number(node.props.output);
+      const gain = Number(node.props.gain);
+      const target = String(node.props.target);
+      if (!Number.isInteger(channel) || channel < 0 || !Number.isFinite(gain)) continue;
+      const match = /^filter\.(\d+)\.(\d+)$/.exec(target);
+      let filter: GeneratedAudioRoute['filter'];
+      if (match) {
+        let index = filters.get(target);
+        if (index === undefined) {
+          index = filters.size;
+          filters.set(target, index);
+        }
+        filter = {
+          index,
+          bank: Number(match[1]),
+          channel: Number(match[2]),
+        };
+      }
+      routes.push({ chip, channel, gain, target, ...(filter ? { filter } : {}) });
+    }
+  });
+  return routes;
 }
 
 function deviceMember(props: Record<string, unknown>): string | undefined {

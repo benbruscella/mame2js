@@ -165,37 +165,55 @@ function compilePalette(
   const body = fn.body;
   const region = /memregion\(\s*"([^"]+)"\s*\)/.exec(body)?.[1];
   const weightsCall = findCallArguments(body, 'compute_resistor_weights');
-  if (!region || !weightsCall) return undefined;
-  const channels = compileResistorChannels(body, weightsCall);
+  if (!region) return undefined;
+  const channels = weightsCall
+    ? compileResistorChannels(body, weightsCall)
+    : compileFixedWeightChannels(body);
   if (channels.length !== 3) return undefined;
   const loops = numericForLoops(body);
-  const paletteLoop = loops.find(loop => loop.body.includes('set_indirect_color'));
-  const lookupLoops = loops.filter(loop => loop.body.includes('set_pen_indirect'));
+  const paletteLoop = loops.find(loop =>
+    loop.body.includes('set_indirect_color') ||
+    /\bpalette_val\s*\[\s*i\s*\]\s*=\s*rgb_t/.test(loop.body));
+  const lookupLoops = loops.filter(loop =>
+    loop.body.includes('set_pen_indirect') || loop.body.includes('set_pen_color'));
   const lookupOffset = expressionNumber(/color_prom\s*\+=\s*([^;]+)/.exec(body)?.[1]);
-  const lookupMask = expressionNumber(
-    /ctabentry\s*=\s*[^;]*?&\s*([^;|)\]]+)/.exec(body)?.[1],
-  );
+  const lookupMask = expressionNumber(/color_prom[^;]*?&\s*(0x[\da-f]+|\d+)/i.exec(
+    lookupLoops.map(loop => loop.body).join('\n'),
+  )?.[1]);
+  let postIncrementOffset = lookupOffset;
   const banks = lookupLoops.flatMap(loop => {
-    const call = /set_pen_indirect\(\s*([^,]+)\s*,\s*([^)]+)\)/.exec(loop.body);
+    const method = loop.body.includes('set_pen_indirect')
+      ? 'palette.set_pen_indirect'
+      : 'palette.set_pen_color';
+    const call = findCallArguments(loop.body, method);
     if (!call) return [];
-    const lookupIndex = /color_prom\[\s*([^\]]+)\s*\]/.exec(loop.body)?.[1] ?? 'i';
+    const args = splitMameArgs(call);
+    const lookupExpression = args[1] ?? '';
+    const colorExpression = /ctabentry\s*=\s*([^;]+)/.exec(loop.body)?.[1]
+      ?? lookupExpression;
+    const lookupIndex = /color_prom\[\s*([^\]]+)\s*\]/.exec(lookupExpression)?.[1];
+    const usesPostIncrement = /\*\s*color_prom\s*\+\+/.test(lookupExpression);
+    const currentPostIncrementOffset = postIncrementOffset;
+    if (usesPostIncrement) postIncrementOffset += Math.max(0, loop.end - loop.start);
     return [{
-      penOffset: expressionAt(call[1]!, loop.start),
+      penOffset: expressionAt(args[0]!, loop.start),
       colorOr: expressionNumber(
-        /\|\s*(-?(?:0x[\da-f]+|\d+))/i.exec(loop.body)?.[1],
+        /(?:\||\+)\s*(-?(?:0x[\da-f]+|\d+))/i.exec(colorExpression)?.[1],
       ),
-      lookupOffset: lookupOffset + expressionAt(lookupIndex, loop.start),
+      lookupOffset: usesPostIncrement
+        ? currentPostIncrementOffset
+        : lookupOffset + expressionAt(lookupIndex ?? 'i', loop.start),
       lookupCount: Math.max(0, loop.end - loop.start),
     }];
   });
   if (!paletteLoop || !banks.length || !lookupMask) return undefined;
-  const args = splitMameArgs(weightsCall);
+  const args = weightsCall ? splitMameArgs(weightsCall) : [];
   return {
     region,
     colorCount: Math.max(0, paletteLoop.end - paletteLoop.start),
-    min: expressionNumber(args[0]),
-    max: expressionNumber(args[1]),
-    scaler: Number(args[2]) || -1,
+    min: weightsCall ? expressionNumber(args[0]) : 0,
+    max: weightsCall ? expressionNumber(args[1]) : 255,
+    scaler: weightsCall ? Number(args[2]) || -1 : 1,
     channels,
     lookupOffset,
     lookupCount: banks[0]!.lookupCount,
@@ -204,6 +222,40 @@ function compilePalette(
     transparentIndirect: 0,
     source: sourceRef(fn),
   };
+}
+
+function compileFixedWeightChannels(
+  body: string,
+): GeneratedPromPalettePlan['channels'] {
+  const bits = new Map<string, { offset: number; bit: number }>();
+  const channels: GeneratedPromPalettePlan['channels'] = [];
+  const sourceRe =
+    /\b(bit\d+)\s*=\s*BIT\(\s*color_prom\[\s*([^\]]+)\s*\]\s*,\s*(\d+)\s*\)|(?:int\s+const|const\s+int)\s+([rgb])\s*=\s*([^;]+)/g;
+  let match: RegExpExecArray | null;
+  while ((match = sourceRe.exec(body)) !== null) {
+    if (match[1]) {
+      bits.set(match[1], {
+        offset: expressionAt(match[2]!, 0),
+        bit: Number(match[3]),
+      });
+      continue;
+    }
+    const terms = [...match[5]!.matchAll(
+      /(-?(?:0x[\da-f]+|\d+))\s*\*\s*(bit\d+)/gi,
+    )];
+    const sources = terms.map(term => bits.get(term[2]!));
+    if (!terms.length || sources.some(source => !source)) continue;
+    channels.push({
+      channel: match[4] as 'r' | 'g' | 'b',
+      bits: sources.map(source => source!.bit),
+      offsets: sources.map(source => source!.offset),
+      weights: terms.map(term => expressionNumber(term[1])),
+      resistances: [],
+      pulldown: 0,
+      pullup: 0,
+    });
+  }
+  return channels;
 }
 
 function compileResistorChannels(
@@ -347,6 +399,15 @@ function numericForLoops(source: string): {
       body: source.slice(open + 1, close),
     });
     pattern.lastIndex = close + 1;
+  }
+  const singleStatementPattern =
+    /for\s*\(\s*int\s+i\s*=\s*([^;]+)\s*;\s*i\s*<\s*([^;]+)\s*;\s*(?:i\+\+|\+\+i)\s*\)\s*(?!\{)([^;]+;)/g;
+  while ((match = singleStatementPattern.exec(source)) !== null) {
+    loops.push({
+      start: expressionNumber(match[1]),
+      end: expressionNumber(match[2]),
+      body: match[3]!,
+    });
   }
   return loops;
 }

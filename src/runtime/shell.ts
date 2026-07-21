@@ -8,6 +8,7 @@ import { KeyboardInput, type FieldBinding, type DipDefault, type PortSpec } from
 import { AudioOutput } from './audio.ts';
 import { readZip, crc32 } from './zip.ts';
 import type { Regions, BoardConfig } from './types.ts';
+import type { GeneratedAudioRoute } from './generated-machine.ts';
 
 export interface RomLoad {
   file: string; offset: number; size: number; crc: string;
@@ -27,6 +28,8 @@ export interface SoundSpec {
   chips?: number;
   /** per-chip mix weights from the board's analog net (generator-curated) */
   chipGains?: number[];
+  /** Per-output routes lowered from MAME add_route calls. */
+  routes?: GeneratedAudioRoute[];
   /** DAC route gain override (default = junofrst's 0.25) */
   dacGain?: number;
 }
@@ -235,6 +238,7 @@ export async function runShell(cfg: ShellConfig, preloaded?: Regions): Promise<v
         waveRom: cfg.sound.waveRegion ? regions[cfg.sound.waveRegion] : undefined,
         chips: cfg.sound.chips,
         chipGains: cfg.sound.chipGains,
+        routes: cfg.sound.routes,
         dacGain: cfg.sound.dacGain,
         refresh: cfg.board.screen.refresh,
         debug: input.debug,

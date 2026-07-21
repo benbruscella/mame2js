@@ -304,10 +304,22 @@ export function buildGraph(mameSrc: string, driverFile: string): KnowledgeGraph 
       if (dev.screenVisarea) {
         props.screenVisarea = [dev.screenVisarea.x0, dev.screenVisarea.x1, dev.screenVisarea.y0, dev.screenVisarea.y1];
       }
+      if (dev.screenVideoAttributes?.length) props.screenVideoAttributes = dev.screenVideoAttributes;
       if (dev.slotOptions) props.slotOptions = dev.slotOptions;
       if (dev.slotDefault) props.slotDefault = dev.slotDefault;
       g.node('Device', devId, props);
       g.edge(cfgId, devId, 'HAS_DEVICE');
+      for (const [index, route] of (dev.audioRoutes ?? []).entries()) {
+        const routeId = `audioroute:${devId}/${index}`;
+        g.node('AudioRoute', routeId, {
+          output: route.output,
+          target: route.target,
+          gain: route.gain,
+          raw: route.raw,
+          ...spanProps(ast.findStatement(route.raw, cfgFunction)?.span),
+        });
+        g.edge(devId, routeId, 'HAS_AUDIO_ROUTE');
+      }
       emitCallbacks(g, ast, cfgFunction, devId, dev.tag, dev.config, memberTags, consts);
       // board-style devices (IREM_M52_SOUNDC_AUDIO...) carry their own
       // sub-machine in device_add_mconfig — link so the subgraph walk

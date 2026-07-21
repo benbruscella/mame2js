@@ -7,9 +7,10 @@ behavioral baseline may change.
 
 ## 1. GOAL
 
-When a new machine is added, Pac-Man and Pooyan must continue to produce the
-same generated machine behavior unless an intentional, reviewed fix changes
-them. The tests therefore protect both sides of the compiler boundary:
+When a new machine is added, Pac-Man, Pooyan and Time Pilot must continue to
+produce the same generated machine behavior unless an intentional, reviewed
+fix changes them. The tests therefore protect both sides of the compiler
+boundary:
 
 1. MAME source is parsed and lowered as expected;
 2. a clean generated distribution remains complete and self-contained;
@@ -52,11 +53,11 @@ never be compiled into or pollute the canonical generated `dist` tree.
 
 ### CURRENT CLEAN GENERATION
 
-`test:current` invokes `gen:all`, which deletes `dist`, generates Pac-Man and
-Pooyan from MAME, builds their shared hardware closure and app, then runs the
-generated-output audit. It detects stale-output masking, missing modules,
-unsupported hardware, duplicate trees, embedded machine JSON, imports from
-`src`, and blocked catalog entries.
+`test:current` invokes `gen:all`, which deletes `dist`, generates Pac-Man,
+Pooyan and Time Pilot from MAME, builds their shared hardware closure and app,
+then runs the generated-output audit. It detects stale-output masking, missing
+modules, unsupported hardware, duplicate trees, embedded machine JSON,
+imports from `src`, and blocked catalog entries.
 
 ### ALL-TARGET GENERATION
 
@@ -67,8 +68,8 @@ before broad parser, KG, IR schema, hardware closure, or app registry changes.
 ### GENERATED GAME BEHAVIOR
 
 `test:games` imports the compiled modules from `dist`, loads local ROMs, and
-executes the generated boards for 600 frames. For each supported game it
-checks:
+executes each generated board for the frame count declared by its token. For
+each supported game it checks:
 
 - every required ROM slot and CRC;
 - assembled region hashes;
@@ -78,12 +79,21 @@ checks:
 - exact CPU/device state hashes at the same checkpoints;
 - generated audio register write count and trace hash;
 - generated PCM hash and RMS level;
-- visible frame progression and non-silent output.
+- visible frame progression and non-silent output;
+- measured full-contract throughput above the token's minimum fps.
 
-The fixed schedule runs checkpoints at frames 1, 60, 180, 300, 420, and 600.
-Coin 1 is held at frame 300 and Start 1 at frame 330, each with deterministic
-press and release durations. A test failure therefore identifies a changed
-trajectory, not only a final screenshot.
+Each token owns its checkpoint and input schedule because machines reach their
+input-ready attract state at different times. Pac-Man and Pooyan currently run
+600 frames; Time Pilot runs 1,200 frames so its golden reaches active gameplay.
+Every action has deterministic press and release durations. A test failure
+therefore identifies a changed trajectory, not only a final screenshot.
+
+The throughput measurement includes CPU execution, generated video, checkpoint
+hashing and deterministic audio probing. It is not the browser's presentation
+counter, but it catches runtime complexity regressions before they make a game
+miss real time. Tokens currently require 45 fps, leaving headroom for shared
+development and CI machines while rejecting Time Pilot's original uncached
+scanline implementation.
 
 ## 3. GAME TOKENS
 
@@ -95,6 +105,8 @@ src/games/pacman.ts
 src/games/pacman.spec.ts
 src/games/pooyan.ts
 src/games/pooyan.spec.ts
+src/games/timeplt.ts
+src/games/timeplt.spec.ts
 ```
 
 The token declares only:
@@ -102,6 +114,7 @@ The token declares only:
 - MAME short name, category, driver and machine configuration;
 - ROM environment variable;
 - expected screen and generated audio kind;
+- full-contract minimum fps;
 - frame checkpoints and input schedule;
 - compact hashes for the accepted generated behavior.
 
@@ -147,6 +160,7 @@ The default ROM locations are:
 ```text
 roms/arcade/pacman.zip
 roms/arcade/pooyan.zip
+roms/arcade/timeplt.zip
 ```
 
 Override them without moving files:
@@ -154,6 +168,7 @@ Override them without moving files:
 ```sh
 MAMEKIT_PACMAN_ROM=/path/pacman.zip \
 MAMEKIT_POOYAN_ROM=/path/pooyan.zip \
+MAMEKIT_TIMEPLT_ROM=/path/timeplt.zip \
 npm run test:games
 ```
 
@@ -211,7 +226,8 @@ it must not gain game logic.
    contracts;
 3. installs the locked npm dependencies on Node.js 24;
 4. runs every colocated spec;
-5. deletes `dist`, regenerates Pac-Man and Pooyan, and audits the result.
+5. deletes `dist`, regenerates Pac-Man, Pooyan and Time Pilot, and audits the
+   result.
 
 The MAME commit is pinned deliberately. Updating it is a source migration and
 must be reviewed separately from a MAMEKIT implementation change. Run all

@@ -95,9 +95,10 @@ export class GeneratedFrameRunner {
 
       this.onLine?.(line, 'after-processors', framebuffer);
       if (this.eventPhase === 'after-processors') this.dispatchLine(line);
+      if (screen.updateMode === 'scanline') this.video?.renderLine?.(framebuffer, line);
     }
     this.frames++;
-    this.video?.render(framebuffer);
+    if (screen.updateMode !== 'scanline') this.video?.render(framebuffer);
   }
 
   private dispatchLine(line: number): void {

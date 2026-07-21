@@ -29,6 +29,7 @@ export function gameSourceGraph(contract: GameTestContract): KnowledgeGraph {
 export function assertGameContract(contract: GameTestContract): void {
   assert.match(contract.game, /^[a-z0-9_]+$/);
   assert.ok(contract.checkpoints.length > 0);
+  assert.ok(contract.minimumFps > 0);
   assert.equal(contract.checkpoints.at(-1), contract.frames);
   assert.equal(new Set(contract.checkpoints).size, contract.checkpoints.length);
   assert.ok(contract.golden, `${contract.game}: supported game has no recorded golden`);

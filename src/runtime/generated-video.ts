@@ -51,14 +51,32 @@ export class GeneratedVideoRenderer implements VideoRenderer {
   render(frame: Uint32Array): void {
     const xOffset = this.machine.execution.screen.xOffset ?? 0;
     const yOffset = this.machine.execution.screen.yOffset ?? 0;
+    this.renderRegion(frame, yOffset, yOffset + this.height - 1);
+  }
+
+  renderLine(frame: Uint32Array, line: number): void {
+    const yOffset = this.machine.execution.screen.yOffset ?? 0;
+    if (line < yOffset || line >= yOffset + this.height) return;
+    this.renderRegion(frame, line, line);
+  }
+
+  private renderRegion(frame: Uint32Array, minY: number, maxY: number): void {
+    const xOffset = this.machine.execution.screen.xOffset ?? 0;
+    const yOffset = this.machine.execution.screen.yOffset ?? 0;
     const cliprect = {
       min_x: xOffset,
       max_x: xOffset + this.width - 1,
-      min_y: yOffset,
-      max_y: yOffset + this.height - 1,
+      min_y: minY,
+      max_y: maxY,
     };
     const bitmap = {
-      fill: (color: number) => frame.fill(color >>> 0),
+      fill: (color: number) => {
+        const packed = color >>> 0;
+        for (let y = minY; y <= maxY; y++) {
+          const start = (y - yOffset) * this.width;
+          frame.fill(packed, start, start + this.width);
+        }
+      },
       'pix=': (y: number, x: number, color: number) => {
         const visibleX = x - xOffset;
         const visibleY = y - yOffset;
@@ -99,6 +117,24 @@ interface TileInfo {
   code: number;
   color: number;
   flags: number;
+  category: number;
+}
+
+export function createGeneratedTileInfoTarget(tile: TileInfo): {
+  category: number;
+  set(gfx: number, code: number, color: number, flags: number): void;
+} {
+  return {
+    get category(): number {
+      return tile.category;
+    },
+    set category(value: number) {
+      tile.category = Number(value) & 0x0f;
+    },
+    set(gfx: number, code: number, color: number, flags: number): void {
+      Object.assign(tile, { gfx, code, color, flags });
+    },
+  };
 }
 
 class GeneratedRectangle {
@@ -140,7 +176,8 @@ class GeneratedPalette {
         const values = weights[channel.channel];
         let value = 0;
         for (let bit = 0; bit < channel.bits.length; bit++) {
-          value += values[bit]! * ((prom[index]! >> channel.bits[bit]!) & 1);
+          const source = prom[index + (channel.offsets?.[bit] ?? 0)] ?? 0;
+          value += values[bit]! * ((source >> channel.bits[bit]!) & 1);
         }
         rgb[channel.channel] = Math.floor(value + 0.5);
       }
@@ -203,6 +240,20 @@ class GeneratedGfxElement {
     this.draw(bitmap, clip, code, color, flipX, flipY, sx, sy, transparentMask);
   }
 
+  transpen(
+    bitmap: BitmapTarget,
+    clip: GeneratedRectangle,
+    code: number,
+    color: number,
+    flipX: number,
+    flipY: number,
+    sx: number,
+    sy: number,
+    transparentPen: number,
+  ): void {
+    this.draw(bitmap, clip, code, color, flipX, flipY, sx, sy, 1 << transparentPen);
+  }
+
   draw(
     bitmap: BitmapTarget,
     clip: GeneratedRectangle,
@@ -246,6 +297,8 @@ class GeneratedTilemap {
   private readonly machine: GeneratedMachine;
   private readonly bindings: () => GeneratedHandlerBindings;
   private readonly gfx: GeneratedGfxElement[];
+  private readonly tiles: TileInfo[];
+  private readonly dirty: Uint8Array;
   private flip = 0;
 
   constructor(
@@ -258,13 +311,22 @@ class GeneratedTilemap {
     this.machine = machine;
     this.bindings = bindings;
     this.gfx = gfx;
+    const tileCount = plan.columns * plan.rows;
+    this.tiles = Array.from(
+      { length: tileCount },
+      () => ({ gfx: 0, code: 0, color: 0, flags: 0, category: 0 }),
+    );
+    this.dirty = new Uint8Array(tileCount);
+    this.dirty.fill(1);
     this.mapper = standardMapper(plan.mapper)
       ? undefined
       : requiredHandler(machine, plan.mapper);
     this.tileInfo = requiredHandler(machine, plan.tileInfo);
   }
 
-  mark_tile_dirty(_index: number): void {}
+  mark_tile_dirty(index: number): void {
+    if (index >= 0 && index < this.dirty.length) this.dirty[index] = 1;
+  }
 
   set_flip(flags: number): void {
     this.flip = flags;
@@ -277,8 +339,29 @@ class GeneratedTilemap {
     _flags: number,
     _priority: number,
   ): void {
-    for (let row = 0; row < this.plan.rows; row++) {
-      for (let column = 0; column < this.plan.columns; column++) {
+    const members = this.bindings().members ?? {};
+    const globalFlip = Number(members.__flip_screen ?? 0) ? 3 : 0;
+    const mapFlip = this.flip | globalFlip;
+    const flipX = Boolean(mapFlip & 1);
+    const flipY = Boolean(mapFlip & 2);
+    const firstOutputRow = Math.max(0, Math.floor(clip.min_y / this.plan.tileHeight));
+    const lastOutputRow = Math.min(
+      this.plan.rows - 1,
+      Math.floor(clip.max_y / this.plan.tileHeight),
+    );
+    const firstOutputColumn = Math.max(0, Math.floor(clip.min_x / this.plan.tileWidth));
+    const lastOutputColumn = Math.min(
+      this.plan.columns - 1,
+      Math.floor(clip.max_x / this.plan.tileWidth),
+    );
+    for (let outputRow = firstOutputRow; outputRow <= lastOutputRow; outputRow++) {
+      const row = flipY ? this.plan.rows - 1 - outputRow : outputRow;
+      for (
+        let outputColumn = firstOutputColumn;
+        outputColumn <= lastOutputColumn;
+        outputColumn++
+      ) {
+        const column = flipX ? this.plan.columns - 1 - outputColumn : outputColumn;
         const mapped = this.mapper
           ? executeGeneratedMachineProgram(
               this.machine,
@@ -292,29 +375,26 @@ class GeneratedTilemap {
               },
             ).value
           : mapStandardTile(this.plan.mapper, column, row, this.plan.columns, this.plan.rows);
-        const tile: TileInfo = { gfx: 0, code: 0, color: 0, flags: 0 };
-        const tileinfo = {
-          set: (gfx: number, code: number, color: number, flags: number) => {
-            Object.assign(tile, { gfx, code, color, flags });
-          },
-        };
-        executeGeneratedMachineProgram(
-          this.machine,
-          this.tileInfo,
-          this.bindings(),
-          { tilemap: this, tileinfo, tile_index: Number(mapped) || 0 },
-        );
+        const tileIndex = modulo(Number(mapped) || 0, this.tiles.length);
+        const tile = this.tiles[tileIndex]!;
+        if (this.dirty[tileIndex]) {
+          Object.assign(tile, { gfx: 0, code: 0, color: 0, flags: 0, category: 0 });
+          const tileinfo = createGeneratedTileInfoTarget(tile);
+          executeGeneratedMachineProgram(
+            this.machine,
+            this.tileInfo,
+            this.bindings(),
+            { tilemap: this, tileinfo, tile_index: tileIndex },
+          );
+          this.dirty[tileIndex] = 0;
+        }
+        if (tile.category !== (_flags & 0xff)) continue;
         const gfx = this.gfx[tile.gfx];
         if (!gfx) continue;
-        const members = this.bindings().members ?? {};
-        const globalFlip = Number(members.__flip_screen ?? 0) ? 3 : 0;
-        const mapFlip = this.flip | globalFlip;
-        const flipX = Boolean(mapFlip & 1);
-        const flipY = Boolean(mapFlip & 2);
         const tileFlipX = Boolean(tile.flags & 1) !== flipX;
         const tileFlipY = Boolean(tile.flags & 2) !== flipY;
-        const x = (flipX ? this.plan.columns - 1 - column : column) * this.plan.tileWidth;
-        const y = (flipY ? this.plan.rows - 1 - row : row) * this.plan.tileHeight;
+        const x = outputColumn * this.plan.tileWidth;
+        const y = outputRow * this.plan.tileHeight;
         gfx.draw(
           bitmap,
           clip,
@@ -430,6 +510,14 @@ function computeWeights(
   const raw: Record<'r' | 'g' | 'b', number[]> = { r: [], g: [], b: [] };
   let maximum = 0;
   for (const channel of plan.channels) {
+    if (channel.weights) {
+      raw[channel.channel] = [...channel.weights];
+      maximum = Math.max(
+        maximum,
+        channel.weights.reduce((sum, value) => sum + value, 0),
+      );
+      continue;
+    }
     const values = channel.resistances.map((_, selected) => {
       let r0 = channel.pulldown ? 1 / channel.pulldown : 1 / 1e12;
       let r1 = channel.pullup ? 1 / channel.pullup : 1 / 1e12;

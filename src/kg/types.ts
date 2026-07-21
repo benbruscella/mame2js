@@ -21,6 +21,7 @@ export type NodeLabel =
   | 'GfxLayout'     // static const gfx_layout name = {...}
   | 'GfxDecode'     // GFXDECODE_START(name)
   | 'GfxDecodeEntry'
+  | 'AudioRoute'     // one device add_route(output, target, gain) statement
   | 'SoftwareList'  // SOFTWARE_LIST(config, "tag") — console/computer software catalog reference
   | 'HardwareType'  // a MAME device type used by one or more generated machines
   | 'HardwareImplementation' // the MAME class/source implementing a hardware type
@@ -55,6 +56,7 @@ export type RelType =
   | 'PATCHES_MAP'     // MachineConfig -> AddressMap (set_addrmap on a device from a called config; props: space, deviceTag)
   | 'DECODES'         // MachineConfig -> GfxDecode
   | 'HAS_ENTRY'       // GfxDecode -> GfxDecodeEntry
+  | 'HAS_AUDIO_ROUTE' // sound Device -> AudioRoute
   | 'USES_LAYOUT'     // GfxDecodeEntry -> GfxLayout
   | 'READS_REGION'    // GfxDecodeEntry -> RomRegion (by tag, resolved per romset at generation)
   | 'HAS_SOFTLIST'    // MachineConfig -> SoftwareList

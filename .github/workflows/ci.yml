@@ -45,5 +45,5 @@ jobs:
       - name: Run every colocated unit and lowering spec
         run: npm run test:unit
 
-      - name: Clean-generate and audit Pac-Man and Pooyan
+      - name: Clean-generate and audit Pac-Man, Pooyan and Time Pilot
         run: npm run test:current

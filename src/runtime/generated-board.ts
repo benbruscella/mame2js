@@ -19,6 +19,10 @@ import {
 } from './generated-handler.ts';
 import type { GeneratedMachine } from './generated-machine.ts';
 import { portHandlers } from './input.ts';
+import {
+  AY_FILTER_CONTROL_BASE,
+  AY_FILTER_CONTROL_STRIDE,
+} from './audio-protocol.ts';
 import type {
   Board,
   BoardConfig,
@@ -85,6 +89,7 @@ class IrBoard implements Board {
   private readonly shares: Record<string, Uint8Array> = {};
   private readonly frameRunner: GeneratedFrameRunner;
   private readonly bindings: GeneratedHandlerBindings;
+  private currentLine = 0;
 
   constructor(
     machine: GeneratedMachine,
@@ -105,6 +110,10 @@ class IrBoard implements Board {
 
     const calls: NonNullable<GeneratedHandlerBindings['calls']> = {};
     this.bindings = { members: this.state, inputs, calls };
+    const screen = machine.devices?.find(device => device.type === 'SCREEN');
+    for (const owner of [screen?.tag, screen?.member].filter(Boolean) as string[]) {
+      calls[`${owner}.vpos`] = () => this.currentLine;
+    }
     for (const [tag, device] of this.devices) {
       const specification = machine.devices?.find(candidate => candidate.tag === tag);
       for (const method of device.methodNames()) {
@@ -234,6 +243,9 @@ class IrBoard implements Board {
           callbackEndpoints,
         );
       },
+      onLine: line => {
+        this.currentLine = line;
+      },
       video,
     });
   }
@@ -247,6 +259,7 @@ class IrBoard implements Board {
     for (const cpu of this.cpus.values()) cpu.reset();
     for (const tag of this.cpuCycles.keys()) this.cpuCycles.set(tag, 0);
     this.frameRunner.reset();
+    this.currentLine = 0;
   }
 
   snapshot(): BoardSnapshot {
@@ -369,7 +382,7 @@ class IrBoard implements Board {
         registry.write[`${tag}.data_w`] = (_address, _offset, data) => {
           const register = addresses.get(tag) ?? 0;
           registers.get(tag)![register] = data;
-          sinks.soundWrite(chip * 16 + register, data);
+          sinks.soundWrite(chip * 16 + register, data, this.soundFraction());
         };
         registry.read[`${tag}.data_r`] = () => {
           const register = addresses.get(tag) ?? 0;
@@ -396,14 +409,37 @@ class IrBoard implements Board {
           return registers.get(tag)![register] ?? 0xff;
         };
       });
+      const filterRows: unknown[][] = [];
+      for (const route of sound.routes ?? []) {
+        if (!route.filter) continue;
+        const { bank, channel, index } = route.filter;
+        const row = (filterRows[bank] ??= []);
+        if (row[channel]) continue;
+        let previous: number[] | undefined;
+        row[channel] = {
+          filter_rc_set_RC: (type: number, r1: number, r2: number, r3: number, c: number) => {
+            const values = [type, r1, r2, r3, c];
+            if (previous?.every((value, position) => value === values[position])) return;
+            previous = values;
+            const base = AY_FILTER_CONTROL_BASE + index * AY_FILTER_CONTROL_STRIDE;
+            values.forEach((value, parameter) =>
+              sinks.soundWrite(base + parameter, value, this.soundFraction()));
+          },
+        };
+      }
+      if (filterRows.length) this.state.m_filter = filterRows;
       return;
     }
     for (const method of sound.writeMethods) {
       const key = `${sound.deviceTag}.${method}`;
       registry.write[key] = (_address, offset, data) => {
-        sinks.soundWrite(offset, data);
+        sinks.soundWrite(offset, data, this.soundFraction());
       };
     }
+  }
+
+  private soundFraction(): number {
+    return this.currentLine / this.machine.execution.screen.vtotal;
   }
 
   private callbackEndpoints(sinks: BoardSinks): Record<string, (state: number) => void> {
@@ -429,7 +465,8 @@ class IrBoard implements Board {
         };
       }
       if (callback.targetTag === 'speaker') {
-        endpoints[target] = state => sinks.soundWrite(callback.slot ?? 0, state);
+        endpoints[target] = state =>
+          sinks.soundWrite(callback.slot ?? 0, state, this.soundFraction());
       }
       const sound = this.machine.sound;
       if (
@@ -438,14 +475,15 @@ class IrBoard implements Board {
         callback.targetMethod &&
         sound.enableMethods.includes(callback.targetMethod)
       ) {
-        endpoints[target] = state => sinks.soundWrite(sound.controlOffset, state);
+        endpoints[target] = state =>
+          sinks.soundWrite(sound.controlOffset, state, this.soundFraction());
       }
       if (
         callback.targetMethod === 'mute_w' &&
         this.machine.devices?.some(device =>
           device.tag === callback.targetTag && device.type === 'TIMEPLT_AUDIO')
       ) {
-        endpoints[target] = state => sinks.soundWrite(-1, state);
+        endpoints[target] = state => sinks.soundWrite(-1, state, this.soundFraction());
       }
     }
     return endpoints;

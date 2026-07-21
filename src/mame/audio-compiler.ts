@@ -5,6 +5,10 @@ import { parseMameAst, splitMameArgs } from './ast.ts';
 import { normalizeMameExecutionSource } from './cpu-compiler.ts';
 import { compileMameHandler } from './handler-ir.ts';
 import type { MameHardwareDefinition } from './hardware.ts';
+import {
+  AY_FILTER_CONTROL_BASE,
+  AY_FILTER_CONTROL_STRIDE,
+} from '../runtime/audio-protocol.ts';
 
 export interface GeneratedNamcoWsgPlan {
   schemaVersion: 1;
@@ -33,6 +37,12 @@ export interface GeneratedAy8910Plan {
   noiseTaps: [number, number];
   readMasks: number[];
   volumeTable: number[];
+  filterTypes: {
+    lowpass3r: number;
+    lowpass: number;
+    highpass: number;
+    ac: number;
+  };
   sourceFiles: string[];
   source: { file: string; line: number };
 }
@@ -48,6 +58,10 @@ export function compileAy8910(
   );
   const cpp = readFileSync(join(mameSrc, cppFile), 'utf8');
   const header = readFileSync(join(mameSrc, headerFile), 'utf8');
+  const filterCppFile = 'src/devices/sound/flt_rc.cpp';
+  const filterHeaderFile = 'src/devices/sound/flt_rc.h';
+  const filterCpp = readFileSync(join(mameSrc, filterCppFile), 'utf8');
+  const filterHeader = readFileSync(join(mameSrc, filterHeaderFile), 'utf8');
   const clockDivider = Number(/stream_alloc\([^;]+master_clock\s*\/\s*(\d+)\)/.exec(cpp)?.[1]);
   const ayType =
     /if\s*\(\s*psg_type\s*==\s*PSG_TYPE_AY\s*\)\s*\{([\s\S]*?)\n\s*\}/.exec(cpp)?.[1] ?? '';
@@ -62,7 +76,22 @@ export function compileAy8910(
   const params = [...cpp.matchAll(
     /static\s+const\s+ay8910_device::ay_ym_param\s+ay8910_param\s*=\s*\{\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*\{([^}]+)\}/g,
   )].at(-1);
-  if (!clockDivider || !envelopeMask || !envelopeStep || !noise || !masks || !params) {
+  const filterType = (name: string): number =>
+    Number(new RegExp(`${name}\\s*=\\s*(\\d+)`).exec(filterHeader)?.[1]);
+  const filterTypes = {
+    lowpass3r: filterType('LOWPASS_3R'),
+    lowpass: filterType('LOWPASS'),
+    highpass: filterType('HIGHPASS'),
+    ac: filterType('AC'),
+  };
+  const filterShape =
+    filterCpp.includes('memory += (stream.get(0, sampindex) - memory) * m_k') &&
+    filterCpp.includes('Req = (m_R1 * (m_R2 + m_R3)) / (m_R1 + m_R2 + m_R3)') &&
+    filterCpp.includes('m_k = 1.0 - exp(-1 / (Req * m_C) / m_stream->sample_rate())');
+  if (
+    !clockDivider || !envelopeMask || !envelopeStep || !noise || !masks || !params ||
+    Object.values(filterTypes).some(value => !Number.isFinite(value)) || !filterShape
+  ) {
     throw new Error('AY8910: MAME source shape is not executable by the audio compiler');
   }
   const resistances = splitMameArgs(params[4]!).map(Number);
@@ -95,7 +124,8 @@ export function compileAy8910(
     noiseTaps: [Number(noise[1]), Number(noise[2])],
     readMasks: splitMameArgs(masks[1]!).map(value => Number(value)),
     volumeTable,
-    sourceFiles: [cppFile, headerFile],
+    filterTypes,
+    sourceFiles: [cppFile, headerFile, filterCppFile, filterHeaderFile],
     source: {
       file: cppFile,
       line: cpp.slice(0, cpp.indexOf('void ay8910_device::sound_stream_update')).split('\n').length,
@@ -185,8 +215,29 @@ interface Voice {
 export function generatedAy8910WorkletSource(plan: GeneratedAy8910Plan): string {
   return `// GENERATED from ${plan.source.file}:${plan.source.line} and ${plan.sourceFiles[1]}; do not edit.
 // Register masks, resistor DAC curve, clock divider, envelope parameters and
-// LFSR taps are extracted from the selected MAME AY-3-8910 implementation.
+// LFSR taps are extracted from MAME's AY implementation. RC behavior is
+// sourced from flt_rc and route/filter controls arrive from generated machine IR.
 const plan = ${JSON.stringify(plan, null, 2)};
+const FILTER_CONTROL_BASE = ${AY_FILTER_CONTROL_BASE};
+const FILTER_CONTROL_STRIDE = ${AY_FILTER_CONTROL_STRIDE};
+
+export interface GeneratedAyRoute {
+  chip: number;
+  channel: number;
+  gain: number;
+  target: string;
+  filter?: { index: number; bank: number; channel: number };
+}
+
+interface GeneratedFilterState {
+  type: number;
+  r1: number;
+  r2: number;
+  r3: number;
+  c: number;
+  k: number;
+  memory: number;
+}
 
 export class GeneratedAy8910Core {
   readonly nativeRate: number;
@@ -204,6 +255,7 @@ export class GeneratedAy8910Core {
   private envelopeHold = 0;
   private envelopeAlternate = 0;
   private envelopeHolding = false;
+  private readonly mixedSamples = [0, 0, 0];
 
   constructor(clock: number) {
     this.nativeRate = clock / plan.clockDivider;
@@ -241,7 +293,7 @@ export class GeneratedAy8910Core {
     return this.regs[reg] & plan.readMasks[reg];
   }
 
-  sample(): number {
+  sampleChannels(output: number[]): void {
     for (let channel = 0; channel < plan.channels; channel++) {
       if (++this.toneCount[channel] >= this.tonePeriod[channel]) {
         this.toneCount[channel] = 0;
@@ -276,16 +328,177 @@ export class GeneratedAy8910Core {
     }
     const envelope = this.envelopePosition ^ this.envelopeAttack;
     const enable = this.regs[7];
-    let mixed = 0;
     for (let channel = 0; channel < plan.channels; channel++) {
       const toneGate = this.toneOutput[channel] | ((enable >> channel) & 1);
       const noiseGate = (this.rng & 1) | ((enable >> (channel + 3)) & 1);
       const volume = this.regs[8 + channel];
       const level = volume & 0x10 ? envelope : volume & 0x0f;
       const amplitude = plan.volumeTable[level] - plan.volumeTable[0];
-      mixed += toneGate & noiseGate ? amplitude : -amplitude;
+      output[channel] = toneGate & noiseGate ? amplitude : -amplitude;
     }
-    return mixed / plan.channels;
+  }
+
+  sample(): number {
+    this.sampleChannels(this.mixedSamples);
+    return this.mixedSamples.reduce((sum, value) => sum + value, 0) / plan.channels;
+  }
+}
+
+export class GeneratedAy8910Mixer {
+  private readonly cores: GeneratedAy8910Core[];
+  private readonly phases: number[];
+  private readonly channelSamples: number[][];
+  private readonly routes: GeneratedAyRoute[];
+  private readonly filters: GeneratedFilterState[];
+  private readonly gainTotal: number;
+  private readonly outputRate: number;
+  private muted = false;
+
+  constructor(
+    clock: number,
+    chips: number,
+    outputRate: number,
+    routes: GeneratedAyRoute[] = [],
+    chipGains: number[] = [],
+  ) {
+    this.outputRate = outputRate;
+    const count = Math.max(1, chips);
+    this.cores = Array.from({ length: count }, () => new GeneratedAy8910Core(clock));
+    this.phases = this.cores.map(() => 0);
+    this.channelSamples = this.cores.map(() => [0, 0, 0]);
+    this.routes = routes.length
+      ? routes
+      : this.cores.flatMap((_, chip) =>
+          Array.from({ length: plan.channels }, (_unused, channel) => ({
+            chip,
+            channel,
+            gain: chipGains[chip] ?? 1,
+            target: 'mono',
+          })));
+    const filterCount = this.routes.reduce(
+      (maximum, route) => Math.max(maximum, (route.filter?.index ?? -1) + 1),
+      0,
+    );
+    this.filters = Array.from({ length: filterCount }, () => ({
+      type: plan.filterTypes.lowpass3r,
+      r1: 1,
+      r2: 1,
+      r3: 1,
+      c: 0,
+      k: 1,
+      memory: 0,
+    }));
+    this.gainTotal = this.routes.reduce((sum, route) => sum + route.gain, 0) || 1;
+  }
+
+  write(offset: number, data: number): void {
+    if (offset < 0) {
+      this.muted = data !== 0;
+      return;
+    }
+    if (offset >= FILTER_CONTROL_BASE) {
+      const control = offset - FILTER_CONTROL_BASE;
+      const filter = this.filters[Math.floor(control / FILTER_CONTROL_STRIDE)];
+      if (!filter) return;
+      const parameter = control % FILTER_CONTROL_STRIDE;
+      if (parameter === 0) filter.type = data;
+      else if (parameter === 1) filter.r1 = data;
+      else if (parameter === 2) filter.r2 = data;
+      else if (parameter === 3) filter.r3 = data;
+      else filter.c = data;
+      this.recalculate(filter);
+      return;
+    }
+    this.cores[offset >> 4]?.write(offset & 0x0f, data);
+  }
+
+  sample(): number {
+    if (this.muted) return 0;
+    for (let chip = 0; chip < this.cores.length; chip++) {
+      const core = this.cores[chip]!;
+      this.phases[chip]! += core.nativeRate / this.outputRate;
+      while (this.phases[chip]! >= 1) {
+        this.phases[chip]! -= 1;
+        core.sampleChannels(this.channelSamples[chip]!);
+      }
+    }
+    let mixed = 0;
+    for (const route of this.routes) {
+      let value = this.channelSamples[route.chip]?.[route.channel] ?? 0;
+      if (route.filter) value = this.filter(value, this.filters[route.filter.index]);
+      mixed += value * route.gain;
+    }
+    return Math.max(-1, Math.min(1, mixed / this.gainTotal));
+  }
+
+  private recalculate(filter: GeneratedFilterState): void {
+    if (filter.c === 0) {
+      filter.k = filter.type === plan.filterTypes.highpass || filter.type === plan.filterTypes.ac
+        ? 0
+        : 1;
+      filter.memory = 0;
+      return;
+    }
+    const resistance = filter.type === plan.filterTypes.lowpass3r
+      ? filter.r1 * (filter.r2 + filter.r3) / (filter.r1 + filter.r2 + filter.r3)
+      : filter.r1;
+    filter.k = 1 - Math.exp(-1 / (resistance * filter.c) / this.outputRate);
+  }
+
+  private filter(input: number, filter: GeneratedFilterState | undefined): number {
+    if (!filter) return input;
+    if (filter.type === plan.filterTypes.highpass || filter.type === plan.filterTypes.ac) {
+      const output = input - filter.memory;
+      filter.memory += (input - filter.memory) * filter.k;
+      return output;
+    }
+    filter.memory += (input - filter.memory) * filter.k;
+    return filter.memory;
+  }
+}
+
+export interface GeneratedAyWrite {
+  offset: number;
+  data: number;
+  frac?: number;
+}
+
+/**
+ * Renders one emulated video frame while applying AY writes at their MAME
+ * raster position. Both the AudioWorklet and game acceptance tests use this
+ * class, so browser scheduling is covered by the deterministic PCM golden.
+ */
+export class GeneratedAy8910FrameRenderer {
+  private sampleCarry = 0;
+  private readonly mixer: GeneratedAy8910Mixer;
+  private readonly outputRate: number;
+  private readonly refresh: number;
+
+  constructor(
+    mixer: GeneratedAy8910Mixer,
+    outputRate: number,
+    refresh: number,
+  ) {
+    this.mixer = mixer;
+    this.outputRate = outputRate;
+    this.refresh = refresh;
+  }
+
+  render(writes: readonly GeneratedAyWrite[]): Float32Array {
+    this.sampleCarry += this.outputRate / this.refresh;
+    const count = Math.floor(this.sampleCarry);
+    this.sampleCarry -= count;
+    const output = new Float32Array(count);
+    let sampleIndex = 0;
+    for (const write of writes) {
+      const writeSample = Math.ceil(
+        Math.max(0, Math.min(1, write.frac ?? 0)) * count,
+      );
+      while (sampleIndex < writeSample) output[sampleIndex++] = this.mixer.sample();
+      this.mixer.write(write.offset, write.data);
+    }
+    while (sampleIndex < count) output[sampleIndex++] = this.mixer.sample();
+    return output;
   }
 }
 
@@ -300,11 +513,11 @@ declare function registerProcessor(
 ): void;
 
 class GeneratedAy8910Processor extends AudioWorkletProcessor {
-  private cores: GeneratedAy8910Core[] = [];
-  private gains: number[] = [];
-  private phases: number[] = [];
-  private samples: number[] = [];
-  private muted = false;
+  private mixer?: GeneratedAy8910Mixer;
+  private renderer?: GeneratedAy8910FrameRenderer;
+  private readonly frames: Float32Array[] = [];
+  private current?: Float32Array;
+  private currentIndex = 0;
 
   constructor() {
     super();
@@ -314,53 +527,48 @@ class GeneratedAy8910Processor extends AudioWorkletProcessor {
         clock?: number;
         chips?: number;
         chipGains?: number[];
+        routes?: GeneratedAyRoute[];
+        refresh?: number;
         offset?: number;
         data?: number;
-        writes?: { offset: number; data: number }[];
+        writes?: GeneratedAyWrite[];
       };
       if (message.type === 'init') {
-        const count = Math.max(1, message.chips ?? 1);
-        this.cores = Array.from(
-          { length: count },
-          () => new GeneratedAy8910Core(message.clock ?? 1_789_772),
+        this.mixer = new GeneratedAy8910Mixer(
+          message.clock ?? 1_789_772,
+          message.chips ?? 1,
+          sampleRate,
+          message.routes,
+          message.chipGains,
         );
-        this.gains = this.cores.map((_, index) => message.chipGains?.[index] ?? 1);
-        this.phases = this.cores.map(() => 0);
-        this.samples = this.cores.map(() => 0);
+        this.renderer = new GeneratedAy8910FrameRenderer(
+          this.mixer,
+          sampleRate,
+          message.refresh ?? 60,
+        );
       } else if (message.type === 'write') {
-        this.apply(message.offset ?? 0, message.data ?? 0);
+        this.mixer?.write(message.offset ?? 0, message.data ?? 0);
       } else if (message.type === 'batch') {
-        for (const write of message.writes ?? []) this.apply(write.offset, write.data);
+        if (this.renderer) this.frames.push(this.renderer.render(message.writes ?? []));
       }
     };
   }
 
-  private apply(offset: number, data: number): void {
-    if (offset < 0) {
-      this.muted = data !== 0;
-      return;
+  private nextSample(): number {
+    while (!this.current || this.currentIndex >= this.current.length) {
+      this.current = this.frames.shift();
+      this.currentIndex = 0;
+      if (!this.current) return 0;
     }
-    this.cores[offset >> 4]?.write(offset & 0x0f, data);
+    return this.current[this.currentIndex++]!;
   }
 
   process(_inputs: Float32Array[][], outputs: Float32Array[][]): boolean {
     const channels = outputs[0];
     const output = channels?.[0];
     if (!output) return true;
-    output.fill(0);
-    if (this.muted) return true;
-    const gainTotal = this.gains.reduce((sum, gain) => sum + gain, 0) || 1;
     for (let index = 0; index < output.length; index++) {
-      let mixed = 0;
-      for (let chip = 0; chip < this.cores.length; chip++) {
-        this.phases[chip] += this.cores[chip].nativeRate / sampleRate;
-        while (this.phases[chip] >= 1) {
-          this.phases[chip] -= 1;
-          this.samples[chip] = this.cores[chip].sample();
-        }
-        mixed += this.samples[chip] * this.gains[chip] / gainTotal;
-      }
-      output[index] = Math.max(-1, Math.min(1, mixed));
+      output[index] = this.nextSample();
     }
     for (let channel = 1; channel < (channels?.length ?? 0); channel++) {
       channels![channel]!.set(output);

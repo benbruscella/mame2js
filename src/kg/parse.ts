@@ -518,6 +518,10 @@ export interface DeviceDef {
   screenRefreshHz?: number;
   screenSize?: { w: number; h: number };
   screenVisarea?: { x0: number; x1: number; y0: number; y1: number };
+  /** VIDEO_UPDATE_* flags passed to screen_device::set_video_attributes. */
+  screenVideoAttributes?: string[];
+  /** Sound output routes declared with add_route(output, target, gain). */
+  audioRoutes?: { output: string; target: string; gain: number; raw: string }[];
   /** slot devices: NES_CONTROL_PORT(config, m_ctrl1, nes_control_port1_devices, "joypad") */
   slotOptions?: string;
   slotDefault?: string;
@@ -665,6 +669,19 @@ export function parseMachineConfigs(
             const [space, mapRef] = splitArgs(s.slice(open + 1, close));
             const mm = /&\s*\w+::(\w+)/.exec(mapRef ?? '');
             if (mm) dev.addrMaps[space.trim()] = mm[1];
+          } else if (method === 'add_route') {
+            const open = s.indexOf('(', s.indexOf(method));
+            const close = matchParen(s, open);
+            const [output = '', target = '', gain = ''] = splitArgs(s.slice(open + 1, close));
+            const parsedGain = evalExpr(gain, consts);
+            if (target.trim().startsWith('"') && parsedGain !== null) {
+              (dev.audioRoutes ??= []).push({
+                output: output.trim(),
+                target: unquote(target),
+                gain: parsedGain,
+                raw: s,
+              });
+            }
           } else if (method === 'set_raw') {
             const open = s.indexOf('(', s.indexOf(method));
             const close = matchParen(s, open);
@@ -672,6 +689,13 @@ export function parseMachineConfigs(
             if (a.length >= 7) {
               dev.screenRaw = { pixclock: a[0], htotal: a[1], hbend: a[2], hbstart: a[3], vtotal: a[4], vbend: a[5], vbstart: a[6] };
             }
+          } else if (method === 'set_video_attributes') {
+            const open = s.indexOf('(', s.indexOf(method));
+            const close = matchParen(s, open);
+            dev.screenVideoAttributes = splitArgs(s.slice(open + 1, close))
+              .flatMap(value => value.split('|'))
+              .map(value => value.trim())
+              .filter(Boolean);
           } else if (method === 'set_refresh_hz' || method === 'set_size' || method === 'set_visarea') {
             // the console screen style (nes.cpp): no set_raw, three setters instead
             const open = s.indexOf('(', s.indexOf(method));

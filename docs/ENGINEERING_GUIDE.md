@@ -35,7 +35,7 @@ with the local TypeScript dependency using `rewriteRelativeImportExtensions`.
 | `npm run gen:all` | clean and generate the branch's currently selected targets |
 | `npm run build` | type-check repository TypeScript without writing to `dist` |
 | `npm run test:unit` | strict type check plus every source/compiler/runtime spec |
-| `npm run test:current` | clean-generate and audit Pac-Man and Pooyan |
+| `npm run test:current` | clean-generate and audit Pac-Man, Pooyan and Time Pilot |
 | `npm run audit:generated` | audit the games currently present in `dist` |
 | `npm run test:generation` | clean-generate every required target and audit all output |
 | `npm run test:games` | deterministic real-ROM contracts for supported games |

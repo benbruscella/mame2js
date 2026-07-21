@@ -72,8 +72,10 @@ void nes_state::nes(machine_config &config)
 {
 	rp2a03_device &maincpu(RP2A03G(config, m_maincpu, NTSC_APU_CLOCK));
 	maincpu.set_addrmap(AS_PROGRAM, &nes_state::nes_map);
+	maincpu.add_route(0, "mono", 0.60);
 
 	SCREEN(config, m_screen, SCREEN_TYPE_RASTER);
+	m_screen->set_video_attributes(VIDEO_UPDATE_SCANLINE);
 	m_screen->set_refresh_hz(60.0988);
 	m_screen->set_size(32*8, 262);
 	m_screen->set_visarea(0*8, 32*8-1, 0*8, 30*8-1);
@@ -102,11 +104,15 @@ void nes_state::nes(machine_config &config)
 
   const cpu = cfg.devices.find(d => d.tag === 'maincpu')!;
   eq('cpu clock from external define', Math.round(cpu.clock!), Math.round(21477272 / 12));
+  eq('audio route', cpu.audioRoutes, [{
+    output: '0', target: 'mono', gain: 0.6, raw: 'maincpu.add_route(0, "mono", 0.60)',
+  }]);
 
   const screen = cfg.devices.find(d => d.tag === 'screen')!;
   eq('screen refresh hz', screen.screenRefreshHz, 60.0988);
   eq('screen size (32*8 arithmetic)', screen.screenSize, { w: 256, h: 262 });
   eq('screen visarea', screen.screenVisarea, { x0: 0, x1: 255, y0: 0, y1: 239 });
+  eq('screen video attributes', screen.screenVideoAttributes, ['VIDEO_UPDATE_SCANLINE']);
 
   const ctrl1 = cfg.devices.find(d => d.tag === 'ctrl1')!;
   eq('slot options table', ctrl1.slotOptions, 'nes_control_port1_devices');

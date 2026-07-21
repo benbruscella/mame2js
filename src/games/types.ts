@@ -37,8 +37,9 @@ export interface GameTestContract {
   screen: { width: number; height: number };
   soundKind: 'wsg' | 'ay8910';
   frames: number;
+  /** Minimum full-contract throughput, including video hashing and audio probing. */
+  minimumFps: number;
   checkpoints: number[];
   actions: GameInputAction[];
   golden?: GameAcceptanceGolden;
 }
-

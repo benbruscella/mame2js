@@ -54,6 +54,27 @@ assert.equal(vblanks, 1);
 assert.equal(renders, 1);
 assert.equal(runner.frameCount, 1);
 
+const scanlines: number[] = [];
+const scanlineMachine: GeneratedMachine = {
+  ...machine,
+  execution: {
+    ...machine.execution,
+    screen: { ...machine.execution.screen, updateMode: 'scanline' },
+  },
+};
+new GeneratedFrameRunner({
+  machine: scanlineMachine,
+  processors: [{ tag: 'maincpu', run: budget => budget }],
+  video: {
+    width: 1,
+    height: 1,
+    render: () => { throw new Error('scanline mode rendered a full frame'); },
+    renderLine: (_frame, line) => { scanlines.push(line); },
+    vblank: () => {},
+  },
+}).frame(new Uint32Array(1));
+assert.deepEqual(scanlines, [0, 1, 2]);
+
 runner.reset();
 assert.equal(runner.frameCount, 0);
 assert.deepEqual(runner.currentCarry, [0]);
