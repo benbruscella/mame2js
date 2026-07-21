@@ -29,7 +29,9 @@ assert.ok(machine);
 const customHandlers = graph.nodes.filter(node =>
   node.label === 'Handler' &&
   String(node.props.ownerClass) === 'invaders_state' &&
-  /^invaders_(?:in[012]_control|sw[56])_r$/.test(String(node.props.method)));
+  /^(?:invaders_in[012]_control_r|invaders_sw5_r|invaders_sw6_sw7_r)$/.test(
+    String(node.props.method),
+  ));
 assert.equal(customHandlers.length, 5);
 assert.ok(graph.edges.some(edge =>
   edge.from === 'inputs:invaders/IN1/f4' &&
