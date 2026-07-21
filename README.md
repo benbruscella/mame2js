@@ -1,120 +1,151 @@
-# mamekit
+# MAMEKIT
 
-The source extraction, knowledge graph and browser runtime toolkit behind
-**[MAME History](https://mamehistory.com)**.
+MAMEKIT is a MAME-source compiler for producing inspectable, browser-native
+machine exhibits. It is the engineering toolkit behind
+[MAME History](https://mamehistory.com).
 
-mamekit is **not a MAME replacement, not a ROM site, and not a universal
-C++ transpiler**. It is a toolkit for exploring selected arcade, console and
-computer systems through the hardware knowledge preserved in
-[MAME](https://github.com/mamedev/mame)'s source code.
+The project treats MAME source as an archival technical record. It extracts
+machine facts and executable behavior from selected MAME drivers, preserves
+source provenance through a knowledge graph and typed intermediate
+representations, and generates a self-contained web application.
+
+MAMEKIT is deliberately:
+
+- **MAME-specific**, not a general C++ transpiler;
+- **source-derived**, not a collection of handwritten TypeScript chip ports;
+- **inspectable**, not an opaque native or WebAssembly build of MAME;
+- **selective**, generating verified machines rather than claiming universal
+  driver compatibility;
+- **ROM-free**, requiring users or tests to supply legally obtained dumps.
+
+## SYSTEM MODEL
 
 ```
-MAME source
-  ↓
-mamekit source compiler    targeted ASTs for MAME C++ and macro/opcode DSLs
-  ↓
-typed machine/device IR    executable behavior with source provenance
-  ↓
-machine knowledge graph    reachability, audit, history and documentation
-  ↓
-generated TypeScript       machine wiring and reachable hardware in dist/
-+ browser host ABI         canvas, audio transport, input, ROMs and storage
-  ↓
-mamehistory.com            playable exhibits in original cabinet artwork
+MAME C++ and macro/opcode DSLs
+                |
+                v
+MAME-specific source-preserving ASTs
+                |
+                v
+machine knowledge graph + source provenance
+                |
+                v
+typed machine / handler / CPU / device / video / audio IR
+                |
+                v
+generated JSON + TypeScript/JavaScript in dist
+                |
+                v
+generic browser host: canvas, Web Audio, input, files, scheduling
 ```
 
-What executes in your browser is the original machine code from your own
-ROMs, run by readable TypeScript generated from the reachable MAME CPU,
-device, and driver source. Machine wiring, clocks, video timing, inputs,
-graphics, and sound behavior use the same source-aware compiler pipeline.
-**Zero runtime dependencies** — plain DOM, canvas, Web Audio, native
-`DecompressionStream`.
+The original program code from the supplied ROM executes in generated CPU
+definitions. MAME machine configuration, address maps, callbacks, graphics,
+video, sound, and device behavior are lowered from MAME source. Checked-in
+runtime code provides generic IR execution and browser services only.
 
-Handwritten TypeScript copies of MAME CPUs, sound chips, video devices, or
-family boards are migration failures, not runtime architecture. Maintained
-`src` code is limited to the MAME-specific compiler and a hardware-neutral
-browser host ABI; generated MAME-domain implementation belongs in `dist`.
+There is no Emscripten emulation build and no checked-in TypeScript copy of
+MAME hardware.
 
-## The machines
+## QUICK START
 
-| Machine | Year | Status |
-|---|---|---|
-| Galaga | 1981 | Playable · audio partial (54xx HLE) |
-| Pac-Man | 1980 | Playable |
-| Galaxian | 1979 | Playable |
-| Gyruss | 1983 | Playable · audio partial (filters approximated) |
-| Space Invaders | 1978 | Playable · SFX synthesized |
-| Moon Patrol | 1982 | Playable · audio partial |
-| Ghosts'n Goblins | 1985 | Playable · YM2203 FM |
-| Juno First | 1983 | Playable · audio under reference comparison |
+Requirements:
 
-Statuses are deliberately honest: *Boots → Playable → Audio partial →
-Audio complete → Reference compared → Museum quality.* See
-[issue #12](https://github.com/benbruscella/mamekit/issues/12) for the
-audio-fidelity work in flight.
-
-## ROMs — the calm version
-
-**No ROMs are hosted, distributed, fetched, or stored. Anywhere.** Bring
-your own legally obtained romsets: the arcade screen becomes a drop target
-that shows exactly which chips the zip must contain and verifies every one
-(name, CRC32, and clone-revision alternates — all derived from the driver
-source) before booting. The bytes live in your page's memory and die with
-it. MAME History is an independent project and is not affiliated with or
-endorsed by MAMEDEV.
-
-## Quick start
+- Node.js 23.6 or newer;
+- this repository;
+- a MAME source checkout at `../mame`, or an explicit `--mame-src` /
+  `MAME_SRC` path;
+- local ROMs only for acceptance or browser testing.
 
 ```sh
-git clone https://github.com/benbruscella/mamekit
-cd mamekit && npm install            # typescript only (dev dep)
-
-# needs a MAME source checkout as sibling (../mame) or --mame-src/$MAME_SRC
-node bin/mamekit.js galaga           # extract + generate one machine
-node bin/mamekit.js --serve          # serve everything (no MAME tree needed)
+npm ci
+npm run gen:all
+npm run test:unit
+npm run audit:generated
+npm run serve
 ```
 
-Open **http://localhost:8280/app/** — the shelf. Click a machine to read
-its story (driver credits, contribution history, Gaming History write-up),
-then Play. Machines live at `/app/g/<game>/`; each also gets a knowledge
-graph viewer (`/​<game>/viewer.html`) and a markdown dossier
-(`/​<game>/README.md`).
+`npm run gen:all` always deletes `dist` before generation. The current branch
+keeps that command scoped to Pac-Man and Pooyan while the source-generation
+pattern is validated one machine at a time.
 
-Controls: **arrows** move · **Space/X** fire · **Z** button 2 · **5** coin ·
-**1** start · **Esc** back to the shelf.
+The generated application is served at `http://localhost:8280/app/`.
 
-Requires **Node ≥ 23.6** (the CLI is TypeScript run natively; the only
-build step is `tsc` for the browser app).
-
-## Why not compile MAME to WebAssembly?
-
-Compiling MAME to WASM runs MAME in the browser — a fine thing that already
-exists. mamekit has a different goal: **extract machine knowledge from MAME
-source and generate small, inspectable, browser-native exhibits** for
-selected machines. Every fact on a machine page — memory map, chip roster,
-clock tree, DIP sheet — is data you can read, link to, and learn from, not
-bytes inside a compiled blob. Mamekit does not use Emscripten or WebAssembly
-for emulation. Its executable output is readable TypeScript with links back
-to the MAME source constructs that produced it.
-
-## Project shape
+## REPOSITORY MAP
 
 ```
-src/kg/        extractor + knowledge graph (parse, build, viewer, cypher)
-src/mame/      MAME C++/macro/opcode DSL ASTs and typed lowering
-src/gen/       IR -> generated TypeScript, configs, dossiers, unified app
-src/runtime/   hardware-neutral browser ABI, scheduler, shell and presentation
-dist/          generated machine and reachable MAME hardware implementation
-tools/         dev instruments (headless audio render, reference A/B)
-docs/          written for cold-start sessions — start at docs/README.md
+src/mame/       MAME ASTs, opcode DSL parsing, typed lowering and hardware closure
+src/kg/         knowledge-graph construction, schema, Cypher and viewer
+src/gen/        machine/config emitters, app build, reports and generated audits
+src/runtime/    browser host and generic typed-IR execution
+bin/            CLI entry point
+scripts/        deployment automation
+tools/          engineering diagnostics
+docs/           the two current engineering references
+sessions/       historical build transcripts; never current instructions
+dist/           disposable generated distribution
 ```
 
-Adding a machine extends the source-compiled hardware closure rather than
-adding a handwritten family implementation. See issue
-[#21](https://github.com/benbruscella/mamekit/issues/21) for the active
-migration and acceptance criteria.
+## GENERATED DISTRIBUTION
 
-## License
+```
+dist/
+├── app/                         app entry, registry and static game routes
+├── runtime/
+│   ├── core/                    compiled generic runtime
+│   └── generated/               MAME-derived hardware, IR and audio modules
+├── games/
+│   ├── arcade/<game>/           arcade graph, machine, metadata and dossier
+│   └── consoles/<system>/       console graph, machine, metadata and dossier
+├── games.json                   generated catalog
+└── index.html                   redirect to app/
+```
 
-Code: see [LICENSE](LICENSE). ROMs and artwork remain the property of
-their rights holders and are never included.
+The output is canonical and self-contained:
+
+- app files are not duplicated under game directories;
+- game modules are not duplicated under `app`;
+- generated data is stored as JSON, not embedded in JavaScript strings;
+- generated behavior imports canonical JSON and shared runtime modules;
+- browser modules never import `src` or files outside `dist`.
+
+`dist` is disposable. Never diagnose or preserve a mixed build: clean and
+regenerate it.
+
+## ENGINEERING DOCUMENTATION
+
+There is one README and two current engineering documents:
+
+- [SYSTEM ARCHITECTURE](docs/SYSTEM_ARCHITECTURE.md): system design, compiler stages,
+  knowledge graph, typed IR, generated runtime, browser execution, provenance,
+  and hard boundaries.
+- [ENGINEERING GUIDE](docs/ENGINEERING_GUIDE.md): commands, extending a target,
+  debugging generation gaps, tests, browser verification, deployment, and
+  maintenance rules.
+
+Historical transcripts are indexed by
+[ARCHIVE INDEX](sessions/ARCHIVE_INDEX.md). Archive content records how the
+project arrived here; it does not override current documentation or code.
+
+## NON-NEGOTIABLE INVARIANTS
+
+1. MAME hardware behavior is generated from MAME source.
+2. `src/runtime` contains no handwritten MAME CPU, device, audio, video, or
+   board implementations.
+3. The knowledge graph is an executable dependency and provenance model, not
+   only a visualization format.
+4. JSON stores data; TypeScript/JavaScript stores behavior.
+5. `dist` is cleaned before complete generation.
+6. Generated output is self-contained and has one canonical copy of each
+   artifact.
+7. Arcade ROMs are never served, committed, or persisted by the application.
+8. Unsupported source shapes fail visibly through diagnostics and reports.
+
+## LEGAL AND PROJECT SCOPE
+
+MAMEKIT does not contain or distribute ROMs. Artwork and historical material
+remain the property of their rights holders. MAMEKIT is independent from and
+not endorsed by MAMEDEV.
+
+Current implementation work is tracked in
+[GitHub issue 21](https://github.com/benbruscella/mamekit/issues/21).

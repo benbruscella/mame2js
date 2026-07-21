@@ -1,8 +1,8 @@
 // Browser-side cartridge library. Console carts the visitor drops are
 // remembered in THEIR OWN browser (IndexedDB `mamekit-carts`) so the console
 // shelf survives reloads — reintroduced for consoles by explicit user
-// approval (2026-07-07). Nothing ever touches the server (gotchas §24 still
-// holds for fetching); Eject deletes; the menu's legacy-storage purge must
+// approval (2026-07-07). Nothing ever touches the server; Eject deletes;
+// the menu's legacy-storage purge must
 // never target this DB.
 //
 // When IndexedDB is unavailable (private browsing, quota, disabled) the store

@@ -637,8 +637,8 @@ export async function generate(graph: KnowledgeGraph, opts: GenerateOptions): Pr
   );
 
   // the full dossier: everything above as a standalone markdown document,
-  // readable outside the app (games/<category>/<game>/README.md)
-  writeFileSync(join(opts.outDir, 'README.md'), gameMarkdown({
+  // readable outside the app (games/<category>/<game>/DOSSIER.md)
+  writeFileSync(join(opts.outDir, 'DOSSIER.md'), machineDossierMarkdown({
     game: opts.game, title, fullname: String(game.props.fullname),
     year: String(game.props.year), company: String(game.props.company),
     family, driverFile: String(graph.meta.driverFile),
@@ -649,7 +649,7 @@ export async function generate(graph: KnowledgeGraph, opts: GenerateOptions): Pr
       cart: { list: String(cart.list), entries: cartEntries, slots: cart.slots as string[] },
     } : {}),
   }));
-  console.log(`\ngenerated ${join(opts.outDir, 'config.json')} (+ meta.json, README.md, runtime report)`);
+  console.log(`\ngenerated ${join(opts.outDir, 'config.json')} (+ meta.json, DOSSIER.md, runtime report)`);
   if (!existsSync(join(projectRoot, 'roms', `${opts.game}.zip`))) {
     console.log(`note: put ${opts.game}.zip in ${join(projectRoot, 'roms')}/ to auto-load ROMs (or drop the zip onto the page)`);
   }
@@ -660,7 +660,7 @@ export async function generate(graph: KnowledgeGraph, opts: GenerateOptions): Pr
  * as one standalone markdown document. Nothing here is hand-written — every
  * fact flows from the graph (or MAME git / Gaming History side-channels).
  */
-function gameMarkdown(d: {
+function machineDossierMarkdown(d: {
   game: string; title: string; fullname: string; year: string; company: string;
   family: string; driverFile: string; license?: string; copyrightHolders?: string;
   cpus: { tag: string; type?: string; clock: number; ranges: unknown[] }[];

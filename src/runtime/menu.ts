@@ -283,7 +283,7 @@ export async function runMenu(): Promise<void> {
         background:${entry.supported === false ? '#666' : '#c22'};color:#fff;font-size:10px;font-weight:700;
         letter-spacing:1px;padding:4px 0;box-shadow:0 2px 6px rgba(0,0,0,.5)`);
       // a game generated before its board compiles must never offer Play
-      // (stale-bundle crash, see gotchas) — story card still opens
+      // (stale-bundle protection) — story card still opens
       const gapCount = entry.generationGaps?.length ?? 0;
       ribbon.textContent = entry.supported === false
         ? `BLOCKED${gapCount ? ` · ${gapCount}` : ''}`
@@ -497,7 +497,7 @@ export async function runMenu(): Promise<void> {
     );
     viewer.target = '_blank';
     links.appendChild(viewer);
-    const dossier = mkBtn('Full dossier (markdown)', `../${entry.dataPath}/README.md`, false);
+    const dossier = mkBtn('Full dossier (markdown)', `../${entry.dataPath}/DOSSIER.md`, false);
     dossier.target = '_blank';
     links.appendChild(dossier);
     card.appendChild(links);

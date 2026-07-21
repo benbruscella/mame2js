@@ -116,6 +116,7 @@ export function auditGenerated(outRoot: string): GeneratedAudit {
   for (const { game: target, category, dir } of generatedTargets) {
     const required = [
       'config.json',
+      'DOSSIER.md',
       'graph.json',
       'runtime-report.json',
       'generated/board.ts',
