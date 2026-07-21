@@ -297,8 +297,8 @@ class GeneratedTilemap {
   private readonly machine: GeneratedMachine;
   private readonly bindings: () => GeneratedHandlerBindings;
   private readonly gfx: GeneratedGfxElement[];
-  private readonly tiles: TileInfo[];
-  private readonly dirty: Uint8Array;
+  private readonly tiles: Array<TileInfo | undefined> = [];
+  private readonly dirty: number[] = [];
   private flip = 0;
 
   constructor(
@@ -311,13 +311,6 @@ class GeneratedTilemap {
     this.machine = machine;
     this.bindings = bindings;
     this.gfx = gfx;
-    const tileCount = plan.columns * plan.rows;
-    this.tiles = Array.from(
-      { length: tileCount },
-      () => ({ gfx: 0, code: 0, color: 0, flags: 0, category: 0 }),
-    );
-    this.dirty = new Uint8Array(tileCount);
-    this.dirty.fill(1);
     this.mapper = standardMapper(plan.mapper)
       ? undefined
       : requiredHandler(machine, plan.mapper);
@@ -325,7 +318,7 @@ class GeneratedTilemap {
   }
 
   mark_tile_dirty(index: number): void {
-    if (index >= 0 && index < this.dirty.length) this.dirty[index] = 1;
+    if (Number.isInteger(index) && index >= 0) this.dirty[index] = 1;
   }
 
   set_flip(flags: number): void {
@@ -375,9 +368,14 @@ class GeneratedTilemap {
               },
             ).value
           : mapStandardTile(this.plan.mapper, column, row, this.plan.columns, this.plan.rows);
-        const tileIndex = modulo(Number(mapped) || 0, this.tiles.length);
-        const tile = this.tiles[tileIndex]!;
-        if (this.dirty[tileIndex]) {
+        const tileIndex = generatedTileMemoryIndex(mapped);
+        let tile = this.tiles[tileIndex];
+        const needsUpdate = !tile || this.dirty[tileIndex] === 1;
+        if (!tile) {
+          tile = { gfx: 0, code: 0, color: 0, flags: 0, category: 0 };
+          this.tiles[tileIndex] = tile;
+        }
+        if (needsUpdate) {
           Object.assign(tile, { gfx: 0, code: 0, color: 0, flags: 0, category: 0 });
           const tileinfo = createGeneratedTileInfoTarget(tile);
           executeGeneratedMachineProgram(
@@ -408,6 +406,14 @@ class GeneratedTilemap {
       }
     }
   }
+}
+
+export function generatedTileMemoryIndex(mapped: unknown): number {
+  const index = Number(mapped);
+  if (!Number.isInteger(index) || index < 0 || index > 0xffff_ffff) {
+    throw new Error(`generated tile mapper returned invalid memory index ${String(mapped)}`);
+  }
+  return index;
 }
 
 /**

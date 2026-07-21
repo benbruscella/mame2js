@@ -2,6 +2,7 @@ import { compileMameHandler } from '../mame/handler-ir.ts';
 import type { GeneratedMachine } from './generated-machine.ts';
 import {
   createGeneratedTileInfoTarget,
+  generatedTileMemoryIndex,
   GeneratedVideoRenderer,
   type GeneratedVideoPrimitives,
 } from './generated-video.ts';
@@ -85,4 +86,7 @@ if (cachedTile.category !== 1) throw new Error('tile category did not reach the 
 if (cachedTile.gfx !== 2 || cachedTile.code !== 3 || cachedTile.color !== 4 || cachedTile.flags !== 5) {
   throw new Error('tileinfo.set did not reach the render cache');
 }
-console.log('generated-video.spec: 5 passed');
+if (generatedTileMemoryIndex(1012) !== 1012) {
+  throw new Error('custom mapper memory index was folded into the logical tile count');
+}
+console.log('generated-video.spec: 6 passed');
