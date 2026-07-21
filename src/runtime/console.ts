@@ -185,9 +185,9 @@ function consoleArt(W: number, H: number): string {
 }
 
 async function fetchCatalog(cfg: ShellConfig): Promise<SoftCatalog | null> {
-  // catalogUrl is relative to config.json, which lives at ../<game>/config.json
+  // catalogUrl is relative to the canonical generated machine directory.
   try {
-    const r = await fetch(`../${encodeURIComponent(cfg.game)}/${cfg.cart?.catalogUrl ?? 'softlist.json'}`);
+    const r = await fetch(`../${cfg.dataPath}/${cfg.cart?.catalogUrl ?? 'softlist.json'}`);
     return r.ok ? await r.json() as SoftCatalog : null;
   } catch { return null; }
 }

@@ -138,6 +138,8 @@ export interface ShellConfig {
   family: string;
   /** 'console' machines route to the console room first (default arcade) */
   kind?: 'arcade' | 'console';
+  /** canonical generated artifact directory relative to the distribution root */
+  dataPath: string;
   board: BoardConfig;
   sound: SoundSpec;
   roms: RomRegionSpec[];

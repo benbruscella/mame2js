@@ -18,7 +18,7 @@ rm -rf dist/artwork
 if [[ "$ART" == "--artwork" ]]; then
   mkdir -p dist/artwork
   # everything the app fetches at runtime; data/ (61 MB history dat) is
-  # dev-time only — its text is already extracted to dist/<game>/history.txt
+  # dev-time only — its text is extracted under dist/games/<category>/<game>/
   rsync -a --exclude 'data' --exclude '.DS_Store' artwork/ dist/artwork/
 fi
 

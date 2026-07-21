@@ -10,6 +10,7 @@ import {
 } from '../runtime/shell.ts';
 import type { Board, BoardSnapshot, Regions } from '../runtime/types.ts';
 import { crc32, readZip } from '../runtime/zip.ts';
+import { gameOutputDir } from './output-layout.ts';
 
 interface AyCore {
   readonly nativeRate: number;
@@ -35,13 +36,14 @@ export async function verifyPooyanAcceptance(
   projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..'),
 ): Promise<void> {
   const outRoot = join(projectRoot, 'dist');
+  const gameDir = gameOutputDir(outRoot, 'arcade', 'pooyan');
   const romPath = process.env.MAMEKIT_POOYAN_ROM
     ? resolve(process.env.MAMEKIT_POOYAN_ROM)
     : join(projectRoot, 'roms/arcade/pooyan.zip');
   assert.ok(existsSync(romPath), `Pooyan acceptance ROM is missing: ${romPath}`);
 
   const config = JSON.parse(
-    readFileSync(join(outRoot, 'pooyan/config.json'), 'utf8'),
+    readFileSync(join(gameDir, 'config.json'), 'utf8'),
   ) as ShellConfig;
   const files = await readZip(new Uint8Array(readFileSync(romPath)));
   const critical = new Set(config.board.cpus.map(cpu => cpu.region));
@@ -52,11 +54,11 @@ export async function verifyPooyanAcceptance(
   const regions = assembleRegions(config.roms, files, () => {}, critical);
 
   const registry = await import(
-    moduleUrl(join(outRoot, 'app/modules/generated/registry.js'))
+    moduleUrl(join(outRoot, 'app/registry.js'))
   ) as { registerGeneratedMachines(): void };
   registry.registerGeneratedMachines();
   const generatedRuntime = await import(
-    moduleUrl(join(outRoot, 'app/modules/runtime/generated-board.js'))
+    moduleUrl(join(outRoot, 'runtime/core/generated-board.js'))
   ) as {
     createBoard(
       boardConfig: ShellConfig['board'],
@@ -71,7 +73,7 @@ export async function verifyPooyanAcceptance(
   globals.sampleRate = 48_000;
   globals.registerProcessor = () => {};
   const ayModule = await import(
-    moduleUrl(join(outRoot, 'app/modules/runtime/ay8910-worklet.js'))
+    moduleUrl(join(outRoot, 'runtime/generated/audio/ay8910-worklet.js'))
   ) as {
     GeneratedAy8910Core: new (clock: number) => AyCore;
   };

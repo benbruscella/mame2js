@@ -31,13 +31,14 @@ assert.equal(audit.familyAdapters, 0);
 assert.ok(audit.executableHardware >= 2);
 
 const registry = readFileSync(
-  join(outRoot, 'app/modules/generated/registry.js'),
+  join(outRoot, 'app/registry.js'),
   'utf8',
 );
 assert.ok(registry.includes('registerGeneratedCpu'));
 assert.ok(registry.includes('registerGeneratedDevice'));
 assert.ok(!registry.includes('/src/'));
-assert.ok(!existsSync(join(outRoot, 'app/dist')));
+assert.ok(!existsSync(join(outRoot, 'app/modules')));
+assert.ok(existsSync(join(outRoot, 'runtime/core/generated-board.js')));
 
 const games = JSON.parse(
   await gamesManifest(outRoot, join(projectRoot, 'artwork')),

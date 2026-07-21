@@ -60,7 +60,7 @@ import type {
   Cpu,
   CpuBus,
   GeneratedCpuExecutable,
-} from '../../../app/modules/runtime/generated-cpu.js';
+} from '../../core/generated-cpu.js';
 
 class Pair16 {
   private value = 0;

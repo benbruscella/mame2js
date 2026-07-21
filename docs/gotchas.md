@@ -1,243 +1,79 @@
-# Gotchas — read before changing anything
+# Gotchas
 
-Hard-won facts, roughly ordered by how expensive they were to learn.
+## Clean before generation
 
-## 0. Input polarity is per-field, from the graph (galaxian!)
-Galaga/pacman inputs are classic active-low (released = 0xff). **Galaxian's
-are ACTIVE-HIGH** (`IP_ACTIVE_HIGH` in the driver): a port initialized to
-0xff reads as "coin switch permanently pressed" — the game boot-loops
-slamming coin sounds and never leaves the self-test screen. The generator
-computes each port's resting byte (`ports[].init`) and each binding's
-polarity from the graph's PortField `activeLow`; KeyboardInput restores
-init bits on keyup. Never assume 0xff = idle.
+Generated files are renamed and deleted as the compiler evolves. Every complete
+generation must start by deleting `dist`; otherwise stale app copies can make a
+broken target appear to work. `npm run gen:all` enforces this.
 
-## 0b. boards/index.ts must not be imported by board modules
-The registry imports every board module; if a board imports anything back
-from `boards/index.ts` (e.g. it used to host `portHandlers`), running that
-board's spec directly evaluates the registry mid-cycle and hits the class
-TDZ ("Cannot access 'PacmanBoard' before initialization"). Shared board
-helpers live in `input.ts` / `types.ts`, never in the registry.
+## One canonical copy
 
-## 0c. The Playwright MCP browser is shared with subagents
-Parallel agents drive the SAME browser instance. If pages navigate
-themselves between your calls or console errors appear from URLs you never
-opened, another agent is testing — don't chase ghosts; verify after agents
-finish.
+Game modules live only in `dist/games/<category>/<game>/generated`. Shared
+hardware lives only in `dist/runtime/generated`. `dist/app` contains the app
+entry, registry and route HTML, not copies of either tree.
 
-## 1. The 51xx port-order trap
-Modern MAME wires 51xx `input_callback<0..1>` = IN0 (joystick) and `<2..3>` =
-IN1 (coins/start/buttons) — true to the real MCU. The **classic HLE**
-(which `namco51.ts` transpiles) was written against the OLD port order (coins
-on ports 0/1). `Namco51` accepts modern-order callbacks and reorders
-internally. Verified against MAME 0.121's driver where old-IN0 = coins.
-If credits stop working after a refactor, look here first.
+## JSON is data
 
-## 2. Old MAME code lives in this repo's git history
-The MAME checkout's history goes back to 0.121 (2007). The classic 51xx HLE:
-`git show 7b77f121862:src/mame/machine/namcoio.c`. This trick generalizes —
-pre-MCU HLE cores for 50xx/52xx/53xx/54xx are all there, useful references
-for browser-friendly HLE implementations.
+Large typed IR values belong in `.json` files. Generated source imports them
+with JSON import attributes. Do not emit `JSON.parse("{...}")` or duplicate the
+same IR in TypeScript and JSON.
 
-## 3. Romset filename drift → match by CRC
-The user's galaga set uses dash names (`gg1-1b.3p`); current MAME defines
-underscores (`gg1_1b.3p`). Same bytes, same CRCs. `assembleRegions` matches
-name → dash/underscore-swapped name → CRC32. Don't remove the CRC path.
+## MAME-specific, not generic C++
 
-## 4. erasableSyntaxOnly (TS1294)
-Node's native type-stripping forbids enums, namespaces, and **constructor
-parameter properties** (`constructor(private x: T)`). tsconfig enforces via
-`erasableSyntaxOnly`. Both the main build and the generated app build use it.
-Also: import specifiers must end `.ts` (rewritten to `.js` at emit by
-`rewriteRelativeImportExtensions`), and type-only imports need `import type`
-(verbatimModuleSyntax).
+The compiler may rely on MAME class patterns, macros, device conventions and
+opcode DSLs. Add a source-preserving MAME AST/lowering rule instead of expanding
+scope into a general C++ compiler.
 
-## 5. Handler nodes are shared; tags live on edges
-`handler:ls259_device.write_d0` is ONE node used by both misclatch and
-videolatch. The per-use device tag is on the READS/WRITES **edge** props
-(`deviceTag`). Storing it on the node silently corrupts the second latch.
+## No handwritten MAME hardware in runtime
 
-## 6. Device-parser regex and wrapped instantiation
-`ls259_device &misclatch(LS259(config, "misclatch"))` — the `&` before the
-local var name broke DEVICE_MACRO_RE once (misclatch/51xx/54xx/06xx silently
-missing from the graph). If a device is missing from the CLI digest, suspect
-the instantiation form, check `parse.ts` DEVICE_MACRO_RE.
+`src/runtime` is the browser host and generic IR executor. A file such as
+`src/runtime/z80.ts` or `src/runtime/ay8910.ts` means the generation boundary has
+failed. Fix the source compiler or generic operation vocabulary instead.
 
-## 7. Bus shares must be passed in, not created per-Bus
-All three Z80 buses share one `shares` object (videoram, galaga_ram1/2/3).
-Constructing buses with separate share maps gives each CPU private RAM and
-the game silently never boots (subs wait on shared-RAM mailboxes).
+## Category is a source fact
 
-## 8. 06xx NMI pacing and the read-stretch
-Galaga's ISR-driven I/O depends on the 06xx pulsing main-CPU NMIs at
-clock/2^shifts (control 0x71 → 6 kHz → every 512 CPU cycles) and on the
-FIRST pulse of a read burst being suppressed. Without the stretch the first
-read returns garbage and coin-up misbehaves.
+Arcade `GAME` targets go to `games/arcade`; console/system declarations go to
+`games/consoles`. Use generated `dataPath` values in app/runtime code. Do not
+infer paths from a game name or default consoles into the arcade tree.
 
-## 9. Misclatch Q3 semantics (inverted, multi-target)
-Q3=0 holds sub, sub2 **and** 51xx/54xx in reset (boot state after latch
-reset). On the 0→1 edge both sub CPUs must `.reset()` (fresh PC), not just
-resume. The main CPU releases them once mailboxes are initialized.
+## Relative URLs have two bases
 
-## 10. Synthetic input needs real hold times
-The 51xx samples inputs when polled (~per NMI burst). Playwright's
-`press()` (~ms) can miss the edge entirely. Hold ≥200 ms. Same will apply to
-any future input-replay/test automation.
+Pretty routes use `/app/g/<game>/` with `<base href="../../">`, so app URLs
+resolve as if the page were `/app/`. Game README paths, however, start three
+levels below `dist` and need `../../../app/g/<game>/`.
 
-## 11. Video facts that bite
-- Frame is **native landscape 288×224**; ROT90 happens at blit time
-  (translate + rotate π/2 onto a 224×288 canvas).
-- Framebuffer packing is 0xAABBGGRR (ImageData byte order via a
-  Uint8ClampedArray view over the same buffer).
-- Sprite registers are the TOP 0x80 bytes (0x380-0x3ff) of each of
-  ram1/ram2/ram3 — the rest is general work RAM.
-- Char transparency: LUT nibble == 0x0f (not pen 0).
+## Audio worklets are separate modules
 
-## 12. AudioWorklet serving
-The worklet is a separate compiled module (`dist/runtime/wsg-worklet.js`)
-that ES-imports `./wsg.js` (and `./namco54.js`) — all must be served; a
-bundler-style inline would break. Audio needs user activation, but the menu
-click that navigated to the game normally satisfies it (same-origin
-carryover); the shell starts audio immediately and resumes on first input
-as fallback. `AudioOutput` buffers pre-start register writes and replays
-them.
+Generated worklets live under `dist/runtime/generated/audio`. Their imports
+must resolve from that directory to `dist/runtime/core`; browser audio also
+requires a secure context or localhost and a user gesture.
 
-## 13. Playwright MCP can't open file:// URLs
-Use the dev server (`--serve`, :8280). The KG viewer works from file:// for
-humans, but automated checks need http.
+## JSON modules need correct MIME types
 
-## 14. The symlink arrangement
-Repo truth: `~/Projects/Github/mamekit`. `<mame>/mamekit` is a symlink kept
-for convenience; the MAME repo excludes it via `.git/info/exclude` (entry
-`/mamekit` — **no trailing slash**, symlinks aren't directories). The CLI
-auto-detects MAME source at `../mame` or parent.
+Generated boards import `machine.json` in the browser. The static server must
+serve `.json` as `application/json`. Browser checks must cover this import path,
+not only Node-side dynamic imports.
 
-## 15. ROMs
-`roms/` is gitignored because ROM images are copyrighted. Never commit them,
-never fetch them. The user's local set (all six games) currently lives in
-`_roms/` — the user renamed the dir on 2026-07-06 to exercise the drop-zone
-path, so the dev server 404s zips until it's renamed back. **The rename
-escaped the old `/roms/` ignore rule and the zips got committed and pushed**;
-they were scrubbed with filter-branch + force-push, and `.gitignore` now
-blocks `/roms/`, `/_roms/` and `*.zip`. Two lessons: (a) watch for ignore
-escapes when dirs get renamed, (b) `git filter-branch`'s final checkout
-REMOVES formerly-tracked files from the working tree — restore them from the
-backup branch before deleting it.
+## Input polarity comes from MAME
 
-## 16. `dist/.driver-cache.json`
-Driver discovery caches game→driver-file mappings. If you point at a
-different MAME checkout and things look stale, delete it.
+Released input values are not universally `0xff`. Preserve each MAME port
+field's active polarity and generated initial value. Coin/start tests should
+hold synthetic keys long enough for the generated machine's polling cadence.
 
-## 17. No sound? Check the protocol, not the mixer
-**AudioWorklet requires a secure context.** On plain http (real domains)
-`audioWorklet.addModule` fails and every core is silent; localhost is
-exempt, so "works locally, silent in prod" = missing HTTPS. GitHub-level
-enforcement + a client-side http→https redirect in main.ts both exist —
-keep them.
+## ROMs stay outside the app
 
-## 18. Relative URLs are load-bearing
-The whole app is base-path agnostic (GitHub Pages serves under `/<repo>/`,
-the custom domain at `/`). Every runtime fetch and generated URL is
-relative to the `/app/` page; the pretty-route pages under `app/g/<game>/`
-rely on `<base href="../../">`. A single leading-slash URL breaks the
-deployed site while working fine on localhost:8280. The dev server
-301-redirects bare directory paths to match Pages.
+Arcade ROMs are supplied by the user through a file picker/drop and are not
+served or persisted. Console carts are stored only in the visitor's browser by
+the console workflow. Real-ROM tests read local gitignored files directly.
 
-## 19. Pages CDN caching will gaslight you
-`max-age=600` on everything. After a deploy, curl with a cache-busting
-query (or check `age:` in headers) before concluding the deploy failed;
-browsers additionally cache module scripts hard (hence the `?v=<stamp>` on
-main.js). Pages builds take minutes with the 74 MB artwork tree, and a
-superseded build can show `errored` — only the latest build matters.
+## Node TypeScript constraints
 
-## 20. history.dat is CRLF
-The Gaming History dat uses `\r\n`. The extractor normalizes at the source;
-if you ever re-extract by hand, `$`-anchored regexes (section splitting,
-boilerplate stripping) silently fail against un-normalized text.
+Node runs the CLI TypeScript directly with type stripping. Keep
+`erasableSyntaxOnly`, use type-only imports where required, and let the browser
+build rewrite relative `.ts` imports to `.js`.
 
-## 21. Macro-argument regexes must tolerate nested parens
-`KONAMI_COINAGE_LOC(SW1)`-style port macros and `XTAL(3'579'545)` device
-args both broke lazy regex captures (gyruss stuck-coin, mpatrol clock=0).
-Use `matchParen`/balanced scanning for anything that can contain `()`.
+## Provenance and gaps are first-class
 
-## 22. ROMREGION_ERASEFF matters
-Regions flagged ERASEFF must be 0xff-filled before gfx decode — zero-fill
-decodes to transparent pen 0 (mpatrol's black ground strip). Handled in
-video/m52.ts (`normalizeBgRegion`); a graph-driven region-fill flag is the
-proper fix (TODO).
-
-## 23. Map resolution traps (multi-game drivers)
-Maps resolve same-class-first (alpha1v's identically-named map must not
-shadow mpatrol's), then by name (irem_audio's base-class map). Cross-config
-`set_addrmap` patches attach to the PATCHING config and resolve only along
-a game's own CALLS chain — attaching them to the shared device node broke
-pacman ("cannonbp_protection_r").
-
-## 24. ROMs are never read from the server — at all
-Hard user directive (2026-07-06, "stop reading roms from local anything").
-No `/roms` mount in serve.ts, no `romUrl` in configs, no fetch in the shell,
-no symlinks to make dev "convenient". The only source is the user's own
-drag-drop. **Arcade** ROMs are never persisted — the bytes die with the page
-(the old `runtime/romstore.ts` IndexedDB layer was deleted). **Console carts**
-ARE persisted, but only in the visitor's own browser (IndexedDB
-`mamekit-carts` via `runtime/cartstore.ts`), by explicit later user approval
-(2026-07-07) — still never on the server. Dev verification uses headless
-scratchpad harnesses reading `_roms/` (or `_roms2/`) directly — Node scripts,
-never the app. See §27 for the console model.
-
-## 25. A generated game is NOT a playable game (stale-bundle trap)
-Running `mamekit <game>` writes dist/<game>/ immediately — the shelf lists it
-— but the app bundle only gains the board when tsc succeeds, which it can't
-while agent-built cores are still in flight. Old bundle + new manifest =
-"no board module" crash at Play (burned us on junofrst). The manifest now
-sets `supported` by checking the COMPILED board module exists
-(dist/app/dist/runtime/boards/<family>.js); the menu shows unsupported games
-as "IN DEVELOPMENT" with Play hidden. Don't bypass it.
-
-## 26. DreamHost DNS publishes slowly
-Panel edits take ~5-15 min to reach ns1-3.dreamhost.com — `dig
-@ns1.dreamhost.com` before blaming the records. GitHub Pages cert issuance
-can stall on a domain set before DNS propagated; remove/re-add the cname to
-kick it. The deploy script must own `dist/CNAME` or a force-push detaches
-the custom domain.
-
-## 27. Consoles: the machine has no ROMs; carts are the content (nes, issue #17)
-The NES is declared with `CONS(...)` (an alias of `SYST` in gamedrv.h — extra
-COMPAT field, no MONITOR/ROT), which the parser now recognizes alongside
-`GAME`. Its `ROM_START` is an empty RAM region — the machine needs no ROMs;
-all content is user-supplied cartridges. Fallout to remember:
-- **config gains `kind:"console"` + a `cart` block** `{interface, list,
-  catalogUrl, slots, games}`. `slots` = mappers the board implements; `games`
-  = the *explicit verified allowlist* (user directive 2026-07-07: "support
-  explicit games, not all, so I can test" — starts at `['smb']`). Both are
-  device-library capability tables in the generator (`CART_SLOT_SUPPORT` /
-  `CART_GAME_SUPPORT`), NOT graph facts.
-- **The cart catalog** (`dist/nes/softlist.json`, ~4.5k entries) is extracted
-  from MAME `hash/nes.xml` by `src/kg/softlist.ts` — a sibling artifact, kept
-  OUT of graph.json (it would swamp the viewer). Carts are identified by CRC
-  of the prg/chr slices **separately** (a `.nes` file is header+prg+chr; the
-  catalog CRCs are per-chip). `runtime/nes-ines.ts` does header parse + match.
-- **Three support tiers** from `identify()`: `tested` (allowlisted → verified,
-  plays), `experimental` (supported mapper, unverified → plays, flagged),
-  `unsupported` (mapper not implemented → no play). Don't collapse them.
-- **Cart handoff to the board**: the console room injects `board.cart =
-  {mapper, mirroring, battery}` into a cloned config and passes cart bytes as
-  `regions.prg`/`regions.chr` to `runShell(cfg, regions)`. The generated
-  config never carries cart bytes. `regions.chr` absent/empty ⇒ 8K CHR-RAM.
-- **Controller ports come from the slot device**, not the driver:
-  `INPUT_PORTS_START(nes)` is empty; the joypad's 8 active-HIGH bits live in
-  `bus/nes_ctrl/joypad.cpp`, reached via a Device→InputPorts USES_INPUTS edge
-  (`build.ts` `resolveSlotInputs`). NES keys: Z=A, X/Space=B, Enter=Start,
-  RightShift=Select, arrows=d-pad. The shell's on-screen help is now generated
-  from the bindings (`controlsHelp`), so it's correct per machine.
-- **Audio DMC is split-brain**: the APU DSP runs in the worklet and can't read
-  CPU memory, so the board runs a main-thread "shadow" APU for $4015/IRQs and
-  snapshots DMC sample bytes from cart PRG, pushing them via
-  `BoardSinks.soundData` → `AudioOutput.data()`.
-
-## 28. The Playwright MCP browser is shared with the USER too
-§0c warns about parallel agents sharing the browser — but the *user* driving
-their own session in the same instance will also make pages navigate between
-your calls (e.g. the console menu "jumping" into `g/nes/` was the user
-clicking, not a bug). When live-debugging with the user, don't chase
-self-navigations; and `indexedDB.deleteDatabase(...)`/`localStorage.clear()`
-in an `evaluate` will wipe the user's own dropped carts — warn first.
+Every generated callback, handler and hardware artifact should retain MAME
+source locations. Unsupported hardware must remain visible in runtime reports
+and the generated audit; do not hide it behind a permissive fallback.

@@ -13,6 +13,11 @@ import { fileURLToPath } from 'node:url';
 import { buildGraph, gameSubgraph } from './kg/build.ts';
 import { toCypher } from './kg/cypher.ts';
 import { viewerHtml } from './kg/viewer.ts';
+import {
+  existingGameOutputDir,
+  gameCategory,
+  gameOutputDir,
+} from './gen/output-layout.ts';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const projectRoot = resolve(here, '..');
@@ -134,7 +139,10 @@ if (buildAppOnly || buildRuntimeOnly) {
     );
   }
   const targetGraphs = targets.map(target => {
-    const graphPath = join(outRoot, target, 'graph.json');
+    const graphPath = join(
+      existingGameOutputDir(outRoot, target) ?? gameOutputDir(outRoot, 'arcade', target),
+      'graph.json',
+    );
     if (!existsSync(graphPath)) {
       throw new Error(`cannot build runtime hardware closure: missing ${graphPath}`);
     }
@@ -189,7 +197,8 @@ if (!sub.nodes.some(n => n.id === `game:${game}`)) {
   process.exit(1);
 }
 
-const outDir = join(outRoot, game);
+const category = gameCategory(sub.nodes.find(node => node.id === `game:${game}`)?.props.kind);
+const outDir = gameOutputDir(outRoot, category, game);
 mkdirSync(outDir, { recursive: true });
 writeFileSync(join(outDir, 'graph.full.json'), JSON.stringify(graph, null, 2));
 writeFileSync(join(outDir, 'graph.json'), JSON.stringify(sub, null, 2));
@@ -239,7 +248,10 @@ if ('serve' in opts || argv.includes('--serve')) {
     { '': outRoot, artwork: join(projectRoot, 'artwork') }, // ROMs are never served
     Number(opts.serve) || 8280,
   );
-  console.log(`\nserving http://localhost:${port}/app/  (game: /app/g/${game}/, viewer: /${game}/viewer.html)`);
+  console.log(
+    `\nserving http://localhost:${port}/app/  ` +
+    `(game: /app/g/${game}/, viewer: /games/${category}/${game}/viewer.html)`,
+  );
 }
 }
 
@@ -247,7 +259,10 @@ async function pipelineFromGraph(game: string): Promise<void> {
   const graphPath = resolve(
     opts['from-graph'] && opts['from-graph'] !== 'true'
       ? opts['from-graph']
-      : join(outRoot, game, 'graph.json'),
+      : join(
+          existingGameOutputDir(outRoot, game) ?? gameOutputDir(outRoot, 'arcade', game),
+          'graph.json',
+        ),
   );
   if (!existsSync(graphPath)) {
     console.error(`error: graph snapshot not found: ${graphPath}`);
@@ -265,7 +280,8 @@ async function pipelineFromGraph(game: string): Promise<void> {
   const fullGraph = existsSync(fullPath)
     ? JSON.parse(readFileSync(fullPath, 'utf8'))
     : loaded;
-  const outDir = join(outRoot, game);
+  const category = gameCategory(sub.nodes.find(node => node.id === `game:${game}`)?.props.kind);
+  const outDir = gameOutputDir(outRoot, category, game);
   mkdirSync(outDir, { recursive: true });
   writeFileSync(join(outDir, 'graph.json'), JSON.stringify(sub, null, 2));
   writeFileSync(join(outDir, 'graph.cypher'), toCypher(sub));

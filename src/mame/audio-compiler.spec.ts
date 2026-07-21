@@ -25,7 +25,7 @@ assert.equal(plan.registerCount, 0x20);
 
 const source = generatedNamcoWsgWorkletSource(plan)
   .replace(
-    "import { executeGeneratedProgram } from './generated-handler.ts';",
+    "import { executeGeneratedProgram } from '../../core/generated-handler.js';",
     'const executeGeneratedProgram = () => ({ returned: false });',
   );
 const javaScript = ts.transpileModule(source, {

@@ -138,7 +138,7 @@ Prioritized. Each item has enough context to start cold. Check
 - Education layer (2026-07-06): story-first learn modal (marquee/flyer/
   cabinet hero, machine facts, driver credits + MAME git history, Gaming
   History chapters, pinned Play CTA), per-game markdown dossiers
-  (dist/<game>/README.md), ROM drop zone with pre-boot chip-manifest
+  (`dist/games/<category>/<game>/README.md`), ROM drop zone with pre-boot chip-manifest
   validation (✓/≈/✗ per chip, wrong sets bounce instead of hanging).
 - Deployment (2026-07-06, issue #4): live at **https://mamehistory.com** —
   base-path-agnostic URLs, static games.json, pretty routes /app/g/<game>/,

@@ -26,6 +26,8 @@ interface GameEntry {
   year: string;
   manufacturer: string;
   family: string;
+  /** canonical generated artifact directory, e.g. games/arcade/pacman */
+  dataPath: string;
   /** consoles get their own tab + room; absent means arcade */
   kind?: 'arcade' | 'console';
   hasRom: boolean;
@@ -411,7 +413,7 @@ export async function runMenu(): Promise<void> {
     // The machine — real facts from the generated config (the knowledge graph)
     const hw = section('The machine (extracted from the MAME driver)', colA);
     try {
-      const cfg = await fetch(`../${game}/config.json`).then(r => r.json());
+      const cfg = await fetch(`../${entry.dataPath}/config.json`).then(r => r.json());
       for (const cpu of cfg.board.cpus) {
         row(hw, cpu === cfg.board.cpus[0] ? 'Processors' : '', `${(cpu.type ?? 'z80').toUpperCase()} "${cpu.tag}" @ ${(cpu.clock / 1e6).toFixed(3)} MHz`);
       }
@@ -438,7 +440,7 @@ export async function runMenu(): Promise<void> {
     // the intro shows in full, each named chapter folds open on click.
     if (entry.hasHistory) {
       const story = section('The story');
-      void fetch(`../${game}/history.txt`).then(r => r.ok ? r.text() : '').then(t => {
+      void fetch(`../${entry.dataPath}/history.txt`).then(r => r.ok ? r.text() : '').then(t => {
         if (!t) { story.remove(); return; }
         const parts = t.split(/^- ([A-Z][A-Z0-9 .&''/-]{2,}) -\s*$/m);
         const intro = el('div', 'white-space:pre-wrap;color:#c9cde8;font-size:14.5px');
@@ -488,10 +490,14 @@ export async function runMenu(): Promise<void> {
         : 'Generation blocked';
       links.appendChild(soon);
     }
-    const viewer = mkBtn('Explore the knowledge graph', `../${game}/viewer.html`, false);
+    const viewer = mkBtn(
+      'Explore the knowledge graph',
+      `../${entry.dataPath}/viewer.html`,
+      false,
+    );
     viewer.target = '_blank';
     links.appendChild(viewer);
-    const dossier = mkBtn('Full dossier (markdown)', `../${game}/README.md`, false);
+    const dossier = mkBtn('Full dossier (markdown)', `../${entry.dataPath}/README.md`, false);
     dossier.target = '_blank';
     links.appendChild(dossier);
     card.appendChild(links);
@@ -594,7 +600,7 @@ export async function runMenu(): Promise<void> {
     if (cached) return imageFrom(cached);
     if (!entry.hasRom) return null;
     try {
-      const cfg = await fetch(`../${encodeURIComponent(entry.game)}/config.json`).then(r => r.json()) as ShellCfg;
+      const cfg = await fetch(`../${entry.dataPath}/config.json`).then(r => r.json()) as ShellCfg;
       const regions = await loadRegions(entry.game, cfg);
       if (!regions) return null;
       const ports = Object.fromEntries(cfg.ports.map(p => [p.tag, p.init]));

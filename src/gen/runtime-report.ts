@@ -7,6 +7,7 @@ import {
 import { join } from 'node:path';
 import type { KnowledgeGraph, KGNode } from '../kg/types.ts';
 import { compileMameHandler } from '../mame/handler-ir.ts';
+import { GAME_CATEGORIES, gameOutputDir } from './output-layout.ts';
 import { normalizeMameExecutionSource } from '../mame/cpu-compiler.ts';
 
 interface RuntimeRange {
@@ -25,6 +26,7 @@ interface RuntimeCpu {
 export interface RuntimeConfigShape {
   game: string;
   family: string;
+  dataPath?: string;
   board: {
     cpus: RuntimeCpu[];
     ranges: RuntimeRange[];
@@ -213,9 +215,9 @@ export function buildRuntimeReport(
       source: nodeSource(node),
     }));
   const composition: RuntimeRequirement[] = config.board.cpus.length
-    ? [{ name: `generated/${config.game}/board.ts`, status: 'generated' }]
+    ? [{ name: `${config.dataPath ?? config.game}/generated/board.ts`, status: 'generated' }]
     : [{
-        name: `generated/${config.game}/board.ts`,
+        name: `${config.dataPath ?? config.game}/generated/board.ts`,
         status: 'missing',
         reason: 'no CPU execution plan was generated',
       }];
@@ -374,16 +376,21 @@ export function refreshRuntimeReports(outRoot: string): number {
     ? JSON.parse(readFileSync(manifestPath, 'utf8')) as HardwareGenerationManifest
     : {};
   let refreshed = 0;
-  for (const entry of readdirSync(outRoot)) {
-    const graphPath = join(outRoot, entry, 'graph.json');
-    const configPath = join(outRoot, entry, 'config.json');
-    if (!existsSync(graphPath) || !existsSync(configPath)) continue;
-    const graph = JSON.parse(readFileSync(graphPath, 'utf8')) as KnowledgeGraph;
-    const config = JSON.parse(readFileSync(configPath, 'utf8')) as RuntimeConfigShape;
-    const report = buildRuntimeReport(graph, config, manifest);
-    writeFileSync(join(outRoot, entry, 'runtime-report.json'), JSON.stringify(report, null, 2));
-    writeFileSync(join(outRoot, entry, 'runtime-report.md'), runtimeReportMarkdown(report));
-    refreshed++;
+  for (const category of GAME_CATEGORIES) {
+    const categoryDir = join(outRoot, 'games', category);
+    if (!existsSync(categoryDir)) continue;
+    for (const entry of readdirSync(categoryDir)) {
+      const dir = gameOutputDir(outRoot, category, entry);
+      const graphPath = join(dir, 'graph.json');
+      const configPath = join(dir, 'config.json');
+      if (!existsSync(graphPath) || !existsSync(configPath)) continue;
+      const graph = JSON.parse(readFileSync(graphPath, 'utf8')) as KnowledgeGraph;
+      const config = JSON.parse(readFileSync(configPath, 'utf8')) as RuntimeConfigShape;
+      const report = buildRuntimeReport(graph, config, manifest);
+      writeFileSync(join(dir, 'runtime-report.json'), JSON.stringify(report, null, 2));
+      writeFileSync(join(dir, 'runtime-report.md'), runtimeReportMarkdown(report));
+      refreshed++;
+    }
   }
   return refreshed;
 }

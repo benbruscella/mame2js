@@ -509,18 +509,14 @@ export function emitHardwareClosure(closure: HardwareClosure, outRoot: string): 
         JSON.stringify(device, null, 2),
       );
       writeFileSync(join(devicesDir, `${slug}.ts`), `// GENERATED from MAME device source; do not edit.
-import type { GeneratedDeviceDefinition } from '../../../app/modules/runtime/generated-device.js';
+import type { GeneratedDeviceDefinition } from '../../core/generated-device.js';
+import deviceData from './${slug}.device.ir.json' with { type: 'json' };
 
-export const device = ${JSON.stringify(device, null, 2)} as unknown as GeneratedDeviceDefinition;
+export const device = deviceData as unknown as GeneratedDeviceDefinition;
 export default device;
 `);
       continue;
     }
-    writeFileSync(join(devicesDir, `${slug}.ts`), `// GENERATED from MAME hardware source; do not edit.
-// Source IR stage: executable lowering is tracked by hardware-manifest.json.
-export const hardware = JSON.parse(${JSON.stringify(JSON.stringify(emitted))});
-export default hardware;
-`);
   }
 
   for (const file of new Set(closure.hardware.flatMap(entry => entry.dslFiles))) {
@@ -529,11 +525,6 @@ export default hardware;
     if (basename(file) === 'z80.lst') {
       const ir = parseZ80OpcodeDsl(file, readFileSync(absolute, 'utf8'));
       writeFileSync(join(dslDir, `${stem}.ir.json`), JSON.stringify(ir, null, 2));
-      writeFileSync(join(dslDir, `${stem}.ts`), `// GENERATED from ${file}; do not edit.
-// MAME opcode DSL AST with macro expansion and source provenance.
-export const opcodeDsl = JSON.parse(${JSON.stringify(JSON.stringify(ir))});
-export default opcodeDsl;
-`);
     } else {
       writeFileSync(join(dslDir, `${stem}.source.json`), JSON.stringify({
         schemaVersion: 1,

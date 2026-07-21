@@ -1,137 +1,91 @@
-# Adding a game — the playbook
+# Adding a game or console
 
-The promise: **regeneration + missing devices only.** Here's the checklist,
-proven six times now: galaga, then pacman + galaxian (issue #1), then
-gyruss + invaders + mpatrol (issue #3 — those three took parser extensions,
-four new CPU cores, three sound cores, and one board + one video module
-each; the engine itself only *generalized*, e.g. multi-CPU cpus[] and
-per-CPU io buses, never special-cased).
+The target workflow is generation work, not a handwritten port.
 
-Issue #3 lessons worth internalizing before starting:
+## 1. Register the target
 
-- **CPU cores are agent-sized tasks** with spec suites (m6809 459 checks,
-  i8080 276, m6803 388). Budget them first; everything else is smaller.
-- When a game misbehaves, the bug has been a **parser gap** far more often
-  than a runtime bug (macro args, PORT_INCLUDE, global_mask, XTAL capture,
-  rom-id collisions). "If this is a pure transpiler, why are you struggling
-  to make the game boot?" — because the graph was missing a fact. Fix the
-  parser.
-- Use the **headless real-ROM harness** (testing.md) for boot failures
-  before any browser debugging.
+Add the MAME short name to `src/gen/targets.ts` when it is ready to join the
+supported generation suite. While validating one target, keep `gen:all` scoped
+to the games currently known to work.
 
-## 1. Extract and inspect
+## 2. Extract and inspect
 
-```
+```sh
 node bin/mamekit.js graph <game>
-open dist/<game>/viewer.html      # or read graph.json
 ```
 
-Check the CLI digest: devices + clocks, rom regions. Open the viewer and eyeball
-the memory map ranges and handler names. Parser gaps show up here (a device
-with clock null and a `clockExpr` string, missing ranges, etc.) — fix
-`src/kg/parse.ts`, not the generator.
-
-## 2. Attempt generation
+Inspect the CLI device/ROM digest and the generated graph:
 
 ```
-node bin/mamekit.js <game>
+dist/games/arcade/<game>/viewer.html
+dist/games/consoles/<system>/viewer.html
 ```
 
-Two designed failure points tell you the work list:
+The category comes from the MAME game/system declaration. Verify clocks,
+address maps, callbacks, ROM regions, input ports, graphics layouts and source
+provenance before debugging runtime behavior.
 
-1. **Generator throws** (missing machine/romset/inputs, no screen raw) —
-   parser gap or a genuinely different driver structure.
-2. **Bus throws `missing read/write handler: <key>`** at app runtime (or the
-   board constructor) — each key names a device method to implement or wire.
+## 3. Generate in isolation
 
-## 3. Gap analysis by subsystem
+```sh
+npm run clean
+node bin/mamekit.js <game> --skip-app
+node bin/mamekit.js --build-runtime --build-app --targets <game>
+npm run audit:generated
+```
 
-| Subsystem | Reuses as-is when... | Needs work when... |
-|---|---|---|
-| CPU | Z80, M6809/KONAMI-1, I8080, M6803 (add the type to generate.ts CPU_TYPES if new to a family) | anything else — new CPU core (agent-sized task with spec suite like z80.spec.ts) |
-| Bus/shell/zip/input | always | — |
-| Sound | WSG, galaxian, AY-3-8910 (N chips), invaders SFX | new SoundCore + worklet (msm5205 routing is the open example) |
-| Video | — | usually per-family: new `video/<family>.ts` implementing `VideoRenderer` (decodeGfx + palette port + tilemap scan + sprites) |
-| Board | same family (bosco/xevious/digdug ≈ galaga skeleton) | new `boards/<family>.ts` (interrupt scheme, latches, customs wiring) |
-| Customs | 06xx/51xx present | 50xx (bosco score protection), 52xx (samples), 53xx (digdug I/O), 54xx (noise), EAROM (digdug) |
+Cleaning first is mandatory. The app must import the target from its canonical
+`games/<category>/<game>/generated/board.js`, with no copy under `app`.
 
-## 4. Family notes (from the galaga.cpp driver, already in the full graph)
+## 4. Close generation gaps
 
-- **bosco**: 2 boards, two 06xx, 50xx + 52xx customs, radar dots (dotlayout),
-  starfield shared with galaga. Video: bg scroll + radar.
-- **xevious**: 51xx used only for protection check at boot; bigger video
-  (bgcharlayout, 3-plane sprites, terrain ROMs, dual tilemaps).
-- **digdug**: 53xx custom, EAROM (high-score NVRAM — map 0xb800), 1bpp chars,
-  no starfield.
-- **pacman / galaxian**: see issue #1 — simpler than galaga (single Z80).
+Typical failures and their correct owners:
 
-## 5. Verification bar (same as galaga)
+| Failure | Fix |
+|---|---|
+| Missing graph fact or wrong source span | MAME AST/macro parser or KG builder |
+| Unsupported C++ expression/statement | typed handler/device/video/audio lowering |
+| CPU opcode diagnostics | opcode DSL or CPU compiler |
+| Hardware closure marked non-executable | source-derived hardware compiler |
+| IR operation cannot execute | generic generated runtime vocabulary |
+| Wrong URL/category | output layout or generated `dataPath` |
 
-- Core specs still pass (`node src/runtime/*.spec.ts` and subdirs).
-- A board smoke test with synthetic ROMs (copy `boards/galaga.spec.ts` pattern:
-  hand-assembled program exercising the interrupt + latch scheme).
-- Browser: boots to attract, coin-up works, a game can be started and played,
-  60 fps, zero console errors. Use Playwright as in docs/testing.md — hold
-  keys ≥200 ms so the I/O chip polling sees the edges.
+Do not fix a gap by adding `src/runtime/<chip>.ts`, a game-named conditional, or
+a handwritten board family. The improvement should be reusable by the next MAME
+driver with the same source shape.
 
-## 6. Register the board family
+## 5. Verify with real ROMs
 
-`src/runtime/boards/index.ts` FAMILIES map: driver-file stem → board class.
-That's the only shared file a new game touches. (Board modules import
-helpers from `input.ts`/`types.ts`, never from the registry — cycle, see
-gotchas 0b.)
+Use a local, gitignored legal ROM set. The browser never serves or persists
+arcade ROMs; tests may read local files directly.
 
-## 7. Beyond the code — the full "new game" checklist
+Verify, in order:
 
-Emulation working is half the job. Every shipped game also needs:
+1. ROM manifest and CRC matching.
+2. CPU boot progression and generated device state.
+3. Coin, start and gameplay inputs.
+4. Nonblank, correctly oriented video and stable frame rate.
+5. Generated audio writes, pitch and timing.
+6. Browser load with no console/page errors.
 
-- **ROM availability**: does the user's `roms/` (or `_roms/`) have `<game>.zip`?
-  Run the manifest against it EARLY (`checkRomSet` via a scratchpad harness —
-  see testing.md) so revision drift surfaces before you blame the emulation.
-  The generator emits clone-family `alt` CRCs automatically; if a real set
-  still fails, that's a parser/alternates gap, not the user's zip. NEVER
-  fetch ROMs.
-- **Artwork** (all gitignored, copyrighted — the user's explicit call, same as
-  ROMs; fetch with `curl -L`). Without these files the shelf still shows a
-  cover — the menu falls back to a deterministic gameplay screenshot, then to
-  tile art from the gfx ROM, then a placeholder (menu.ts cover chain) — so
-  "there's no artwork" means the nice **scans** are missing, not that the game
-  is broken. To add them for `<game>` (do the same for its PARENT set name if a
-  `<game>` URL 404s — clones share the parent's art):
-  ```
-  base=http://adb.arcadeitalia.net/media/mame.current
-  curl -L $base/flyers/<game>.png   -o artwork/covers/<game>.png
-  curl -L $base/marquees/<game>.png -o artwork/media/marquees/<game>.png
-  curl -L $base/cabinets/<game>.png -o artwork/media/cabinets/<game>.png
-  curl -L https://mrdo.mameworld.info/artwork/<game>.zip -o artwork/<game>.zip
-  ```
-  - `artwork/covers/<game>.png` is the flyer box-art (cover 0, the permanent
-    one); marquee + cabinet feed the learn modal / dossier.
-  - The bezel zip (mrdo — the site's pages 404, but direct file paths work)
-    must contain a `default.lay`; it drives the framed-CRT cover (cover 1).
-  - Regenerate (`node bin/mamekit.js <game>`) so `hasArt`/history land in the
-    config, then hard-refresh the menu.
-- **Education layer sanity**: `dist/<game>/meta.json` has credits +
-  gitHistory; `history.txt` extracted (Gaming History dat has an entry for
-  most sets); `README.md` dossier reads sensibly; the learn modal shows
-  flyer/cabinet/marquee.
-- **Menu**: game appears on the shelf (`/games.json`), cover renders, story
-  modal opens, Play works via `/app/g/<game>/`.
-- **gen:all**: add the game to `package.json`'s `gen:all` list or it won't
-  deploy.
-- **Mid-build honesty**: until the board + cores actually compile, the shelf
-  shows the game as "IN DEVELOPMENT" (manifest `supported` flag, driven by
-  the compiled board module's existence). Don't tell the user to try a game
-  before `buildApp` has succeeded with its board in the registry.
-- **Deploy**: `npm run deploy -- --artwork` (the script now waits for the
-  Pages build, re-kicks stuck ones, fails loudly, and smoke-probes the live
-  manifest — trust its exit code).
-- **Docs**: TODO.md "Done" entry; new gotchas if you earned any.
+Add a deterministic acceptance test that imports the compiled artifacts from
+`dist`, not a source-side hardware implementation. Pooyan's acceptance test is
+the current example.
 
-## 8. Keep the contract
+## 6. Run the gates
 
-If you catch yourself writing `if (game === 'digdug')` anywhere in
-src/runtime or src/gen — stop; that fact belongs in the graph (parser), the
-generated config, or a device/board module boundary. Same for input
-polarity, io maps, clocks: the graph knows; extend the parser if it
-doesn't.
+```sh
+npm run test:unit
+npm run audit:generated
+npm run test:pooyan       # when touching shared Z80/Konami/AY behavior
+```
+
+For changes affecting all supported targets, run `npm run test:generation`.
+That test deletes `dist`, generates every target in `REQUIRED_TARGETS`, builds
+one self-contained app, and audits the result.
+
+## 7. Add education assets
+
+Confirm generated metadata, history, README and graph viewer are coherent.
+Artwork is optional and remains outside the compiler contract. ROMs are never
+published.

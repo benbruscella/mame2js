@@ -5,13 +5,14 @@
 ```
 MAME C++ driver source            e.g. <mame>/src/mame/namco/galaga.cpp (+ .h, _v.cpp, _a.cpp)
         │
-        │  PHASE 1: EXTRACT (src/kg/parse.ts, build.ts)
-        │  Targeted parsers for MAME's macro DSLs — deliberately NOT a C++ AST:
+        │  PHASE 1: EXTRACT (src/mame/ast.ts, src/kg/parse.ts, build.ts)
+        │  Source-preserving ASTs targeted at MAME's C++ and macro DSLs:
         │  GAME(...) rows, ROM_START blocks, address_map functions,
         │  machine_config functions, INPUT_PORTS blocks, gfx_layout structs,
         │  GFXDECODE tables, #defines (clock constants), constructor member->tag maps
         ▼
-Knowledge graph                   dist/<game>/graph.json (full driver: graph.full.json)
+Knowledge graph                   dist/games/<category>/<game>/graph.json
+        │                         (full driver: graph.full.json)
         │                         + graph.cypher (Neo4J) + viewer.html / viewer.full.html
         │
         │  PHASE 2: RESOLVE (src/kg/build.ts gameSubgraph)
@@ -28,11 +29,14 @@ Game subgraph                     ~116 nodes for galaga
         │  Side channels: driver-header copyright credits, MAME git history
         │  (git log --follow on the driver), Gaming History text extraction.
         ▼
-Game data                         dist/<game>/{config.json, meta.json,
-        │                          README.md dossier, history.txt}  (pure data)
+Game data                         dist/games/{arcade,consoles}/<game>/
+        │                          {config.json, meta.json, generated/machine.json,
+        │                          generated/board.js, README.md, history.txt}
         │
         │  PHASE 4: UNIFIED APP + SERVE (generate.ts buildApp, src/serve.ts)
-        │  ONE app at dist/app (runtime copy + tsc) hosts every generated game;
+        │  ONE small app at dist/app hosts every generated game;
+        │  compiled host code lives at dist/runtime/core and source-derived
+        │  hardware lives at dist/runtime/generated;
         │  static dist/games.json written at generate time (dev server also
         │  serves a live version); real dirs app/g/<game>/ for pretty routes
         │  (<base href="../../">); all URLs relative -> works at any base path
@@ -41,61 +45,58 @@ Browser                           /app/ = boot menu (shelves + search + story-
                                   first learn modal), /app/g/<game>/ = the game
                                   (legacy ?g= works; Esc -> menu; ROM drop zone
                                   with manifest validation when no zip served),
-                                  /<game>/viewer.html = the graph,
-                                  /<game>/README.md = the markdown dossier.
+                                  /games/<category>/<game>/viewer.html = graph,
+                                  /games/<category>/<game>/README.md = dossier.
                                   Deployed: https://mamehistory.com (docs/deployment.md)
 ```
 
-At runtime the **original machine code from the ROMs** is what executes —
-on TS cores for Z80, M6809 (+ the KONAMI-1 decrypting variant via an
-`opcodeFetch` hook), Intel 8080 and M6803; the C++ was never translated
-line-by-line (see "role of the C++ source" below).
+At runtime the **original machine code from the ROMs** executes on hardware
+definitions generated from MAME source. The checked-in TypeScript supplies the
+browser host and generic IR interpreters, not handwritten copies of MAME chips.
 
 ## Key design decisions and why
 
 ### Knowledge graph first (user decision, 2026-07-05)
 The graph (`src/kg/types.ts`) is the single contract between extraction and
 generation. Native store is dependency-free JSON; Cypher is an *export*, not a
-dependency (`cypher-shell < dist/galaga/graph.cypher` if you want Neo4J).
+dependency (`cypher-shell < dist/games/arcade/galaga/graph.cypher` if you want Neo4J).
 Rationale: makes game #2 cheap, makes the extracted facts inspectable and
 teachable (viewer), and decouples parser improvements from runtime work.
 
-### No C++ AST
-The machine description lives in highly regular declarative macros. Targeted
-parsers get ~95% of the value; libclang would fight the preprocessor for the
-rest. If mamekit ever needs to scale across many exotic drivers, revisit —
-but extend the parsers first (they're ~600 lines total).
+### MAME-specific ASTs, not a generic C++ transpiler
+The machine description lives in highly regular declarative macros. Targeted,
+source-preserving ASTs capture the MAME dialect without requiring libclang to
+fight the preprocessor for the rest. If new drivers expose missing source
+shapes, extend the MAME-specific AST and lowering rules first.
 
 ### Role of the C++ source (three distinct uses)
-1. **Automatically consumed as data**: the declarative macros (this is what
-   the pipeline parses on every run).
-2. **Reference for hand-ported cores**: z80.cpp, namco.cpp, galaga_v.cpp,
-   starfield_05xx.cpp, namco06.cpp were read by humans/agents and re-written
-   as clean TS with tests. Not mechanical.
-3. **Not used at runtime at all.**
+1. **Machine facts**: declarative macros become the knowledge graph and game
+   configuration.
+2. **Executable behavior**: CPU, device, video, audio and handler source is
+   lowered through typed IR and MAME-specific DSL compilers.
+3. **Generated browser artifacts**: the resulting JSON and JavaScript live in
+   `dist/games` and `dist/runtime/generated`; MAME C++ is not shipped.
 
-MAME is therefore a *dev-time* dependency: needed to extract or extend, not
-to build/play an already-extracted game. (A `--from-graph` mode that skips
-MAME entirely is on the TODO list.)
+MAME is therefore a *generation-time* dependency. `--from-graph` can rebuild
+the game layer from a saved graph, while regenerating hardware definitions
+still reads the sibling MAME source tree.
 
 ### The reuse contract (user requirement)
-`src/runtime/` is an **engine + device library** and must stay game-agnostic:
+`src/runtime/` is a **browser host + generic IR runtime** and must stay
+game-agnostic:
 
 - engine: `bus.ts`, `shell.ts`, `menu.ts`, `input.ts`, `zip.ts`, `audio.ts`,
   `artwork.ts`, `types.ts`
-- CPU cores: `z80.ts`, `m6809.ts` (+ `konami1.ts` decrypt wrapper),
-  `i8080.ts`, `m6803.ts` (on-chip timer + I/O ports)
-- devices: `ls259.ts`, `namco06.ts`, `namco51.ts`, `mb14241.ts`,
-  `msm5205.ts`, `wsg.ts`, `namco54.ts`, `ay8910.ts`, `invaders-sound.ts`,
-  `galaxian-sound.ts`, `starfield05xx.ts`, `gfx.ts` (+ the `*-worklet.ts`
-  AudioWorklet hosts)
-- board composition: `boards/<family>.ts` (per board *family*, not per game)
-  selected via the `boards/index.ts` registry, `video/<family>.ts`
-  (families: galaga, pacman, galaxian, gyruss, mw8080bw, m52)
+- IR execution: `generated-cpu.ts`, `generated-device.ts`,
+  `generated-handler.ts`, `generated-video.ts`, `generated-frame.ts`
+- composition: `generated-machine.ts` and `generated-board.ts`
+- generated MAME hardware: emitted to `dist/runtime/generated`, never checked
+  into `src/runtime`
 
-Game-specific data lives ONLY in generated `config.json`. When a new game
-needs behavior we don't have, add a new **device** or **board** module —
-never special-case an existing one with game names.
+Game-specific data and executable machine composition live only under
+`dist/games/<category>/<game>`. When a new game exposes a missing behavior,
+extend the MAME AST/DSL lowering or generic IR runtime, not a handwritten game
+or chip copy.
 
 ### Zero dependencies (user requirement)
 Browser: canvas 2D, Web Audio (AudioWorklet), `DecompressionStream('deflate-raw')`
@@ -110,15 +111,16 @@ mamekit/
 ├── bin/mamekit.js          CLI entry (imports src/cli.ts — Node runs TS natively)
 ├── src/
 │   ├── cli.ts              arg parsing, driver discovery (cached), orchestration
-│   ├── serve.ts            zero-dep static server ('' -> dist/, /roms -> roms/, /games.json manifest)
-│   ├── kg/                 phase 1+2: types, parse, build, cypher, viewer
-│   ├── gen/generate.ts     phase 3: graph -> config.json; buildApp() -> dist/app
-│   └── runtime/            the engine + device library (copied into the unified app)
+│   ├── serve.ts            zero-dep static server (dist + live games manifest)
+│   ├── mame/               MAME-specific AST, DSL and hardware lowering
+│   ├── kg/                 graph types, extraction, Cypher and viewer
+│   ├── gen/                graph/machine emitters, app build and audits
+│   └── runtime/            browser host and generic generated-code runtime
 ├── scripts/deploy-pages.sh publish dist/ to gh-pages (docs/deployment.md)
 ├── docs/                   you are here
-├── roms/                   gitignored (currently renamed _roms/ locally); all six zips
+├── roms/                   gitignored local ROMs used only by tests/manual drops
 ├── artwork/                gitignored; bezel zips, covers/, media/, data/history/history.xml
-└── dist/                   gitignored; per-game artifacts + generated app
+└── dist/                   gitignored; app, runtime and categorized games
 ```
 
 The repo lives at `~/Projects/Github/mamekit` (github.com/benbruscella/mamekit)

@@ -161,8 +161,8 @@ export function generatedNamcoWsgWorkletSource(plan: GeneratedNamcoWsgPlan): str
   return `// GENERATED from ${plan.source.file}:${plan.source.line} and ${plan.sourceFiles[1]}; do not edit.
 // Register behavior is executable MAME handler IR. Mixer constants and waveform
 // addressing are lowered from namco_audio_device<${plan.voices}, ${plan.packed}>.
-import { executeGeneratedProgram } from './generated-handler.ts';
-import type { GeneratedHandlerProgram } from './generated-machine.ts';
+import { executeGeneratedProgram } from '../../core/generated-handler.js';
+import type { GeneratedHandlerProgram } from '../../core/generated-machine.js';
 
 const plan = ${JSON.stringify(plan, null, 2)} as unknown as {
   voices: number;

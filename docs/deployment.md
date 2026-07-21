@@ -15,7 +15,7 @@ The script (`scripts/deploy-pages.sh`):
 1. `npm run gen:all` — regenerates all six games + the unified app.
 2. Copies `artwork/` into `dist/artwork/` **only with `--artwork`**
    (minus `data/` — the 61 MB Gaming History dat is dev-time only; its text
-   is already extracted to `dist/<game>/history.txt`). Without the flag the
+   is already extracted to `dist/games/<category>/<game>/history.txt`). Without the flag the
    site ships without artwork and every image degrades gracefully.
 3. Rewrites `dist/games.json`: `hasRom` always false (visitors bring their
    own zip via the drop zone), `hasArt` matches what shipped.

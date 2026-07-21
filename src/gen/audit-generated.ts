@@ -2,7 +2,7 @@ import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import type { GeneratedMachine } from '../runtime/generated-machine.ts';
-import { REQUIRED_TARGETS } from './targets.ts';
+import { gameDataPath, generatedGameOutputs } from './output-layout.ts';
 
 export { REQUIRED_TARGETS } from './targets.ts';
 
@@ -24,7 +24,9 @@ export function auditGenerated(outRoot: string): GeneratedAudit {
   let screenUpdates = 0;
   let sourceMapHandlers = 0;
   let familyAdapters = 0;
-  const registryPath = join(outRoot, 'app/modules/generated/registry.js');
+  const generatedTargets = generatedGameOutputs(outRoot);
+  if (!generatedTargets.length) failures.push('no generated games found');
+  const registryPath = join(outRoot, 'app/registry.js');
   const registry = existsSync(registryPath) ? readFileSync(registryPath, 'utf8') : '';
   if (!registry) failures.push('unified generated registry is missing');
   else if (!registry.includes('registerGeneratedBoard')) {
@@ -111,23 +113,20 @@ export function auditGenerated(outRoot: string): GeneratedAudit {
     }
   }
 
-  for (const target of REQUIRED_TARGETS) {
-    const dir = join(outRoot, target);
+  for (const { game: target, category, dir } of generatedTargets) {
     const required = [
       'config.json',
       'graph.json',
-      'machine.ir.json',
       'runtime-report.json',
       'generated/board.ts',
-      'generated/machine.ts',
-      'generated/handlers.ts',
-      'generated/video.ts',
+      'generated/board.js',
+      'generated/machine.json',
       'generated/provenance.json',
     ];
     for (const file of required) {
       if (!existsSync(join(dir, file))) failures.push(`${target}: missing ${file}`);
     }
-    if (!existsSync(join(dir, 'machine.ir.json'))) continue;
+    if (!existsSync(join(dir, 'generated/machine.json'))) continue;
     const boardSource = readFileSync(join(dir, 'generated/board.ts'), 'utf8');
     if (!boardSource.includes('createBoard:')) {
       failures.push(`${target}: generated board module has no createBoard factory`);
@@ -135,6 +134,12 @@ export function auditGenerated(outRoot: string): GeneratedAudit {
     if (boardSource.includes('import BoardAdapter')) familyAdapters++;
     if (boardSource.includes('import BoardAdapter')) {
       failures.push(`${target}: generated board imports a handwritten adapter`);
+    }
+    if (!boardSource.includes("from './machine.json' with { type: 'json' }")) {
+      failures.push(`${target}: generated board does not import machine JSON`);
+    }
+    if (boardSource.includes('JSON.parse')) {
+      failures.push(`${target}: generated board embeds serialized machine data`);
     }
 
     const reportPath = join(dir, 'runtime-report.json');
@@ -169,7 +174,7 @@ export function auditGenerated(outRoot: string): GeneratedAudit {
     }
 
     const machine = JSON.parse(
-      readFileSync(join(dir, 'machine.ir.json'), 'utf8'),
+      readFileSync(join(dir, 'generated/machine.json'), 'utf8'),
     ) as GeneratedMachine;
     if (machine.game !== target) failures.push(`${target}: machine key is ${machine.game}`);
     if (machine.schemaVersion !== 2) failures.push(`${target}: machine schema is not version 2`);
@@ -221,32 +226,43 @@ export function auditGenerated(outRoot: string): GeneratedAudit {
       }
     }
 
-    if (!registry.includes(`./${target}/board.js`)) {
+    const boardImport = `../${gameDataPath(category, target)}/generated/board.js`;
+    if (!registry.includes(boardImport)) {
       failures.push(`${target}: missing from unified generated registry`);
     }
   }
   const appDir = join(outRoot, 'app');
-  if (existsSync(join(appDir, '.build'))) {
+  if (existsSync(join(outRoot, '.build'))) {
     failures.push('compiled app retains its temporary source build directory');
   }
-  const modulesDir = join(appDir, 'modules');
-  if (existsSync(modulesDir)) {
-    for (const file of recursiveFiles(modulesDir).filter(path => path.endsWith('.js'))) {
-      const source = readFileSync(file, 'utf8');
-      for (const match of source.matchAll(
-        /(?:from\s+|import\s*\()\s*['"]([^'"]+)['"]/g,
-      )) {
-        const specifier = match[1]!;
-        if (specifier.startsWith('/') || /(^|\/)src(\/|$)/.test(specifier)) {
+  if (existsSync(join(appDir, 'modules'))) {
+    failures.push('app retains the legacy duplicated modules directory');
+  }
+  for (const root of [appDir, join(outRoot, 'runtime'), join(outRoot, 'games')]) {
+    if (existsSync(root)) {
+      for (const file of recursiveFiles(root).filter(path => path.endsWith('.js'))) {
+        const source = readFileSync(file, 'utf8');
+        if (file.includes(`${join(outRoot, 'runtime/generated')}/`) &&
+            /JSON\.parse\(["']\{/.test(source)) {
           failures.push(
-            `compiled app has non-self-contained import ${specifier} in ${file.slice(appDir.length + 1)}`,
+            `generated runtime embeds serialized IR in ${file.slice(outRoot.length + 1)}`,
           );
+        }
+        for (const match of source.matchAll(
+          /(?:from\s+|import\s*\()\s*['"]([^'"]+)['"]/g,
+        )) {
+          const specifier = match[1]!;
+          if (specifier.startsWith('/') || /(^|\/)src(\/|$)/.test(specifier)) {
+            failures.push(
+              `compiled output has non-self-contained import ${specifier} in ${file.slice(outRoot.length + 1)}`,
+            );
+          }
         }
       }
     }
   }
   return {
-    targets: REQUIRED_TARGETS.length,
+    targets: generatedTargets.length,
     familyAdapters,
     callbacks,
     frameEvents,
