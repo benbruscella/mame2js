@@ -53,6 +53,24 @@ export function generatedCpuExecutableSource(definition: GeneratedCpuDefinition)
     ].filter(Boolean).join('\n');
   }).join('\n');
 
+  const step = definition.step
+    ? emitProgram(definition.step, contextFor(definition, [], 'number'), 4)
+    : `    this.cycles = 0;
+    this.m_icount = 1;
+    this.generatedService();
+    if (this.cycles > 0) return this.cycles;
+    this.generatedFetch();
+    let dispatches = 0;
+    while (true) {
+      if (++dispatches > 8) throw new Error('${definition.type} dispatch loop exceeded 8');
+      switch ((this.m_ref >>> 8) & 0xffff) {
+${opcodeCases}
+        default:
+          throw new Error('${definition.type} has no generated opcode ' +
+            (((this.m_ref >>> 8) & 0xffff).toString(16).padStart(4, '0')));
+      }
+    }`;
+
   return `// GENERATED from MAME CPU source and opcode DSL; do not edit.
 // Sources:
 ${definition.sourceFiles.map(file => `// - ${file}`).join('\n')}
@@ -61,6 +79,12 @@ import type {
   CpuBus,
   GeneratedCpuExecutable,
 } from '../../core/generated-cpu.js';
+
+function popcount32(value: number): number {
+  value -= (value >>> 1) & 0x55555555;
+  value = (value & 0x33333333) + ((value >>> 2) & 0x33333333);
+  return (((value + (value >>> 4)) & 0x0f0f0f0f) * 0x01010101) >>> 24;
+}
 
 class Pair16 {
   private value = 0;
@@ -109,21 +133,7 @@ ${emitProgram(definition.reset, contextFor(definition, [], 'void'), 4)}
   }
 
   step(): number {
-    this.cycles = 0;
-    this.m_icount = 1;
-    this.generatedService();
-    if (this.cycles > 0) return this.cycles;
-    this.generatedFetch();
-    let dispatches = 0;
-    while (true) {
-      if (++dispatches > 8) throw new Error('${definition.type} dispatch loop exceeded 8');
-      switch ((this.m_ref >>> 8) & 0xffff) {
-${opcodeCases}
-        default:
-          throw new Error('${definition.type} has no generated opcode ' +
-            (((this.m_ref >>> 8) & 0xffff).toString(16).padStart(4, '0')));
-      }
-    }
+${step}
   }
 
   run(target: number): number {
@@ -206,6 +216,9 @@ export default cpu;
 }
 
 function emitMember(member: GeneratedCpuMember): string {
+  if (member.values) {
+    return `  private ${member.name} = [${member.values.join(', ')}];`;
+  }
   if (member.fields) {
     const values = Object.keys(member.fields).map(name => `${name}: 0`).join(', ');
     return `  private ${member.name} = { ${values} };`;
@@ -261,6 +274,7 @@ function emitPublicGetCases(definition: GeneratedCpuDefinition): string {
     lines.push(`      case ${JSON.stringify(name)}: return this.${name};`);
   }
   for (const member of definition.members) {
+    if (member.values) continue;
     if (member.pair) {
       lines.push(`      case ${JSON.stringify(member.name)}:`);
       lines.push(`      case ${JSON.stringify(`${member.name}.w`)}: return this.${member.name}.w;`);
@@ -287,6 +301,7 @@ function emitPublicSetCases(definition: GeneratedCpuDefinition): string {
     );
   }
   for (const member of definition.members) {
+    if (member.values) continue;
     if (member.pair) {
       lines.push(`      case ${JSON.stringify(member.name)}:`);
       lines.push(
@@ -406,7 +421,9 @@ function emitOperation(
     } else {
       lines.push(`${pad}  default:`);
     }
-    lines.push(emitOperations(entry.body, context, indentation + 4));
+    lines.push(`${pad}    {`);
+    lines.push(emitOperations(entry.body, context, indentation + 6));
+    lines.push(`${pad}    }`);
   }
   lines.push(`${pad}}`);
   return lines.filter(Boolean).join('\n');
@@ -419,6 +436,11 @@ function emitCallStatement(
 ): string {
   const pad = ' '.repeat(indentation);
   const name = expressionPath(expression.callee);
+  if ((name === 'POSTINC' || name === 'POSTDEC') && expression.args[0]) {
+    const target = targetInfo(expression.args[0], context);
+    const delta = name === 'POSTINC' ? '1' : '-1';
+    return `${pad}${target.code} = ${wrapTarget(`(${target.code}) + (${delta})`, target)};`;
+  }
   if (name === 'swap' && expression.args.length === 2) {
     const left = targetInfo(expression.args[0]!, context);
     const right = targetInfo(expression.args[1]!, context);
@@ -500,6 +522,13 @@ function emitCall(
   const method = context.definition.methods.find(candidate => candidate.name === name);
   if (method) return `this.method_${safeName(method.name)}(${args.join(', ')})`;
 
+  if ((name === 'POSTINC' || name === 'POSTDEC') && expression.args[0]) {
+    const target = targetInfo(expression.args[0], context);
+    const delta = name === 'POSTINC' ? '1' : '-1';
+    return `(() => { const previous = ${target.code}; ` +
+      `${target.code} = ${wrapTarget(`(${target.code}) + (${delta})`, target)}; return previous; })()`;
+  }
+
   if (['u8', 'uint8_t'].includes(name)) return wrapType(args[0] ?? '0', 'u8');
   if (['s8', 'int8_t'].includes(name)) return wrapType(args[0] ?? '0', 's8');
   if (['u16', 'uint16_t'].includes(name)) return wrapType(args[0] ?? '0', 'u16');
@@ -507,6 +536,10 @@ function emitCall(
   if (['u32', 'uint32_t'].includes(name)) return wrapType(args[0] ?? '0', 'u32');
   if (['s32', 'int32_t'].includes(name)) return wrapType(args[0] ?? '0', 's32');
   if (name === 'bool') return `((${args[0] ?? '0'}) ? 1 : 0)`;
+  if (name === 'std::popcount') {
+    return `popcount32((${args[0] ?? '0'}) >>> 0)`;
+  }
+  if (name === 'std::size') return `(${args[0] ?? '[]'}).length`;
 
   if (name === 'm_data.read_interruptible' ||
       name === 'm_opcodes.read_byte' ||
@@ -522,6 +555,26 @@ function emitCall(
   if (name === 'm_io.write_interruptible') {
     return `(this.bus.out((${args[0] ?? '0'}) & 0xffff, (${args[1] ?? '0'}) & 0xff), 0)`;
   }
+  if (name === 'm_program.read_byte' || name === 'm_cprogram.read_byte' ||
+      name === 'm_copcodes.read_byte') {
+    return `(this.bus.read((${args[0] ?? '0'}) & 0xffff) & 0xff)`;
+  }
+  if (name === 'm_program.write_byte') {
+    return `(this.bus.write((${args[0] ?? '0'}) & 0xffff, (${args[1] ?? '0'}) & 0xff), 0)`;
+  }
+  if (name === 'm_io.read_byte') {
+    return `(this.bus.in((${args[0] ?? '0'}) & 0xff) & 0xff)`;
+  }
+  if (name === 'm_io.write_byte') {
+    return `(this.bus.out((${args[0] ?? '0'}) & 0xff, (${args[1] ?? '0'}) & 0xff), 0)`;
+  }
+  if (name === 'm_in_inta_func.isunset' || name === 'm_out_status_func.isunset') return '1';
+  if (name === 'm_out_inte_func' || name === 'm_out_sod_func' || name === 'm_out_status_func') {
+    return `(this.bus.signal?.(${JSON.stringify(name.slice(2))}, ` +
+      `${args[0] ?? '0'}) ?? 0)`;
+  }
+  if (name === 'standard_irq_callback') return 'this.acknowledgeIrq()';
+  if (name === 'LOG' || name === 'LOGMASKED' || name === 'logerror') return '0';
   if (name === 'standard_irq_callback' || name === 'm_irqack_cb' ||
       name === 'm_irqack_cb.bind') {
     return 'this.acknowledgeIrq()';
@@ -551,6 +604,15 @@ function targetInfo(
   expression: GeneratedExpression,
   context: EmitContext,
 ): { code: string; bits?: 1 | 8 | 16 | 32; valueType?: string } {
+  if (expression.kind === 'index') {
+    const object = expressionPath(expression.object);
+    if (!object) throw new Error('generated CPU assignment has unsupported indexed target');
+    const member = memberForPath(object, context.definition);
+    return {
+      code: `${emitExpression(expression.object, context)}[${emitExpression(expression.index, context)}]`,
+      bits: member?.bits,
+    };
+  }
   const path = expressionPath(expression);
   if (!path) throw new Error(`generated CPU assignment has unsupported target ${expression.kind}`);
   const localType = context.locals.get(path);
@@ -594,6 +656,13 @@ function emitIdentifier(name: string, context: EmitContext): string {
 
 function emitPath(path: string, context: EmitContext): string {
   if (context.locals.has(path)) return path;
+  const localRoot = path.split('.')[0]!;
+  const localType = context.locals.get(localRoot)?.replace(/\bconst\b/g, '').trim();
+  if (localType === 'PAIR' || localType === 'u16' || localType === 'uint16_t') {
+    if (path === `${localRoot}.w` || path === `${localRoot}.d`) return localRoot;
+    if (path === `${localRoot}.b.l`) return `((${localRoot}) & 0xff)`;
+    if (path === `${localRoot}.b.h`) return `((${localRoot} >>> 8) & 0xff)`;
+  }
   if (context.definition.aliases[path]) return `this.${path}`;
   const member = memberForPath(path, context.definition);
   if (member) {

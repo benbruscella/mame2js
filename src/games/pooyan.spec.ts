@@ -19,6 +19,7 @@ const machine = graph.nodes.find(node =>
 assert.ok(machine);
 const compiled = compileMameVideo(graph, mameSrc, machine.id);
 assert.ok(compiled, 'Pooyan MAME video source must lower to executable video IR');
+assert.ok(compiled.plan.palette);
 assert.equal(compiled.plan.tilemaps[0]?.mapper, 'TILEMAP_SCAN_ROWS');
 assert.deepEqual(compiled.plan.palette.banks, [
   { penOffset: 0, colorOr: 0x10, lookupOffset: 0x20, lookupCount: 0x100 },

@@ -12,6 +12,7 @@ import {
 } from './generated-video.ts';
 import {
   dispatchGeneratedCallback,
+  dispatchGeneratedCallbacks,
   executeGeneratedCallbackHandler,
   generatedHandlerRegistry,
   wireGeneratedDevice,
@@ -162,6 +163,16 @@ class IrBoard implements Board {
         write: (address, data) => bus.write(address & mask, data),
         in: bus.in,
         out: bus.out,
+        signal: (signal, state) => {
+          dispatchGeneratedCallbacks(
+            machine,
+            specification.tag,
+            signal,
+            state,
+            this.bindings,
+            this.callbackEndpoints(sinks),
+          );
+        },
       });
       this.cpus.set(specification.tag, cpu);
       this.cpuCycles.set(specification.tag, 0);
@@ -181,7 +192,11 @@ class IrBoard implements Board {
           if (state !== 0) cpu.nmi();
           return;
         }
-        cpu.setIrqLine(state !== 0, interruptVector(), state === 2);
+        cpu.setIrqLine(
+          state !== 0,
+          state !== 0 ? interruptVector() : 0xff,
+          state === 2,
+        );
       };
       const member = machine.devices?.find(device =>
         device.tag === specification.tag)?.member;
@@ -215,7 +230,7 @@ class IrBoard implements Board {
       }
     }
 
-    const video = machine.video
+    const video = machine.execution.screenUpdate
       ? new GeneratedVideoRenderer(
           machine,
           new GeneratedMameVideoPrimitives(machine, regions, this.state, this.bindings),
@@ -433,7 +448,11 @@ class IrBoard implements Board {
     for (const method of sound.writeMethods) {
       const key = `${sound.deviceTag}.${method}`;
       registry.write[key] = (_address, offset, data) => {
-        sinks.soundWrite(offset, data, this.soundFraction());
+        sinks.soundWrite(
+          sound.writeMethodOffsets?.[method] ?? offset,
+          data,
+          this.soundFraction(),
+        );
       };
     }
   }
@@ -479,9 +498,8 @@ class IrBoard implements Board {
           sinks.soundWrite(sound.controlOffset, state, this.soundFraction());
       }
       if (
-        callback.targetMethod === 'mute_w' &&
-        this.machine.devices?.some(device =>
-          device.tag === callback.targetTag && device.type === 'TIMEPLT_AUDIO')
+        sound &&
+        callback.targetMethod === 'mute_w'
       ) {
         endpoints[target] = state => sinks.soundWrite(-1, state, this.soundFraction());
       }

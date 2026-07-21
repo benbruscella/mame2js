@@ -199,10 +199,12 @@ coordinates focused compilers.
 
 ### CPU
 
-CPU definitions combine MAME class/state information with expanded opcode DSL
-programs. `src/mame/cpu-compiler.ts` and `cpu-codegen.ts` produce executable
-TypeScript plus auditable CPU IR. The browser runtime supplies generic register,
-bus and program-execution machinery.
+CPU definitions combine MAME class/state information with source-derived
+instruction programs. Z80 lowers MAME's expanded `z80.lst` opcode DSL. I8080
+lowers the 256 cases in MAME's `execute_one` C++ switch, its helper methods,
+state aliases and cycle tables. `src/mame/cpu-compiler.ts` and
+`cpu-codegen.ts` produce executable TypeScript plus auditable CPU IR. The
+browser runtime supplies generic register, bus and program-execution machinery.
 
 ### DEVICE
 
@@ -213,8 +215,12 @@ modules import that JSON and register it with the generic device runtime.
 ### VIDEO
 
 `src/mame/video-compiler.ts` resolves screen-update methods, palette behavior,
-graphics decode, tilemap and sprite operations into a rendering plan. The
-generic video runtime executes the plan against ROM regions and shared memory.
+graphics decode, tilemap and sprite operations into rendering plans. It also
+recognizes MAME's direct packed-bitmap loops and lowers their source arithmetic
+to a compact bitmap plan. This avoids interpreting one handler operation per
+pixel while retaining the source method and memory-layout provenance. The
+generic video runtime executes either plan against ROM regions and shared
+memory.
 
 ### AUDIO
 
@@ -222,6 +228,14 @@ generic video runtime executes the plan against ROM regions and shared memory.
 emits AudioWorklet source plus audio IR. Worklets live under
 `dist/runtime/generated/audio` and import shared operations from
 `dist/runtime/core` when required.
+
+The current audio profiles include Namco WSG, AY8910 with generated RC routing,
+and MAME soundboards composed from `DISCRETE` plus `SN76477`. The latter emits
+port wiring, control nodes, topology classes, LFSR parameters, component
+values, mixer resistances and route gains from MAME. Norton op-amp stages are
+lowered to stable browser component models; MAMEKIT does not yet implement
+MAME's complete analog discrete solver. The generated IR records that boundary
+instead of hiding it in a checked-in game sound class.
 
 ### DSL ARTIFACTS
 

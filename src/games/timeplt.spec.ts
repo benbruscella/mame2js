@@ -18,6 +18,7 @@ const machine = graph.nodes.find(node =>
 assert.ok(machine);
 const compiled = compileMameVideo(graph, mameSourceRoot(), machine.id);
 assert.ok(compiled, 'Time Pilot MAME video source must lower to executable video IR');
+assert.ok(compiled.plan.palette);
 assert.deepEqual(compiled.plan.palette.channels.map(channel => ({
   channel: channel.channel,
   offsets: channel.offsets,

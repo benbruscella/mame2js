@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import { basename, dirname, extname, join, relative } from 'node:path';
 import type { GeneratedHandlerProgram } from '../runtime/generated-machine.ts';
 import { parseMameAst, splitMameArgs } from './ast.ts';
+import { evalExpr } from '../kg/parse.ts';
 import { normalizeMameExecutionSource } from './cpu-compiler.ts';
 import { compileMameHandler } from './handler-ir.ts';
 import type { MameHardwareDefinition } from './hardware.ts';
@@ -45,6 +46,312 @@ export interface GeneratedAy8910Plan {
   };
   sourceFiles: string[];
   source: { file: string; line: number };
+}
+
+export interface GeneratedDiscreteAudioControl {
+  port: number;
+  mask: number;
+}
+
+export interface GeneratedDiscreteAudioVoice {
+  outputNode: string;
+  model:
+    | 'parallel-555'
+    | 'gated-555'
+    | 'filtered-noise'
+    | 'swept-square'
+    | 'warble';
+  control: GeneratedDiscreteAudioControl;
+  mixerResistance: number;
+  resistors: number[];
+  capacitors: number[];
+  toneHz?: number;
+  triggerCapacitance?: number;
+  parallelResistors?: number[];
+  sourceMacro: string;
+}
+
+export interface GeneratedDiscreteSn76477Plan {
+  schemaVersion: 1;
+  type: 'DISCRETE_SN76477';
+  deviceType: string;
+  className: string;
+  workletName: string;
+  sampleRate: number;
+  ports: { method: string; offset: number }[];
+  amplifier: GeneratedDiscreteAudioControl;
+  snControl: GeneratedDiscreteAudioControl;
+  sn76477: {
+    vcoResistance: number;
+    vcoCapacitance: number;
+    slfResistance: number;
+    slfCapacitance: number;
+    routeGain: number;
+  };
+  lfsr: {
+    clock: number;
+    bits: number;
+    reset: number;
+    tap0: number;
+    tap1: number;
+    outputBit: number;
+  };
+  voices: GeneratedDiscreteAudioVoice[];
+  outputGain: number;
+  discreteRouteGain: number;
+  sourceFiles: string[];
+  source: { file: string; line: number };
+}
+
+export function compileDiscreteSn76477(
+  mameSrc: string,
+  definition: MameHardwareDefinition,
+): GeneratedDiscreteSn76477Plan {
+  const cppFile = definition.sourceFile;
+  const cpp = readFileSync(join(mameSrc, cppFile), 'utf8');
+  const ast = parseMameAst([{ file: cppFile, source: cpp }]);
+  const methods = ast.units.flatMap(unit => unit.functions)
+    .filter(fn => fn.className === definition.className);
+  const config = methods.find(fn => fn.name === 'device_add_mconfig');
+  const ports = methods.filter(fn => fn.body.includes('m_discrete->write'));
+  const prefix = definition.type.replace(/_AUDIO$/, '');
+  const stem = definition.className.replace(/_audio_device$/, '');
+  if (!config || ports.length < 1 || prefix === definition.type) {
+    throw new Error(`${definition.type}: expected a MAME discrete audio device`);
+  }
+
+  const controls = new Map<string, GeneratedDiscreteAudioControl>();
+  ports.forEach((method, port) => {
+    const write = /m_discrete->write\(\s*\w+\(\s*(\w+)\s*,\s*\d+\s*\)\s*,\s*data\s*&\s*(0x[\da-f]+|\d+)\s*\)/gi;
+    for (const match of method.body.matchAll(write)) {
+      controls.set(match[1]!, { port, mask: Number(match[2]) });
+    }
+  });
+  const snMethod = ports.findIndex(method => method.body.includes('m_sn->enable_w'));
+  const snBit = Number(/m_sn->enable_w\(\s*BIT\(\s*~data\s*,\s*(\d+)\s*\)/.exec(
+    ports[snMethod]?.body ?? '',
+  )?.[1]);
+  const ampMethod = ports.findIndex(method => method.body.includes('system_mute'));
+  const ampBit = Number(/system_mute\(\s*!BIT\(\s*data\s*,\s*(\d+)\s*\)/.exec(
+    ports[ampMethod]?.body ?? '',
+  )?.[1]);
+
+  const macros = preprocessorMacros(cpp);
+  const mixerMacro = macros.get(`${prefix}_MIXER`);
+  const mixerCall = mixerMacro && callArgs(mixerMacro, 'DISCRETE_MIXER6')[0];
+  const mixerValues = structValues(cpp, `${stem}_mixer`);
+  const mixerResistors = mixerValues.firstArray.map(analogValue);
+  const outputGain = Number(callArgs(mixerMacro ?? '', 'DISCRETE_OUTPUT')[0]?.[1]);
+  if (!mixerCall || mixerResistors.length < 6 || !outputGain) {
+    throw new Error(
+      `${definition.type}: MAME mixer topology is not recognized ` +
+      `(call=${mixerCall?.length ?? 0}, resistors=${mixerResistors.length}, gain=${outputGain})`,
+    );
+  }
+  const outputNodes = mixerCall.slice(2, 8).map(arg =>
+    /\b([A-Z][A-Z0-9_]+_SND)\b/.exec(arg)?.[1] ?? '');
+  const voices = outputNodes.map((outputNode, index): GeneratedDiscreteAudioVoice => {
+    const entry = [...macros.entries()].find(([name, body]) =>
+      name !== `${prefix}_MIXER` && body.includes(outputNode));
+    if (!entry) throw new Error(`${definition.type}: no source topology emits ${outputNode}`);
+    const [sourceMacro, body] = entry;
+    const controlNode = /DISCRETE_INPUT\w*\s*\(\s*\w+\(\s*(\w+)/.exec(body)?.[1];
+    const control = controlNode && controls.get(controlNode);
+    if (!control) throw new Error(`${definition.type}: ${sourceMacro} has no mapped control`);
+    const model = discreteVoiceModel(body);
+    const concreteBody = body.replace(/_type##/g, stem);
+    const references = [...concreteBody.matchAll(/&(\w+)/g)].map(match => match[1]!);
+    const componentSource = [concreteBody, ...references.map(name => structValues(cpp, name).body)].join('\n');
+    const resistors = componentValues(componentSource, 'RES');
+    const capacitors = componentValues(componentSource, 'CAP');
+    const oneShot = references.find(name => /1sht/i.test(name));
+    const triggerCaps = oneShot
+      ? componentValues(structValues(cpp, oneShot).body, 'CAP')
+      : [];
+    const compAdder = /DISCRETE_COMP_ADDER\([\s\S]*?&(\w+)\s*\)/.exec(concreteBody)?.[1];
+    const fixedSquare = callArgs(concreteBody, 'DISCRETE_SQUAREWFIX')[0];
+    const toneHz = fixedSquare ? requiredAnalog(fixedSquare[2]) : Number.NaN;
+    return {
+      outputNode,
+      model,
+      control,
+      mixerResistance: mixerResistors[index]!,
+      resistors,
+      capacitors,
+      ...(Number.isFinite(toneHz) && toneHz > 0 ? { toneHz } : {}),
+      ...(triggerCaps[0] ? { triggerCapacitance: triggerCaps[0] } : {}),
+      ...(compAdder ? { parallelResistors: resistorTable(cpp, compAdder) } : {}),
+      sourceMacro,
+    };
+  });
+
+  const lfsrValues = structValues(cpp, 'midway_lfsr').scalars;
+  const noiseMacro = macros.get(`${prefix}_NOISE_GENERATOR`) ?? '';
+  const noiseCall = callArgs(noiseMacro, 'DISCRETE_LFSR_NOISE')[0] ?? [];
+  const snConfig = config.body;
+  const snRoute = Number(/m_sn->add_route\([^,]+,[^,]+,\s*([\d.]+)/.exec(snConfig)?.[1]);
+  const discreteRoute = Number(/m_discrete->add_route\([^,]+,[^,]+,\s*([\d.]+)/.exec(snConfig)?.[1]);
+  const vco = callArgs(snConfig, 'set_vco_params')[0] ?? [];
+  const slf = callArgs(snConfig, 'set_slf_params')[0] ?? [];
+  if (
+    snMethod < 0 || !Number.isInteger(snBit) || ampMethod < 0 || !Number.isInteger(ampBit) ||
+    noiseCall.length < 4 || lfsrValues.length < 11 || vco.length < 3 || slf.length < 2 ||
+    !Number.isFinite(snRoute) || !Number.isFinite(discreteRoute)
+  ) {
+    throw new Error(`${definition.type}: MAME DISCRETE/SN76477 source shape is incomplete`);
+  }
+  return {
+    schemaVersion: 1,
+    type: 'DISCRETE_SN76477',
+    deviceType: definition.type,
+    className: definition.className,
+    workletName: definition.type.toLowerCase().replace(/_audio$/, ''),
+    sampleRate: 48_000,
+    ports: ports.map((method, offset) => ({ method: method.name, offset })),
+    amplifier: { port: ampMethod, mask: 1 << ampBit },
+    snControl: { port: snMethod, mask: 1 << snBit },
+    sn76477: {
+      vcoCapacitance: requiredAnalog(vco[1]),
+      vcoResistance: requiredAnalog(vco[2]),
+      slfCapacitance: requiredAnalog(slf[0]),
+      slfResistance: requiredAnalog(slf[1]),
+      routeGain: snRoute,
+    },
+    lfsr: {
+      clock: requiredAnalog(noiseCall[3]),
+      bits: lfsrValues[1]!,
+      reset: lfsrValues[2]!,
+      tap0: lfsrValues[3]!,
+      tap1: lfsrValues[4]!,
+      outputBit: lfsrValues[10]!,
+    },
+    voices,
+    outputGain,
+    discreteRouteGain: discreteRoute,
+    sourceFiles: [cppFile],
+    source: { file: config.span.file, line: config.span.line },
+  };
+}
+
+function preprocessorMacros(source: string): Map<string, string> {
+  const result = new Map<string, string>();
+  const lines = source.split('\n');
+  for (let index = 0; index < lines.length; index++) {
+    const head = /^\s*#define\s+(\w+)(?:\([^)]*\))?\s*(.*)$/.exec(lines[index]!);
+    if (!head) continue;
+    const body = [head[2]!];
+    while (body.at(-1)?.trimEnd().endsWith('\\') && index + 1 < lines.length) {
+      body.push(lines[++index]!);
+    }
+    result.set(head[1]!, body.join('\n').replace(/\\\s*\n/g, '\n'));
+  }
+  return result;
+}
+
+function callArgs(source: string, name: string): string[][] {
+  const result: string[][] = [];
+  const pattern = new RegExp(`\\b${name}\\s*\\(`, 'g');
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(source)) !== null) {
+    const open = source.indexOf('(', match.index);
+    const close = matchingDelimiter(source, open, '(', ')');
+    if (close < 0) break;
+    const args = source.slice(open + 1, close)
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/\/\/.*$/gm, '');
+    result.push(splitMameArgs(args));
+    pattern.lastIndex = close + 1;
+  }
+  return result;
+}
+
+function structValues(source: string, name: string): {
+  body: string;
+  scalars: number[];
+  firstArray: string[];
+} {
+  const match = new RegExp(`\\b${name}\\s*=\\s*\\{`).exec(source);
+  if (!match) return { body: '', scalars: [], firstArray: [] };
+  const open = source.indexOf('{', match.index);
+  const close = matchingDelimiter(source, open, '{', '}');
+  if (close < 0) return { body: '', scalars: [], firstArray: [] };
+  const body = source.slice(open + 1, close);
+  const clean = body.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
+  const args = splitMameArgs(clean);
+  const nested = args.find(value => value.trim().startsWith('{'));
+  return {
+    body,
+    scalars: args.map(analogValue),
+    firstArray: nested
+      ? splitMameArgs(nested.trim().replace(/^\{/, '').replace(/\}\s*$/, ''))
+      : [],
+  };
+}
+
+function matchingDelimiter(
+  source: string,
+  open: number,
+  opening: string,
+  closing: string,
+): number {
+  let depth = 0;
+  for (let index = open; index < source.length; index++) {
+    if (source[index] === opening) depth++;
+    else if (source[index] === closing && --depth === 0) return index;
+  }
+  return -1;
+}
+
+function analogValue(expression: string): number {
+  let normalized = expression.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '').trim();
+  const units: [RegExp, number][] = [
+    [/RES_K\(([^()]+)\)/g, 1e3],
+    [/RES_M\(([^()]+)\)/g, 1e6],
+    [/CAP_U\(([^()]+)\)/g, 1e-6],
+    [/CAP_N\(([^()]+)\)/g, 1e-9],
+    [/CAP_P\(([^()]+)\)/g, 1e-12],
+  ];
+  for (const [pattern, scale] of units) {
+    normalized = normalized.replace(pattern, `(($1)*${scale})`);
+  }
+  return evalExpr(normalized) ?? Number.NaN;
+}
+
+function requiredAnalog(expression: string | undefined): number {
+  const value = analogValue(expression ?? '');
+  if (!Number.isFinite(value)) throw new Error(`unsupported MAME component expression: ${expression}`);
+  return value;
+}
+
+function componentValues(source: string, kind: 'RES' | 'CAP'): number[] {
+  const result: number[] = [];
+  const pattern = kind === 'RES'
+    ? /RES_[KM]\([^()]+\)/g
+    : /CAP_[UNP]\([^()]+\)/g;
+  for (const match of source.matchAll(pattern)) {
+    const value = analogValue(match[0]);
+    if (Number.isFinite(value)) result.push(value);
+  }
+  return result;
+}
+
+function resistorTable(source: string, name: string): number[] {
+  return structValues(source, name).firstArray
+    .map(analogValue)
+    .filter(Number.isFinite);
+}
+
+function discreteVoiceModel(body: string): GeneratedDiscreteAudioVoice['model'] {
+  if (body.includes('DISCRETE_COMP_ADDER') && body.includes('DISCRETE_555_ASTABLE')) {
+    return 'parallel-555';
+  }
+  if (body.includes('DISCRETE_SQUAREWFIX') && body.includes('DISCRETE_555_ASTABLE')) {
+    return 'gated-555';
+  }
+  if (body.includes('DISCRETE_RCFILTER') && body.includes('NOISE')) return 'filtered-noise';
+  if (body.includes('DISCRETE_OP_AMP_ONESHOT')) return 'swept-square';
+  if (body.includes('DISCRETE_OP_AMP_VCO')) return 'warble';
+  throw new Error('unsupported MAME discrete voice topology');
 }
 
 export function compileAy8910(
@@ -578,6 +885,296 @@ class GeneratedAy8910Processor extends AudioWorkletProcessor {
 }
 
 registerProcessor('ay8910', GeneratedAy8910Processor);
+`;
+}
+
+export function generatedDiscreteSn76477WorkletSource(
+  plan: GeneratedDiscreteSn76477Plan,
+): string {
+  return `// GENERATED from ${plan.source.file}:${plan.source.line}; do not edit.
+// Port wiring, voice topology, component values, LFSR, mixer resistances and
+// routes come from MAME. Norton op-amp stages are lowered to stable browser
+// component models rather than copied into a hand-written game runtime.
+const plan = ${JSON.stringify(plan, null, 2)};
+
+export interface GeneratedDiscreteWrite { offset: number; data: number; frac?: number }
+
+interface VoiceState {
+  env: number;
+  phase: number;
+  phase2: number;
+  time: number;
+  filter1: number;
+  filter2: number;
+  frequency: number;
+  center: number;
+}
+
+const clamp = (value: number): number => Math.max(-1, Math.min(1, value));
+
+export class GeneratedDiscreteAudioCore {
+  readonly sampleRate: number;
+  private readonly ports = new Uint8Array(plan.ports.length);
+  private readonly states: VoiceState[] = plan.voices.map(() => ({
+    env: 0, phase: 0, phase2: 0, time: 0,
+    filter1: 0, filter2: 0, frequency: 0, center: 1200,
+  }));
+  private readonly minimumMixerResistance = Math.min(
+    ...plan.voices.map(voice => voice.mixerResistance),
+  );
+  private lfsr = plan.lfsr.reset;
+  private noise = -1;
+  private noisePhase = 0;
+  private snPhase = 0;
+  private snSlfPhase = 0;
+  private snEnv = 0;
+  private ampGain = 1;
+
+  constructor(outputRate = plan.sampleRate) {
+    this.sampleRate = outputRate;
+  }
+
+  write(offset: number, data: number): void {
+    if (offset < 0 || offset >= this.ports.length) return;
+    const previous = this.ports[offset] ?? 0;
+    this.ports[offset] = data & 0xff;
+    plan.voices.forEach((voice, index) => {
+      if (voice.control.port !== offset) return;
+      const wasActive = (previous & voice.control.mask) !== 0;
+      const active = (data & voice.control.mask) !== 0;
+      const state = this.states[index];
+      if (!state) return;
+      if (active && !wasActive) {
+        if (voice.model === 'swept-square' || voice.model === 'filtered-noise') {
+          state.env = 1;
+          state.time = 0;
+        }
+        if (voice.model === 'warble') {
+          state.center = 1200;
+          state.phase2 = 0;
+        }
+      }
+      if (voice.model === 'parallel-555') {
+        const bits = data & voice.control.mask;
+        let conductance = 0;
+        (voice.parallelResistors ?? []).forEach((resistance, bit) => {
+          if (bits & (1 << bit)) conductance += 1 / resistance;
+        });
+        const r2 = voice.resistors[0] ?? 75_000;
+        const c = voice.capacitors[0] ?? 0.1e-6;
+        state.frequency = conductance ? 1.44 / ((1 / conductance + 2 * r2) * c) : 0;
+      }
+    });
+  }
+
+  render(output: Float32Array): void {
+    for (let index = 0; index < output.length; index++) output[index] = this.sample();
+  }
+
+  sample(): number {
+    const dt = 1 / this.sampleRate;
+    this.noisePhase += plan.lfsr.clock * dt;
+    while (this.noisePhase >= 1) {
+      this.noisePhase -= 1;
+      const feedback =
+        ((this.lfsr >> plan.lfsr.tap0) ^ (this.lfsr >> plan.lfsr.tap1)) & 1;
+      this.lfsr = ((this.lfsr << 1) | feedback) & ((2 ** plan.lfsr.bits) - 1);
+      this.noise = (this.lfsr >> plan.lfsr.outputBit) & 1 ? 1 : -1;
+    }
+
+    const snOn = (this.ports[plan.snControl.port]! & plan.snControl.mask) !== 0;
+    this.snEnv += (Number(snOn) - this.snEnv) * 0.003;
+    let mix = 0;
+    if (this.snEnv > 1e-5) {
+      const slfHz = 0.64 /
+        (plan.sn76477.slfResistance * plan.sn76477.slfCapacitance);
+      const vcoTop = 0.64 /
+        (plan.sn76477.vcoResistance * plan.sn76477.vcoCapacitance) * 1.4;
+      this.snSlfPhase = (this.snSlfPhase + slfHz * dt) % 1;
+      const triangle = this.snSlfPhase < 0.5
+        ? this.snSlfPhase * 2
+        : 2 - this.snSlfPhase * 2;
+      const frequency = vcoTop * (0.32 + 0.68 * triangle);
+      this.snPhase = (this.snPhase + frequency * dt) % 1;
+      mix += (this.snPhase < 0.5 ? 1 : -1) * this.snEnv *
+        plan.sn76477.routeGain * 0.64;
+    }
+
+    plan.voices.forEach((voice, voiceIndex) => {
+      const state = this.states[voiceIndex]!;
+      const active = (this.ports[voice.control.port]! & voice.control.mask) !== 0;
+      const gain = Math.sqrt(this.minimumMixerResistance / voice.mixerResistance) *
+        plan.discreteRouteGain * 0.9;
+      let value = 0;
+      if (voice.model === 'parallel-555') {
+        state.env = active
+          ? state.env + (1 - state.env) * this.lowpassK(160)
+          : state.env * this.decayK(0.035);
+        state.phase = (state.phase + state.frequency * dt) % 1;
+        const raw = (state.phase < 0.5 ? 1 : -1) * state.env;
+        const c1 = voice.capacitors[1] ?? 4.7e-6;
+        const c2 = voice.capacitors[2] ?? 10e-6;
+        state.filter1 += (raw - state.filter1) * this.rcK(100, c1);
+        state.filter2 += (state.filter1 - state.filter2) * this.rcK(200, c2);
+        value = state.filter2;
+      } else if (voice.model === 'gated-555') {
+        if (active) {
+          const r1 = voice.resistors[0] ?? 100_000;
+          const r2 = voice.resistors[1] ?? 47_000;
+          const c = voice.capacitors[0] ?? 1e-6;
+          const gateHz = 1.44 / ((r1 + 2 * r2) * c);
+          const duty = (r1 + r2) / (r1 + 2 * r2);
+          state.phase = (state.phase + gateHz * dt) % 1;
+          state.phase2 = (state.phase2 + (voice.toneHz ?? 480) * dt) % 1;
+          if (state.phase < duty) value = state.phase2 < 0.5 ? 1 : -1;
+        }
+      } else if (voice.model === 'filtered-noise') {
+        const cap = voice.triggerCapacitance ?? 1e-6;
+        state.env *= this.decayK(0.06 + cap * 110_000);
+        const c1 = voice.capacitors[0] ?? 0.1e-6;
+        const c2 = voice.capacitors[1] ?? 0.1e-6;
+        const r1 = voice.resistors[0] ?? 5_600;
+        const r2 = (voice.resistors[1] ?? 5_600) + (voice.resistors[2] ?? 6_800);
+        state.filter1 += (this.noise * state.env - state.filter1) * this.rcK(r1, c1);
+        state.filter2 += (state.filter1 - state.filter2) * this.rcK(r2, c2);
+        value = state.filter2;
+      } else if (voice.model === 'swept-square') {
+        const cap = voice.triggerCapacitance ?? 0.5e-6;
+        const scale = Math.sqrt(Math.max(0.1, cap / 0.1e-6));
+        const endHz = 180 + 45 * scale;
+        const rangeHz = 900 + 300 * scale;
+        const sweepTau = 0.045 + 0.025 * scale;
+        state.env *= this.decayK(0.07 + cap * 55_000);
+        const frequency = (endHz + rangeHz * Math.exp(-state.time / sweepTau)) *
+          (1 + 0.22 * this.noise);
+        state.phase = (state.phase + frequency * dt) % 1;
+        value = (state.phase < 0.5 ? 1 : -1) * state.env;
+        state.time += dt;
+      } else if (voice.model === 'warble') {
+        state.env = active
+          ? state.env + (1 - state.env) * 0.005
+          : state.env * this.decayK(0.03);
+        state.center = 500 + (state.center - 500) * this.decayK(0.5);
+        state.phase2 = (state.phase2 + 6 * dt) % 1;
+        const triangle = state.phase2 < 0.5
+          ? state.phase2 * 2
+          : 2 - state.phase2 * 2;
+        state.phase = (state.phase + state.center * (0.6 + 0.4 * triangle) * dt) % 1;
+        value = (state.phase < 0.5 ? 1 : -1) * state.env;
+      }
+      mix += value * gain;
+    });
+
+    const ampOn = (this.ports[plan.amplifier.port]! & plan.amplifier.mask) !== 0;
+    this.ampGain += (Number(ampOn) - this.ampGain) * this.lowpassK(80);
+    return clamp(mix * this.ampGain);
+  }
+
+  private decayK(seconds: number): number {
+    return Math.exp(-1 / (Math.max(seconds, 1e-6) * this.sampleRate));
+  }
+
+  private lowpassK(hz: number): number {
+    return 1 - Math.exp(-2 * Math.PI * hz / this.sampleRate);
+  }
+
+  private rcK(resistance: number, capacitance: number): number {
+    return 1 - Math.exp(-1 / (resistance * capacitance * this.sampleRate));
+  }
+}
+
+export class GeneratedDiscreteAudioFrameRenderer {
+  private carry = 0;
+  private readonly core: GeneratedDiscreteAudioCore;
+  private readonly outputRate: number;
+  private readonly refresh: number;
+  constructor(
+    core: GeneratedDiscreteAudioCore,
+    outputRate: number,
+    refresh: number,
+  ) {
+    this.core = core;
+    this.outputRate = outputRate;
+    this.refresh = refresh;
+  }
+
+  render(writes: readonly GeneratedDiscreteWrite[]): Float32Array {
+    this.carry += this.outputRate / this.refresh;
+    const count = Math.floor(this.carry);
+    this.carry -= count;
+    const output = new Float32Array(count);
+    let sampleIndex = 0;
+    for (const write of writes) {
+      const writeSample = Math.ceil(Math.max(0, Math.min(1, write.frac ?? 0)) * count);
+      while (sampleIndex < writeSample) output[sampleIndex++] = this.core.sample();
+      this.core.write(write.offset, write.data);
+    }
+    while (sampleIndex < count) output[sampleIndex++] = this.core.sample();
+    return output;
+  }
+}
+
+declare const sampleRate: number;
+declare class AudioWorkletProcessor { readonly port: MessagePort; constructor(); }
+declare function registerProcessor(
+  name: string,
+  processorCtor: new () => AudioWorkletProcessor,
+): void;
+
+class GeneratedDiscreteAudioProcessor extends AudioWorkletProcessor {
+  private core?: GeneratedDiscreteAudioCore;
+  private renderer?: GeneratedDiscreteAudioFrameRenderer;
+  private readonly frames: Float32Array[] = [];
+  private current?: Float32Array;
+  private index = 0;
+
+  constructor() {
+    super();
+    this.port.onmessage = (event: MessageEvent) => {
+      const message = event.data as {
+        type: string;
+        refresh?: number;
+        offset?: number;
+        data?: number;
+        writes?: GeneratedDiscreteWrite[];
+      };
+      if (message.type === 'init') {
+        this.core = new GeneratedDiscreteAudioCore(sampleRate);
+        this.renderer = new GeneratedDiscreteAudioFrameRenderer(
+          this.core,
+          sampleRate,
+          message.refresh ?? 60,
+        );
+      } else if (message.type === 'write') {
+        this.core?.write(message.offset ?? 0, message.data ?? 0);
+      } else if (message.type === 'batch' && this.renderer) {
+        this.frames.push(this.renderer.render(message.writes ?? []));
+      }
+    };
+  }
+
+  private next(): number {
+    while (!this.current || this.index >= this.current.length) {
+      this.current = this.frames.shift();
+      this.index = 0;
+      if (!this.current) return 0;
+    }
+    return this.current[this.index++]!;
+  }
+
+  process(_inputs: Float32Array[][], outputs: Float32Array[][]): boolean {
+    const channels = outputs[0];
+    const output = channels?.[0];
+    if (!output) return true;
+    for (let index = 0; index < output.length; index++) output[index] = this.next();
+    for (let channel = 1; channel < (channels?.length ?? 0); channel++) {
+      channels![channel]!.set(output);
+    }
+    return true;
+  }
+}
+
+registerProcessor(plan.workletName, GeneratedDiscreteAudioProcessor);
 `;
 }
 

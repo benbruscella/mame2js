@@ -49,6 +49,10 @@ export class GeneratedVideoRenderer implements VideoRenderer {
   }
 
   render(frame: Uint32Array): void {
+    if (this.machine.video?.bitmap) {
+      this.primitives.render(frame);
+      return;
+    }
     const xOffset = this.machine.execution.screen.xOffset ?? 0;
     const yOffset = this.machine.execution.screen.yOffset ?? 0;
     this.renderRegion(frame, yOffset, yOffset + this.height - 1);
@@ -426,7 +430,7 @@ export class GeneratedMameVideoPrimitives implements GeneratedVideoPrimitives, R
   private readonly machine: GeneratedMachine;
   private readonly state: Record<string, unknown>;
   private readonly gfx: GeneratedGfxElement[];
-  private readonly palette: GeneratedPalette;
+  private readonly palette?: GeneratedPalette;
   private readonly bindings: GeneratedHandlerBindings;
 
   constructor(
@@ -435,22 +439,23 @@ export class GeneratedMameVideoPrimitives implements GeneratedVideoPrimitives, R
     state: Record<string, unknown>,
     bindings: GeneratedHandlerBindings,
   ) {
-    if (!machine.video) throw new Error(`${machine.game}: generated video plan is missing`);
     this.machine = machine;
     this.state = state;
     this.width = machine.execution.screen.width;
     this.height = machine.execution.screen.height;
-    for (const [member, value] of Object.entries(machine.video.initialState)) {
+    for (const [member, value] of Object.entries(machine.video?.initialState ?? {})) {
       if (!Object.hasOwn(state, member)) state[member] = value;
     }
-    this.palette = new GeneratedPalette(machine.video.palette, regions);
-    this.gfx = machine.video.gfx.map(entry => {
+    this.palette = machine.video?.palette
+      ? new GeneratedPalette(machine.video.palette, regions)
+      : undefined;
+    this.gfx = (machine.video?.gfx ?? []).map(entry => {
       const region = regions[entry.region];
       if (!region) throw new Error(`${machine.game}: missing gfx region "${entry.region}"`);
       return new GeneratedGfxElement(
         entry,
         decodeGfx(entry.layout, region, entry.offset),
-        this.palette,
+        this.palette!,
       );
     });
     const referenceCalls: NonNullable<GeneratedHandlerBindings['referenceCalls']> = {
@@ -464,9 +469,11 @@ export class GeneratedMameVideoPrimitives implements GeneratedVideoPrimitives, R
       members: state,
       referenceCalls,
     };
-    state.m_gfxdecode = { gfx: (index: number) => this.gfx[index] };
-    state.m_palette = this.palette;
-    for (const plan of machine.video.tilemaps) {
+    if (this.palette) {
+      state.m_gfxdecode = { gfx: (index: number) => this.gfx[index] };
+      state.m_palette = this.palette;
+    }
+    for (const plan of machine.video?.tilemaps ?? []) {
       state[plan.member] = new GeneratedTilemap(
         plan,
         machine,
@@ -480,7 +487,31 @@ export class GeneratedMameVideoPrimitives implements GeneratedVideoPrimitives, R
     return this.bindings;
   }
 
-  render(_frame: Uint32Array): void {}
+  render(frame: Uint32Array): void {
+    const plan = this.machine.video?.bitmap;
+    if (!plan) return;
+    const source = this.state[plan.member];
+    if (!ArrayBuffer.isView(source)) {
+      throw new Error(`${this.machine.game}: bitmap member "${plan.member}" is not bound`);
+    }
+    const bytes = source as Uint8Array;
+    frame.fill(plan.black >>> 0);
+    for (let outputY = 0; outputY < plan.rows; outputY++) {
+      const sourceY = plan.rowStart + outputY;
+      const rowOffset = sourceY * plan.bytesPerRow;
+      for (let byte = 0; byte < plan.bytesPerRow; byte++) {
+        const pixels = bytes[rowOffset + byte] ?? 0;
+        for (let bit = 0; bit < 8; bit++) {
+          const sourceBit = plan.lsbFirst ? bit : 7 - bit;
+          const x = plan.xOffset + byte * 8 + bit;
+          if (x < this.width && outputY < this.height) {
+            frame[outputY * this.width + x] =
+              ((pixels >> sourceBit) & 1 ? plan.white : plan.black) >>> 0;
+          }
+        }
+      }
+    }
+  }
 
   vblank(): void {}
 }

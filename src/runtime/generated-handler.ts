@@ -63,6 +63,7 @@ const MACHINE_CALL_CACHE = new WeakMap<
   GeneratedMachine,
   WeakMap<GeneratedHandlerBindings, Map<string, PreparedMachineCalls>>
 >();
+const MACHINE_CALL_STACK: string[] = [];
 
 const DEFAULT_CONSTANTS: Record<string, number> = {
   ASSERT_LINE: 1,
@@ -368,13 +369,24 @@ function preparedMachineCalls(
     compiled.find(candidate => candidate.ownerClass === ownerClass && candidate.method === method) ??
     compiled.find(candidate => candidate.method === method);
   const invoke = (target: GeneratedHandler, values: GeneratedCallArgument[]): unknown => {
+    const key = `${target.ownerClass}.${target.method}`;
+    if (MACHINE_CALL_STACK.length >= 64) {
+      throw new Error(
+        `generated handler call depth exceeded 64: ${[...MACHINE_CALL_STACK, key].join(' -> ')}`,
+      );
+    }
     const names = parameterNames(target.parameters);
-    return executeGeneratedMachineProgram(
-      machine,
-      target,
-      bindings,
-      Object.fromEntries(names.map((name, index) => [name, values[index] ?? 0])),
-    ).value ?? 0;
+    MACHINE_CALL_STACK.push(key);
+    try {
+      return executeGeneratedMachineProgram(
+        machine,
+        target,
+        bindings,
+        Object.fromEntries(names.map((name, index) => [name, values[index] ?? 0])),
+      ).value ?? 0;
+    } finally {
+      MACHINE_CALL_STACK.pop();
+    }
   };
   for (const candidate of compiled) {
     const qualified = `${candidate.ownerClass}.${candidate.method}`;
@@ -563,6 +575,8 @@ function evaluateCall(
     }
     const args = expression.args.map(arg => evaluate(arg, context));
     if (name === 'BIT') return (toNumber(args[0]) >> toNumber(args[1])) & 1;
+    if (name === 'rgb_t::black') return 0xff000000;
+    if (name === 'rgb_t::white') return 0xffffffff;
     if (name === 'CAP_P') return toNumber(args[0]) * 1e-12;
     if (name === 'CAP_N') return toNumber(args[0]) * 1e-9;
     if (name === 'CAP_U') return toNumber(args[0]) * 1e-6;

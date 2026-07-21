@@ -7,10 +7,10 @@ behavioral baseline may change.
 
 ## 1. GOAL
 
-When a new machine is added, Pac-Man, Pooyan and Time Pilot must continue to
-produce the same generated machine behavior unless an intentional, reviewed
-fix changes them. The tests therefore protect both sides of the compiler
-boundary:
+When a new machine is added, Pac-Man, Pooyan, Time Pilot and Space Invaders
+must continue to produce the same generated machine behavior unless an
+intentional, reviewed fix changes them. The tests therefore protect both sides
+of the compiler boundary:
 
 1. MAME source is parsed and lowered as expected;
 2. a clean generated distribution remains complete and self-contained;
@@ -54,10 +54,10 @@ never be compiled into or pollute the canonical generated `dist` tree.
 ### CURRENT CLEAN GENERATION
 
 `test:current` invokes `gen:all`, which deletes `dist`, generates Pac-Man,
-Pooyan and Time Pilot from MAME, builds their shared hardware closure and app,
-then runs the generated-output audit. It detects stale-output masking, missing
-modules, unsupported hardware, duplicate trees, embedded machine JSON,
-imports from `src`, and blocked catalog entries.
+Pooyan, Time Pilot and Space Invaders from MAME, builds their shared hardware
+closure and app, then runs the generated-output audit. It detects stale-output
+masking, missing modules, unsupported hardware, duplicate trees, embedded
+machine JSON, imports from `src`, and blocked catalog entries.
 
 ### ALL-TARGET GENERATION
 
@@ -83,10 +83,11 @@ each supported game it checks:
 - measured full-contract throughput above the token's minimum fps.
 
 Each token owns its checkpoint and input schedule because machines reach their
-input-ready attract state at different times. Pac-Man and Pooyan currently run
-600 frames; Time Pilot runs 1,200 frames so its golden reaches active gameplay.
-Every action has deterministic press and release durations. A test failure
-therefore identifies a changed trajectory, not only a final screenshot.
+input-ready attract state at different times. Pac-Man, Pooyan and Space
+Invaders currently run 600 frames; Time Pilot runs 1,200 frames so its golden
+reaches active gameplay. Every action has deterministic press and release
+durations. A test failure therefore identifies a changed trajectory, not only
+a final screenshot.
 
 The throughput measurement includes CPU execution, generated video, checkpoint
 hashing and deterministic audio probing. It is not the browser's presentation
@@ -107,6 +108,8 @@ src/games/pooyan.ts
 src/games/pooyan.spec.ts
 src/games/timeplt.ts
 src/games/timeplt.spec.ts
+src/games/invaders.ts
+src/games/invaders.spec.ts
 ```
 
 The token declares only:
@@ -161,6 +164,7 @@ The default ROM locations are:
 roms/arcade/pacman.zip
 roms/arcade/pooyan.zip
 roms/arcade/timeplt.zip
+roms/arcade/invaders.zip
 ```
 
 Override them without moving files:
@@ -169,6 +173,7 @@ Override them without moving files:
 MAMEKIT_PACMAN_ROM=/path/pacman.zip \
 MAMEKIT_POOYAN_ROM=/path/pooyan.zip \
 MAMEKIT_TIMEPLT_ROM=/path/timeplt.zip \
+MAMEKIT_INVADERS_ROM=/path/invaders.zip \
 npm run test:games
 ```
 
@@ -226,8 +231,8 @@ it must not gain game logic.
    contracts;
 3. installs the locked npm dependencies on Node.js 24;
 4. runs every colocated spec;
-5. deletes `dist`, regenerates Pac-Man, Pooyan and Time Pilot, and audits the
-   result.
+5. deletes `dist`, regenerates Pac-Man, Pooyan, Time Pilot and Space Invaders,
+   and audits the result.
 
 The MAME commit is pinned deliberately. Updating it is a source migration and
 must be reviewed separately from a MAMEKIT implementation change. Run all

@@ -35,7 +35,7 @@ with the local TypeScript dependency using `rewriteRelativeImportExtensions`.
 | `npm run gen:all` | clean and generate the branch's currently selected targets |
 | `npm run build` | type-check repository TypeScript without writing to `dist` |
 | `npm run test:unit` | strict type check plus every source/compiler/runtime spec |
-| `npm run test:current` | clean-generate and audit Pac-Man, Pooyan and Time Pilot |
+| `npm run test:current` | clean-generate and audit the current four games |
 | `npm run audit:generated` | audit the games currently present in `dist` |
 | `npm run test:generation` | clean-generate every required target and audit all output |
 | `npm run test:games` | deterministic real-ROM contracts for supported games |
@@ -179,8 +179,8 @@ Choose the layer from evidence, not from the visible symptom.
 | Handler has unsupported syntax | `src/mame/handler-ir.ts` |
 | CPU opcode expansion/semantics missing | opcode DSL or CPU compiler/codegen |
 | Device method cannot lower | device compiler or generic handler vocabulary |
-| Palette/tile/sprite plan incomplete | video compiler and generated video IR |
-| Audio register/mixer plan incomplete | audio compiler and generated worklet |
+| Palette/tile/sprite/bitmap plan incomplete | video compiler and generated video IR |
+| Audio control/topology/component plan incomplete | audio compiler and generated worklet |
 | IR is correct but execution is wrong for every target | generic runtime |
 | Only one game needs a hardcoded branch | source/graph/IR model is still missing a fact |
 | App cannot locate config/module | output layout, manifest `dataPath`, or relative URL |

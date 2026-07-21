@@ -22,6 +22,7 @@ export interface GeneratedCpuMember {
   name: string;
   bits?: 1 | 8 | 16 | 32;
   pair?: boolean;
+  values?: number[];
   fields?: Record<string, 1 | 8 | 16 | 32>;
   initial?: number;
 }
@@ -53,6 +54,8 @@ export interface GeneratedCpuDefinition {
   start: GeneratedHandlerProgram;
   reset: GeneratedHandlerProgram;
   input: GeneratedHandlerProgram;
+  /** Source-derived execution of exactly one instruction or interrupt. */
+  step?: GeneratedHandlerProgram;
   service: GeneratedHandlerProgram;
   fetch: GeneratedHandlerProgram;
   opcodes: GeneratedCpuOpcode[];
@@ -206,6 +209,218 @@ export function compileMameZ80(mameSrc: string): GeneratedCpuDefinition {
       diagnostics: programs.reduce((count, program) => count + program.diagnostics.length, 0),
     },
   };
+}
+
+/**
+ * Compile MAME's shared 8080/8085 implementation with the i8080 subclass
+ * overrides selected. Unlike the Z80 core, this CPU has no opcode DSL: MAME's
+ * executable source is a single 256-case `execute_one` switch.
+ */
+export function compileMameI8080(mameSrc: string): GeneratedCpuDefinition {
+  const cppFile = 'src/devices/cpu/i8085/i8085.cpp';
+  const headerFile = 'src/devices/cpu/i8085/i8085.h';
+  const cpp = readFileSync(join(mameSrc, cppFile), 'utf8');
+  const header = readFileSync(join(mameSrc, headerFile), 'utf8');
+  const unit = parseMameSource(cppFile, cpp);
+  const sourceMethods = unit.functions.filter(fn => fn.className === 'i8085a_cpu_device');
+  const find = (name: string) => sourceMethods.find(fn => fn.name === name);
+  const startMethod = find('device_start');
+  const resetMethod = find('device_reset');
+  const inputMethod = find('execute_set_input');
+  const runMethod = find('execute_run');
+  if (!startMethod || !resetMethod || !inputMethod || !runMethod || !find('execute_one')) {
+    throw new Error('MAME I8080 source is missing start/reset/input/execute definitions');
+  }
+
+  const normalize = (source: string): string => normalizeI8080Source(
+    normalizeMameExecutionSource(source),
+  );
+  const excluded = new Set([
+    'memory_space_config',
+    'device_config_complete',
+    'device_clock_changed',
+    'device_start',
+    'device_reset',
+    'state_import',
+    'state_export',
+    'state_string_export',
+    'create_disassembler',
+    'execute_run',
+  ]);
+  const methods = sourceMethods
+    .filter(fn => !excluded.has(fn.name))
+    .map(fn => ({
+      name: fn.name,
+      parameters: fn.parameters,
+      program: compileMameHandler(normalize(fn.body)),
+      source: sourceRef(fn.span.file, fn.span.line),
+    }));
+  for (const name of ['ret_taken', 'jmp_taken', 'call_taken', 'is_8085']) {
+    const inline = inlineMethodForClass(header, name, name === 'ret_taken'
+      ? 'i8085a_cpu_device'
+      : 'i8080_cpu_device');
+    if (!inline) throw new Error(`MAME I8080 source is missing ${name} override`);
+    methods.push({
+      name,
+      parameters: inline.parameters,
+      program: compileMameHandler(normalize(inline.body)),
+      source: sourceRef(headerFile, lineAt(header, inline.start)),
+    });
+  }
+
+  const startSource = startMethod.body.slice(
+    0,
+    startMethod.body.indexOf('init_tables();') + 'init_tables();'.length,
+  );
+  const start = compileMameHandler(normalize(startSource));
+  const reset = compileMameHandler(normalize(resetMethod.body));
+  const input = compileMameHandler(normalize(inputMethod.body));
+  const step = compileMameHandler(normalize(singleIterationSource(runMethod.body)));
+  const constants = {
+    ...extractDefineConstants(header),
+    ...extractGlobalConstants(cpp),
+    ...extractEnumConstants(header, {
+      INPUT_LINE_IRQ0: 0,
+      INPUT_LINE_NMI: -1,
+    }),
+    I8085_INTR_LINE: 0,
+    I8085_RST55_LINE: 1,
+    I8085_RST65_LINE: 2,
+    I8085_RST75_LINE: 3,
+    I8085_TRAP_LINE: -1,
+    CLEAR_LINE: 0,
+    ASSERT_LINE: 1,
+  };
+  const members: GeneratedCpuMember[] = [
+    ...['m_PC', 'm_SP', 'm_AF', 'm_BC', 'm_DE', 'm_HL', 'm_WZ']
+      .map(name => ({ name, bits: 16 as const, pair: true })),
+    ...[
+      'm_halt', 'm_im', 'm_status', 'm_after_ei', 'm_nmi_state',
+      'm_trap_im_copy', 'm_sod_state', 'm_ietemp',
+    ].map(name => ({ name, bits: 8 as const })),
+    { name: 'm_trap_pending', bits: 1 },
+    { name: 'm_in_acknowledge', bits: 1 },
+    // MAME's cycle budget is a signed int and intentionally becomes negative.
+    { name: 'm_icount' },
+    { name: 'm_irq_state', bits: 8, values: [0, 0, 0, 0] },
+    { name: 'lut_cycles_8080', bits: 8, values: extractNumericArray(cpp, 'lut_cycles_8080') },
+    { name: 'lut_cycles_8085', bits: 8, values: extractNumericArray(cpp, 'lut_cycles_8085') },
+    { name: 'lut_cycles', bits: 8, values: Array(256).fill(0) },
+    { name: 'lut_zs', bits: 8, values: Array(256).fill(0) },
+    { name: 'lut_zsp', bits: 8, values: Array(256).fill(0) },
+  ];
+  const aliases = extractStateAliases(startMethod.body);
+  const service = compileMameHandler('');
+  const fetch = compileMameHandler('');
+  const programs = [start, reset, input, step, ...methods.map(method => method.program)];
+  return {
+    schemaVersion: 1,
+    type: 'I8080',
+    dialect: 'mame-cpp-switch',
+    sourceFiles: [cppFile, headerFile],
+    constants,
+    aliases,
+    members,
+    methods,
+    start,
+    reset,
+    input,
+    step,
+    service,
+    fetch,
+    opcodes: [],
+    summary: {
+      opcodes: 256,
+      compiledOpcodes: step.diagnostics.length ? 0 : 256,
+      methods: methods.length,
+      compiledMethods: methods.filter(method => !method.program.diagnostics.length).length,
+      diagnostics: programs.reduce((count, program) => count + program.diagnostics.length, 0),
+    },
+  };
+}
+
+function normalizeI8080Source(source: string): string {
+  let normalized = source
+    .replace(/\b(m_\w+)\.w\.l\b/g, '$1.w')
+    .replace(/\b(m_\w+)\.d\b/g, '$1.w')
+    .replace(/\b([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+)\+\+/g, 'POSTINC($1)')
+    .replace(/\b([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+)--/g, 'POSTDEC($1)');
+  const pairLocals = [...normalized.matchAll(/\bPAIR\s+(\w+)\s*;/g)].map(match => match[1]!);
+  normalized = normalized.replace(/\bPAIR\s+(\w+)\s*;/g, 'u16 $1 = 0;');
+  for (const name of pairLocals) {
+    normalized = normalized
+      .replace(new RegExp(`\\b${name}\\.b\\.l\\s*=\\s*([^;]+);`, 'g'),
+        `${name} = (${name} & 0xff00) | (u8($1));`)
+      .replace(new RegExp(`\\b${name}\\.b\\.h\\s*=\\s*([^;]+);`, 'g'),
+        `${name} = (${name} & 0x00ff) | (u16($1) << 8);`)
+      .replace(new RegExp(`\\b${name}\\.(?:w|d)\\b`, 'g'), name)
+      .replace(new RegExp(`\\b${name}\\.b\\.l\\b`, 'g'), `u8(${name})`)
+      .replace(new RegExp(`\\b${name}\\.b\\.h\\b`, 'g'), `u8(${name} >> 8)`);
+  }
+  return normalized;
+}
+
+function singleIterationSource(source: string): string {
+  const doMatch = /(?:^|\n)\s*do\s*\n/.exec(source);
+  const doAt = doMatch?.index ?? -1;
+  const open = source.indexOf('{', doAt);
+  const close = matchBrace(source, open);
+  if (doAt < 0 || open < 0 || close < 0) {
+    throw new Error('MAME I8080 execute_run source shape changed');
+  }
+  return `m_icount = 0;\n${source.slice(0, doAt)}\n${source.slice(open + 1, close)}\nreturn -m_icount;`;
+}
+
+function extractGlobalConstants(source: string): Record<string, number> {
+  const expressions = new Map<string, string>();
+  for (const match of source.matchAll(/\bconstexpr\s+\w+\s+(\w+)\s*=\s*([^;]+);/g)) {
+    expressions.set(match[1]!, match[2]!.trim());
+  }
+  return resolveConstants(expressions);
+}
+
+function extractNumericArray(source: string, name: string): number[] {
+  const match = new RegExp(`${name}\\s*\\[[^\\]]+\\]\\s*=\\s*\\{([\\s\\S]*?)\\};`).exec(source);
+  if (!match) throw new Error(`MAME I8080 source is missing ${name}`);
+  const values = match[1]!
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .split(',')
+    .map(value => Number(value.trim()))
+    .filter(Number.isFinite);
+  if (values.length !== 256) throw new Error(`${name} contains ${values.length}, expected 256`);
+  return values;
+}
+
+function extractStateAliases(source: string): Record<string, GeneratedCpuAlias> {
+  const aliases: Record<string, GeneratedCpuAlias> = {};
+  for (const match of source.matchAll(/state_add\([^,]+,\s*"([A-Z]+)",\s*(m_\w+)(?:(\.w\.l|\.d)|\.b\.(h|l))?\)/g)) {
+    const part = match[4] === 'h'
+      ? 'high'
+      : match[4] === 'l'
+        ? 'low'
+        : match[3]
+          ? 'word'
+          : 'scalar';
+    aliases[match[1]!] = {
+      member: match[2]!,
+      part,
+      bits: part === 'word' ? 16 : 8,
+    };
+  }
+  return aliases;
+}
+
+function inlineMethodForClass(
+  source: string,
+  name: string,
+  className: string,
+): { parameters: string; body: string; start: number } | undefined {
+  const classAt = source.indexOf(`class ${className}`);
+  const open = source.indexOf('{', classAt);
+  const close = matchBrace(source, open);
+  if (classAt < 0 || open < 0 || close < 0) return undefined;
+  return extractInlineMethods(source.slice(open + 1, close))
+    .find(method => method.name === name);
 }
 
 function compileOpcodeOperations(

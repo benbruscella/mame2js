@@ -173,6 +173,14 @@ export function lowerGeneratedMachine(
   };
   const soundDevice = devices.find(device => device.type === 'NAMCO_WSG');
   const ayDevices = devices.filter(device => device.type === 'AY8910');
+  const mappedWriteKeys = maps.flatMap(map => map.ranges)
+    .map(range => range.write)
+    .filter((key): key is string => Boolean(key));
+  const generatedSoundboard = ayDevices.length
+    ? undefined
+    : devices.find(device =>
+        device.type.endsWith('_AUDIO') &&
+        mappedWriteKeys.some(key => key.startsWith(`${device.tag}.`)));
   const audioRoutes = lowerAudioRoutes(graph, ayDevices);
   const sound = soundDevice
     ? {
@@ -199,6 +207,24 @@ export function lowerGeneratedMachine(
           controlOffset: -1,
           ...(audioRoutes.length ? { routes: audioRoutes } : {}),
         }
+    : generatedSoundboard
+      ? (() => {
+          const writeMethods = [...new Set(maps.flatMap(map => map.ranges)
+            .map(range => range.write)
+            .filter((key): key is string => Boolean(key?.startsWith(`${generatedSoundboard.tag}.`)))
+            .map(key => key.slice(generatedSoundboard.tag.length + 1)))];
+          return {
+            kind: generatedSoundboard.type.toLowerCase().replace(/_audio$/, ''),
+            deviceTag: generatedSoundboard.tag,
+            deviceType: generatedSoundboard.type,
+            writeMethods,
+            writeMethodOffsets: Object.fromEntries(
+              writeMethods.map((method, offset) => [method, offset]),
+            ),
+            enableMethods: [],
+            controlOffset: -1,
+          };
+        })()
       : undefined;
   return {
     schemaVersion: 2,

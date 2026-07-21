@@ -12,13 +12,15 @@ import { GraphBuilder, type KnowledgeGraph } from '../kg/types.ts';
 import { parseMameSource, type MameMacro, type MameTranslationUnit } from './ast.ts';
 import { compileMameHandler } from './handler-ir.ts';
 import { parseZ80OpcodeDsl } from './opcode-dsl.ts';
-import { compileMameZ80 } from './cpu-compiler.ts';
+import { compileMameI8080, compileMameZ80 } from './cpu-compiler.ts';
 import { generatedCpuExecutableSource } from './cpu-codegen.ts';
 import { compileMameDevice } from './device-compiler.ts';
 import {
   compileAy8910,
+  compileDiscreteSn76477,
   compileNamcoWsg,
   generatedAy8910WorkletSource,
+  generatedDiscreteSn76477WorkletSource,
   generatedNamcoWsgWorkletSource,
 } from './audio-compiler.ts';
 
@@ -388,9 +390,12 @@ export function emitHardwareClosure(closure: HardwareClosure, outRoot: string): 
   const z80 = closure.hardware.some(entry => entry.type === 'Z80')
     ? compileMameZ80(closure.mameSource)
     : undefined;
+  const i8080 = closure.hardware.some(entry => entry.type === 'I8080')
+    ? compileMameI8080(closure.mameSource)
+    : undefined;
   const generatedDevices = new Map(
     closure.hardware
-      .filter(entry => ['GENERIC_LATCH_8', 'LS259'].includes(entry.type))
+      .filter(entry => ['GENERIC_LATCH_8', 'LS259', 'MB14241'].includes(entry.type))
       .flatMap(entry => {
         if (!entry.definition) return [];
         const device = compileMameDevice(closure.mameSource, entry.definition);
@@ -405,6 +410,16 @@ export function emitHardwareClosure(closure: HardwareClosure, outRoot: string): 
   const ayEntry = closure.hardware.find(entry => entry.type === 'AY8910');
   const ay8910 = ayEntry?.definition
     ? compileAy8910(closure.mameSource, ayEntry.definition)
+    : undefined;
+  const snGames = new Set(
+    closure.hardware.find(entry => entry.type === 'SN76477')?.uses.map(use => use.game) ?? [],
+  );
+  const discreteSoundboardEntry = closure.hardware.find(entry =>
+    entry.type.endsWith('_AUDIO') &&
+    entry.definition &&
+    entry.uses.some(use => snGames.has(use.game)));
+  const discreteSn76477 = discreteSoundboardEntry?.definition
+    ? compileDiscreteSn76477(closure.mameSource, discreteSoundboardEntry.definition)
     : undefined;
   for (const entry of closure.hardware) {
     const device = generatedDevices.get(entry.type);
@@ -429,19 +444,21 @@ export function emitHardwareClosure(closure: HardwareClosure, outRoot: string): 
   }
   const executableTypes = new Set<string>([
     ...(z80 ? ['Z80'] : []),
+    ...(i8080 ? ['I8080'] : []),
     ...generatedDevices.keys(),
     ...(namcoWsg ? ['NAMCO_WSG'] : []),
     ...(ay8910 ? ['AY8910', 'TIMEPLT_AUDIO'] : []),
+    ...(discreteSn76477 ? [discreteSn76477.deviceType, 'SN76477'] : []),
   ]);
   const compact = {
     ...closure,
     hardware: closure.hardware.map(entry => ({
       ...compactEntry(entry),
       executable: executableTypes.has(entry.type),
-      ...(entry.type === 'Z80'
+      ...(['Z80', 'I8080'].includes(entry.type)
         ? {
             executableKind: 'cpu',
-            executableArtifact: 'devices/z80.cpu.ir.json',
+            executableArtifact: `devices/${entry.type.toLowerCase()}.cpu.ir.json`,
           }
         : generatedDevices.has(entry.type)
           ? {
@@ -462,6 +479,12 @@ export function emitHardwareClosure(closure: HardwareClosure, outRoot: string): 
           ? {
               executableKind: 'composition',
               executableArtifact: 'generated machine handlers',
+            }
+        : discreteSn76477 &&
+            (entry.type === discreteSn76477.deviceType || entry.type === 'SN76477')
+          ? {
+              executableKind: entry.type === 'SN76477' ? 'composition' : 'audio',
+              executableArtifact: `audio/${discreteSn76477.workletName}-worklet.ts`,
             }
         : {}),
     })),
@@ -489,17 +512,30 @@ export function emitHardwareClosure(closure: HardwareClosure, outRoot: string): 
     );
     writeFileSync(join(audioDir, 'ay8910-worklet.ts'), generatedAy8910WorkletSource(ay8910));
   }
+  if (discreteSn76477) {
+    const audioDir = join(root, 'audio');
+    mkdirSync(audioDir, { recursive: true });
+    writeFileSync(
+      join(audioDir, `${discreteSn76477.workletName}.audio.ir.json`),
+      JSON.stringify(discreteSn76477, null, 2),
+    );
+    writeFileSync(
+      join(audioDir, `${discreteSn76477.workletName}-worklet.ts`),
+      generatedDiscreteSn76477WorkletSource(discreteSn76477),
+    );
+  }
 
   for (const entry of closure.hardware) {
     const slug = entry.type.toLowerCase();
     const emitted = compactEntry(entry);
     writeFileSync(join(devicesDir, `${slug}.ir.json`), JSON.stringify(emitted, null, 2));
-    if (entry.type === 'Z80' && z80) {
+    const cpu = entry.type === 'Z80' ? z80 : entry.type === 'I8080' ? i8080 : undefined;
+    if (cpu) {
       writeFileSync(
-        join(devicesDir, 'z80.cpu.ir.json'),
-        JSON.stringify(z80, null, 2),
+        join(devicesDir, `${slug}.cpu.ir.json`),
+        JSON.stringify(cpu, null, 2),
       );
-      writeFileSync(join(devicesDir, `${slug}.ts`), generatedCpuExecutableSource(z80));
+      writeFileSync(join(devicesDir, `${slug}.ts`), generatedCpuExecutableSource(cpu));
       continue;
     }
     const device = generatedDevices.get(entry.type);

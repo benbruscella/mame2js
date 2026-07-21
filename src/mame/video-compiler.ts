@@ -43,6 +43,25 @@ export function compileMameVideo(
   const ast = new MameAstIndex(parseMameAst(
     [...new Set(files)].map(file => ({ file, source: readFileSync(join(mameSrc, file), 'utf8') })),
   ));
+  const screenCallback = graph.nodes.find(node =>
+    node.label === 'Callback' &&
+    node.props.signal === 'set_screen_update');
+  const screenClass = String(screenCallback?.props.targetClass ?? machine.props.cls);
+  const screenMethod = String(screenCallback?.props.targetMethod ?? '');
+  const screen = ast.findFunctionInHierarchy(screenClass, screenMethod);
+  const bitmap = screen && compileDirectBitmap(graph, screenClass, screenMethod, screen);
+  if (bitmap) {
+    return {
+      plan: {
+        gfx: [],
+        tilemaps: [],
+        initialState: {},
+        bitmap,
+        source: sourceRef(screen),
+      },
+      handlers: [],
+    };
+  }
   const config = ast.findFunction(String(machine.props.cls), String(machine.props.name));
   if (!config) return undefined;
   const startMatch =
@@ -62,12 +81,6 @@ export function compileMameVideo(
       if (fn) addHandler(handlers, fn);
     }
   }
-  const screenCallback = graph.nodes.find(node =>
-    node.label === 'Callback' &&
-    node.props.signal === 'set_screen_update');
-  const screenClass = String(screenCallback?.props.targetClass ?? machine.props.cls);
-  const screenMethod = String(screenCallback?.props.targetMethod ?? '');
-  const screen = ast.findFunctionInHierarchy(screenClass, screenMethod);
   if (screen) {
     for (const name of calledSourceMethods(screen.body)) {
       const fn = ast.findFunctionInHierarchy(screen.className, name);
@@ -117,6 +130,53 @@ export function compileMameVideo(
       source: sourceRef(start),
     },
     handlers,
+  };
+}
+
+function compileDirectBitmap(
+  graph: KnowledgeGraph,
+  ownerClass: string,
+  method: string,
+  screen: MameFunction,
+): NonNullable<GeneratedVideoPlan['bitmap']> | undefined {
+  const body = screen.body;
+  const offset = /\b(?:offs_t|u\d+)\s+(?:const\s+)?\w+\s*=\s*\(\(offs_t\)(\w+)\s*<<\s*(\d+)\)\s*\|\s*\(\w+\s*>>\s*(\d+)\)/.exec(body);
+  const row = offset && new RegExp(
+    `\\b(?:u?int8_t|u8)\\s+${offset[1]}\\s*=\\s*(\\w+)\\s*;`,
+  ).exec(body);
+  const member = /\b\w+\s*=\s*(m_\w+)\s*\[\s*\w+\s*\]\s*;/.exec(body)?.[1];
+  const phase = /\(\s*\w+\s*&\s*(0x[\da-f]+|\d+)\s*\)\s*==\s*(0x[\da-f]+|\d+)/i.exec(body);
+  if (!row || !offset || !member || !phase) return undefined;
+  if (!body.includes('video_data = video_data >> 1')) return undefined;
+  const handler = graph.nodes.find(node =>
+    node.label === 'Handler' &&
+    node.props.ownerClass === ownerClass &&
+    node.props.method === method);
+  const constants = Object.fromEntries(
+    (Array.isArray(handler?.props.sourceConstants) ? handler.props.sourceConstants : [])
+      .map(value => /^([^=]+)=(-?(?:\d+(?:\.\d+)?|Infinity))$/.exec(String(value)))
+      .filter((match): match is RegExpExecArray => Boolean(match))
+      .map(match => [match[1], Number(match[2])]),
+  );
+  const rowStart = constants[row[1]!] ?? Number(row[1]);
+  const rowShift = Number(offset[2]);
+  const pixelShift = Number(offset[3]);
+  const xOffset = Number(phase[2]);
+  if (
+    !Number.isInteger(rowStart) || rowStart < 0 || rowStart > 255 ||
+    !Number.isInteger(rowShift) || rowShift < 0 || rowShift > 16 ||
+    pixelShift !== 3 || !Number.isInteger(xOffset) || xOffset < 0
+  ) return undefined;
+  return {
+    member,
+    rowStart,
+    rows: 256 - rowStart,
+    bytesPerRow: 1 << rowShift,
+    xOffset,
+    lsbFirst: true,
+    black: 0xff000000,
+    white: 0xffffffff,
+    source: sourceRef(screen),
   };
 }
 

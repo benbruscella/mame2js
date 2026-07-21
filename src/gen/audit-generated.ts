@@ -65,13 +65,24 @@ export function auditGenerated(outRoot: string): GeneratedAudit {
         type: string;
         status: string;
         executable?: boolean;
-        executableKind?: 'cpu' | 'device' | 'audio';
+        executableKind?: 'cpu' | 'device' | 'audio' | 'composition';
         executableArtifact?: string;
         uses?: { game: string }[];
       }[];
     };
     hardwareEntries = manifest.hardware ?? [];
     executableHardware = manifest.hardware?.filter(hardware => hardware.executable).length ?? 0;
+    for (const hardware of manifest.hardware ?? []) {
+      if (
+        !hardware.executable ||
+        !hardware.executableArtifact ||
+        hardware.executableKind === 'composition'
+      ) continue;
+      const artifact = join(outRoot, 'runtime/generated', hardware.executableArtifact);
+      if (!existsSync(artifact)) {
+        failures.push(`${hardware.type} executable artifact is missing: ${hardware.executableArtifact}`);
+      }
+    }
     const z80 = manifest.hardware?.find(hardware => hardware.type === 'Z80');
     if (!z80?.executable || !z80.executableArtifact) {
       failures.push('Z80 is not emitted as executable source-derived hardware');
@@ -87,6 +98,26 @@ export function auditGenerated(outRoot: string): GeneratedAudit {
             definition.summary.compiledOpcodes !== definition.summary.opcodes ||
             definition.summary.diagnostics !== 0) {
           failures.push('Z80 executable artifact is incomplete or has compiler diagnostics');
+        }
+      }
+    }
+    const i8080 = manifest.hardware?.find(hardware => hardware.type === 'I8080');
+    if (i8080) {
+      if (!i8080.executable || !i8080.executableArtifact) {
+        failures.push('I8080 is not emitted as executable source-derived hardware');
+      } else {
+        const definitionPath = join(outRoot, 'runtime/generated', i8080.executableArtifact);
+        if (existsSync(definitionPath)) {
+          const definition = JSON.parse(readFileSync(definitionPath, 'utf8')) as {
+            summary?: { opcodes?: number; compiledOpcodes?: number; diagnostics?: number };
+            step?: { diagnostics?: string[] };
+          };
+          if (definition.summary?.opcodes !== 256 ||
+              definition.summary.compiledOpcodes !== definition.summary.opcodes ||
+              definition.summary.diagnostics !== 0 ||
+              definition.step?.diagnostics?.length) {
+            failures.push('I8080 executable artifact is incomplete or has compiler diagnostics');
+          }
         }
       }
     }

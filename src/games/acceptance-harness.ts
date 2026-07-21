@@ -43,6 +43,15 @@ interface WsgCore {
   render(out: Float32Array): void;
 }
 
+interface DiscreteAudioCore {
+  write(offset: number, data: number): void;
+  sample(): number;
+}
+
+interface DiscreteAudioFrameRenderer {
+  render(writes: readonly SoundWrite[]): Float32Array;
+}
+
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 
 export async function runGameAcceptance(
@@ -268,6 +277,35 @@ async function createAudioProbe(
         sampleCarry -= count;
         const samples = new Float32Array(count);
         core.render(samples);
+        if (capture) chunks.push(samples);
+      },
+      finish(writes) {
+        return audioResult(writes, chunks);
+      },
+    };
+  }
+  if (config.sound.kind === 'invaders') {
+    const generated = await import(
+      moduleUrl(join(outRoot, 'runtime/generated/audio/invaders-worklet.js'))
+    ) as {
+      GeneratedDiscreteAudioCore: new (outputRate: number) => DiscreteAudioCore;
+      GeneratedDiscreteAudioFrameRenderer: new (
+        core: DiscreteAudioCore,
+        outputRate: number,
+        refresh: number,
+      ) => DiscreteAudioFrameRenderer;
+    };
+    const outputRate = 48_000;
+    const core = new generated.GeneratedDiscreteAudioCore(outputRate);
+    const renderer = new generated.GeneratedDiscreteAudioFrameRenderer(
+      core,
+      outputRate,
+      config.board.screen.refresh,
+    );
+    const chunks: Float32Array[] = [];
+    return {
+      render(writes, capture) {
+        const samples = renderer.render(writes);
         if (capture) chunks.push(samples);
       },
       finish(writes) {

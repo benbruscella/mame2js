@@ -16,6 +16,7 @@ const machine = graph.nodes.find(node =>
 assert.ok(machine);
 const compiled = compileMameVideo(graph, mameSourceRoot(), machine.id);
 assert.ok(compiled, 'Pac-Man MAME video source must lower to executable video IR');
+assert.ok(compiled.plan.palette);
 assert.equal(compiled.plan.tilemaps[0]?.mapper, 'pacman_state.pacman_scan_rows');
 assert.deepEqual(
   compiled.plan.palette.channels.map(channel => channel.resistances),
@@ -24,4 +25,3 @@ assert.deepEqual(
 assert.ok(compiled.handlers.every(handler => !handler.program?.diagnostics.length));
 
 console.log('pacman.spec: game token and MAME-source video contract passed');
-

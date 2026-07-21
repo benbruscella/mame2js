@@ -11,6 +11,7 @@ export interface CpuBus {
   write(address: number, data: number): void;
   in(port: number): number;
   out(port: number, data: number): void;
+  signal?(name: string, state: number): void;
 }
 
 interface CpuAlias {
@@ -23,6 +24,7 @@ interface CpuMember {
   name: string;
   bits?: 1 | 8 | 16 | 32;
   pair?: boolean;
+  values?: number[];
   fields?: Record<string, 1 | 8 | 16 | 32>;
   initial?: number;
 }
@@ -48,6 +50,7 @@ export interface GeneratedCpuDefinition {
   start: GeneratedHandlerProgram;
   reset: GeneratedHandlerProgram;
   input: GeneratedHandlerProgram;
+  step?: GeneratedHandlerProgram;
   service: GeneratedHandlerProgram;
   fetch: GeneratedHandlerProgram;
   opcodes: CpuOpcode[];
@@ -121,7 +124,9 @@ class IrCpu implements Cpu {
     this.opcodes = new Map(definition.opcodes.map(opcode => [opcode.key, opcode]));
     this.methods = new Map(definition.methods.map(method => [method.name, method]));
     for (const member of definition.members) {
-      if (member.fields) {
+      if (member.values) {
+        this.members[member.name] = [...member.values];
+      } else if (member.fields) {
         this.members[member.name] = typedObject(member.fields);
       } else if (member.pair) {
         this.members[member.name] = new Pair16(member.initial ?? 0);
@@ -177,6 +182,9 @@ class IrCpu implements Cpu {
   }
 
   step(): number {
+    if (this.definition.step) {
+      return Number(this.execute(this.definition.step)) || 0;
+    }
     this.set('cycles', 0);
     this.set('m_icount', 1);
     this.execute(this.definition.service);
@@ -262,6 +270,8 @@ class IrCpu implements Cpu {
       'm_io.write_interruptible': (port, value) => {
         this.bus.out(port & 0xffff, value & 0xff);
       },
+      m_out_inte_func: state => this.bus.signal?.('out_inte_func', state) ?? 0,
+      m_out_sod_func: state => this.bus.signal?.('out_sod_func', state) ?? 0,
       standard_irq_callback: () => this.acknowledgeIrq(),
       daisy_get_irq_device: () => 0,
       daisy_chain_present: () => 0,

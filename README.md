@@ -66,8 +66,8 @@ npm run serve
 ```
 
 `npm run gen:all` always deletes `dist` before generation. The current branch
-keeps that command scoped to Pac-Man, Pooyan and Time Pilot while the
-source-generation pattern is validated one machine at a time.
+keeps that command scoped to Pac-Man, Pooyan, Time Pilot and Space Invaders
+while the source-generation pattern is validated one machine at a time.
 
 The generated application is served at `http://localhost:8280/app/`.
 
@@ -82,7 +82,7 @@ src/runtime/    browser host and generic typed-IR execution
 bin/            CLI entry point
 scripts/        deployment automation
 tools/          engineering diagnostics
-docs/           the three current engineering references
+docs/           current architecture, contribution, engineering and QA references
 sessions/       historical build transcripts; never current instructions
 dist/           disposable generated distribution
 ```
@@ -115,11 +115,13 @@ regenerate it.
 
 ## ENGINEERING DOCUMENTATION
 
-There is one README and three current engineering documents:
+There is one README and four current engineering documents:
 
 - [SYSTEM ARCHITECTURE](docs/SYSTEM_ARCHITECTURE.md): system design, compiler stages,
   knowledge graph, typed IR, generated runtime, browser execution, provenance,
   and hard boundaries.
+- [CONTRIBUTING](docs/CONTRIBUTING.md): contribution contract, adding a machine,
+  fixing generation gaps, acceptance evidence, and review requirements.
 - [ENGINEERING GUIDE](docs/ENGINEERING_GUIDE.md): commands, extending a target,
   debugging generation gaps, tests, browser verification, deployment, and
   maintenance rules.

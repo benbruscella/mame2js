@@ -231,11 +231,24 @@ export interface GeneratedTilemapPlan {
   source?: GeneratedSourceRef;
 }
 
+export interface GeneratedBitmapPlan {
+  member: string;
+  rowStart: number;
+  rows: number;
+  bytesPerRow: number;
+  xOffset: number;
+  lsbFirst: boolean;
+  black: number;
+  white: number;
+  source?: GeneratedSourceRef;
+}
+
 export interface GeneratedVideoPlan {
   gfx: GeneratedGfxEntry[];
-  palette: GeneratedPromPalettePlan;
+  palette?: GeneratedPromPalettePlan;
   tilemaps: GeneratedTilemapPlan[];
   initialState: Record<string, number>;
+  bitmap?: GeneratedBitmapPlan;
   source?: GeneratedSourceRef;
 }
 
@@ -245,6 +258,7 @@ export interface GeneratedSoundBinding {
   deviceTags?: string[];
   deviceType: string;
   writeMethods: string[];
+  writeMethodOffsets?: Record<string, number>;
   enableMethods: string[];
   controlOffset: number;
   routes?: GeneratedAudioRoute[];
