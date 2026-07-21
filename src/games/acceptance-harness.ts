@@ -284,11 +284,18 @@ async function createAudioProbe(
       },
     };
   }
-  if (config.sound.kind === 'invaders') {
+  if (config.sound.kind === 'discrete') {
+    assert.ok(config.sound.worklet, `${config.game}: discrete audio worklet is missing`);
     const generated = await import(
-      moduleUrl(join(outRoot, 'runtime/generated/audio/invaders-worklet.js'))
+      moduleUrl(join(
+        outRoot,
+        `runtime/generated/audio/${config.sound.worklet}-worklet.js`,
+      ))
     ) as {
-      GeneratedDiscreteAudioCore: new (outputRate: number) => DiscreteAudioCore;
+      GeneratedDiscreteAudioCore: new (
+        outputRate: number,
+        clock?: number,
+      ) => DiscreteAudioCore;
       GeneratedDiscreteAudioFrameRenderer: new (
         core: DiscreteAudioCore,
         outputRate: number,
@@ -296,7 +303,10 @@ async function createAudioProbe(
       ) => DiscreteAudioFrameRenderer;
     };
     const outputRate = 48_000;
-    const core = new generated.GeneratedDiscreteAudioCore(outputRate);
+    const core = new generated.GeneratedDiscreteAudioCore(
+      outputRate,
+      config.sound.clock,
+    );
     const renderer = new generated.GeneratedDiscreteAudioFrameRenderer(
       core,
       outputRate,

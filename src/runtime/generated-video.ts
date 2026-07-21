@@ -67,11 +67,13 @@ export class GeneratedVideoRenderer implements VideoRenderer {
   private renderRegion(frame: Uint32Array, minY: number, maxY: number): void {
     const xOffset = this.machine.execution.screen.xOffset ?? 0;
     const yOffset = this.machine.execution.screen.yOffset ?? 0;
+    const xScale = this.machine.video?.renderScale?.x ?? 1;
+    const yScale = this.machine.video?.renderScale?.y ?? 1;
     const cliprect = {
-      min_x: xOffset,
-      max_x: xOffset + this.width - 1,
-      min_y: minY,
-      max_y: maxY,
+      min_x: xOffset * xScale,
+      max_x: (xOffset + this.width) * xScale - 1,
+      min_y: minY * yScale,
+      max_y: (maxY + 1) * yScale - 1,
     };
     const bitmap = {
       fill: (color: number) => {
@@ -82,8 +84,8 @@ export class GeneratedVideoRenderer implements VideoRenderer {
         }
       },
       'pix=': (y: number, x: number, color: number) => {
-        const visibleX = x - xOffset;
-        const visibleY = y - yOffset;
+        const visibleX = Math.floor((x - xOffset * xScale) / xScale);
+        const visibleY = Math.floor((y - yOffset * yScale) / yScale);
         if (
           visibleX >= 0 && visibleX < this.width &&
           visibleY >= 0 && visibleY < this.height
@@ -197,8 +199,9 @@ class GeneratedPalette {
       const lookupOffset = bank.lookupOffset ?? plan.lookupOffset;
       const lookupCount = bank.lookupCount ?? plan.lookupCount;
       for (let index = 0; index < lookupCount; index++) {
-        const indirect = bank.colorOr |
-          ((prom[lookupOffset + index] ?? 0) & plan.lookupMask);
+        const indirect = bank.direct
+          ? bank.colorOr | index
+          : bank.colorOr | ((prom[lookupOffset + index] ?? 0) & plan.lookupMask);
         const pen = bank.penOffset + index;
         this.indirect[pen] = indirect;
         this.colors[pen] = core[indirect] ?? 0xff000000;
@@ -303,6 +306,8 @@ class GeneratedTilemap {
   private readonly gfx: GeneratedGfxElement[];
   private readonly tiles: Array<TileInfo | undefined> = [];
   private readonly dirty: number[] = [];
+  private readonly scrollX: number[];
+  private readonly scrollY: number[];
   private flip = 0;
 
   constructor(
@@ -319,6 +324,8 @@ class GeneratedTilemap {
       ? undefined
       : requiredHandler(machine, plan.mapper);
     this.tileInfo = requiredHandler(machine, plan.tileInfo);
+    this.scrollX = new Array(plan.scrollRows ?? 1).fill(0);
+    this.scrollY = new Array(plan.scrollColumns ?? 1).fill(0);
   }
 
   mark_tile_dirty(index: number): void {
@@ -327,6 +334,24 @@ class GeneratedTilemap {
 
   set_flip(flags: number): void {
     this.flip = flags;
+  }
+
+  set_scroll_cols(columns: number): void {
+    this.scrollY.length = Math.max(1, columns | 0);
+    this.scrollY.fill(0);
+  }
+
+  set_scroll_rows(rows: number): void {
+    this.scrollX.length = Math.max(1, rows | 0);
+    this.scrollX.fill(0);
+  }
+
+  set_scrolly(column: number, value: number): void {
+    this.scrollY[modulo(column, this.scrollY.length)] = value;
+  }
+
+  set_scrollx(row: number, value: number): void {
+    this.scrollX[modulo(row, this.scrollX.length)] = value;
   }
 
   draw(
@@ -341,16 +366,18 @@ class GeneratedTilemap {
     const mapFlip = this.flip | globalFlip;
     const flipX = Boolean(mapFlip & 1);
     const flipY = Boolean(mapFlip & 2);
-    const firstOutputRow = Math.max(0, Math.floor(clip.min_y / this.plan.tileHeight));
-    const lastOutputRow = Math.min(
-      this.plan.rows - 1,
-      Math.floor(clip.max_y / this.plan.tileHeight),
-    );
-    const firstOutputColumn = Math.max(0, Math.floor(clip.min_x / this.plan.tileWidth));
-    const lastOutputColumn = Math.min(
-      this.plan.columns - 1,
-      Math.floor(clip.max_x / this.plan.tileWidth),
-    );
+    const firstOutputRow = this.plan.scrollColumns
+      ? 0
+      : Math.max(0, Math.floor(clip.min_y / this.plan.tileHeight));
+    const lastOutputRow = this.plan.scrollColumns
+      ? this.plan.rows - 1
+      : Math.min(this.plan.rows - 1, Math.floor(clip.max_y / this.plan.tileHeight));
+    const firstOutputColumn = this.plan.scrollRows
+      ? 0
+      : Math.max(0, Math.floor(clip.min_x / this.plan.tileWidth));
+    const lastOutputColumn = this.plan.scrollRows
+      ? this.plan.columns - 1
+      : Math.min(this.plan.columns - 1, Math.floor(clip.max_x / this.plan.tileWidth));
     for (let outputRow = firstOutputRow; outputRow <= lastOutputRow; outputRow++) {
       const row = flipY ? this.plan.rows - 1 - outputRow : outputRow;
       for (
@@ -390,26 +417,49 @@ class GeneratedTilemap {
           );
           this.dirty[tileIndex] = 0;
         }
-        if (tile.category !== (_flags & 0xff)) continue;
+        if (tile.category !== (_flags & 0x0f)) continue;
         const gfx = this.gfx[tile.gfx];
         if (!gfx) continue;
         const tileFlipX = Boolean(tile.flags & 1) !== flipX;
         const tileFlipY = Boolean(tile.flags & 2) !== flipY;
-        const x = outputColumn * this.plan.tileWidth;
-        const y = outputRow * this.plan.tileHeight;
-        gfx.draw(
-          bitmap,
-          clip,
-          tile.code,
-          tile.color,
-          Number(tileFlipX),
-          Number(tileFlipY),
-          x,
-          y,
-        );
+        const xScroll = this.scrollX[modulo(outputRow, this.scrollX.length)] ?? 0;
+        const yScroll = this.scrollY[modulo(outputColumn, this.scrollY.length)] ?? 0;
+        const mapWidth = this.plan.columns * this.plan.tileWidth;
+        const mapHeight = this.plan.rows * this.plan.tileHeight;
+        const x = outputColumn * this.plan.tileWidth - xScroll;
+        const y = outputRow * this.plan.tileHeight - yScroll;
+        const transparentMask = this.plan.transparentPen === undefined || (_flags & 0x80)
+          ? 0
+          : 1 << this.plan.transparentPen;
+        for (const wrappedX of wrappedPositions(x, mapWidth, clip.min_x, clip.max_x)) {
+          for (const wrappedY of wrappedPositions(y, mapHeight, clip.min_y, clip.max_y)) {
+            gfx.draw(
+              bitmap,
+              clip,
+              tile.code,
+              tile.color,
+              Number(tileFlipX),
+              Number(tileFlipY),
+              wrappedX,
+              wrappedY,
+              transparentMask,
+            );
+          }
+        }
       }
     }
   }
+}
+
+function wrappedPositions(
+  position: number,
+  span: number,
+  clipMin: number,
+  clipMax: number,
+): number[] {
+  const wrapped = modulo(position, span);
+  return [wrapped - span, wrapped, wrapped + span]
+    .filter(value => value <= clipMax && value + span > clipMin);
 }
 
 export function generatedTileMemoryIndex(mapped: unknown): number {
@@ -446,6 +496,22 @@ export class GeneratedMameVideoPrimitives implements GeneratedVideoPrimitives, R
     for (const [member, value] of Object.entries(machine.video?.initialState ?? {})) {
       if (!Object.hasOwn(state, member)) state[member] = value;
     }
+    for (const [member, values] of Object.entries(machine.video?.colorTables ?? {})) {
+      state[member] = Uint32Array.from(values, value => value >>> 0);
+    }
+    const lfsr = machine.video?.lfsrTable;
+    if (lfsr) {
+      const values = new Uint8Array(lfsr.period);
+      let shift = 0;
+      for (let index = 0; index < values.length; index++) {
+        const enabled = (shift & lfsr.enabledMask) === lfsr.enabledValue;
+        const color = (~shift & lfsr.colorMask) >> lfsr.colorShift;
+        values[index] = color | (enabled ? 0x80 : 0);
+        const feedback = ((shift >> lfsr.feedbackTap) ^ ~(shift >> lfsr.feedbackInvertTap)) & 1;
+        shift = (shift >> 1) | (feedback << (lfsr.feedbackWidth - 1));
+      }
+      state[lfsr.member] = values;
+    }
     this.palette = machine.video?.palette
       ? new GeneratedPalette(machine.video.palette, regions)
       : undefined;
@@ -464,10 +530,67 @@ export class GeneratedMameVideoPrimitives implements GeneratedVideoPrimitives, R
         Number(args[0]), Number(args[1]), Number(args[2]), Number(args[3]),
       ),
     };
+    if (lfsr?.rowRenderer) {
+      const row = lfsr.rowRenderer;
+      referenceCalls[row.method] = (...rawArgs) => {
+        const args = rawArgs.map(generatedArgumentValue);
+        const bitmap = args[0] as BitmapTarget;
+        const maxX = Number(args[1]);
+        const y = Number(args[2]);
+        let starOffset = modulo(Number(args[3]), lfsr.period);
+        const starMask = Number(args[4]);
+        const stars = state[lfsr.member] as Uint8Array;
+        const colors = state[row.colorMember] as Uint32Array;
+        const scale = Number(state[row.scaleMember] ?? 1);
+        for (let x = 0; x < maxX; x++) {
+          const enabled = (y ^ (x >> 3)) & 1;
+          let star = stars[starOffset++]!;
+          if (starOffset >= lfsr.period) starOffset = 0;
+          if (enabled && (star & 0x80) && (star & starMask)) {
+            bitmap['pix='](y, scale * x, colors[star & 0x3f] ?? 0xff000000);
+          }
+          star = stars[starOffset++]!;
+          if (starOffset >= lfsr.period) starOffset = 0;
+          if (enabled && (star & 0x80) && (star & starMask)) {
+            const color = colors[star & 0x3f] ?? 0xff000000;
+            bitmap['pix='](y, scale * x + 1, color);
+            bitmap['pix='](y, scale * x + 2, color);
+          }
+        }
+        return 0;
+      };
+    }
+    const callParameters: NonNullable<GeneratedHandlerBindings['callParameters']> = {
+      ...bindings.callParameters,
+    };
+    for (const [member, target] of Object.entries(machine.video?.delegates ?? {})) {
+      const handler = requiredHandler(machine, target);
+      referenceCalls[member] = (...args) => executeGeneratedMachineProgram(
+        machine,
+        handler,
+        this.bindings,
+        Object.fromEntries(parameterNames(handler.parameters).map((name, index) => [name, args[index] ?? 0])),
+      ).value ?? 0;
+      callParameters[member] = parameterDeclarations(handler.parameters);
+      state[member] = { isnull: () => 0 };
+    }
+    state.m_screen = {
+      __frame: 0,
+      frame_number(this: { __frame: number }) { return this.__frame; },
+      vpos: () => bindings.calls?.['m_screen.vpos']?.() ?? 0,
+      update_partial: () => {},
+      visible_area: () => new GeneratedRectangle(
+        0,
+        machine.execution.screen.width * (machine.video?.renderScale?.x ?? 1) - 1,
+        machine.execution.screen.yOffset ?? 0,
+        (machine.execution.screen.yOffset ?? 0) + machine.execution.screen.height - 1,
+      ),
+    };
     this.bindings = {
       ...bindings,
       members: state,
       referenceCalls,
+      callParameters,
     };
     if (this.palette) {
       state.m_gfxdecode = { gfx: (index: number) => this.gfx[index] };
@@ -513,7 +636,33 @@ export class GeneratedMameVideoPrimitives implements GeneratedVideoPrimitives, R
     }
   }
 
-  vblank(): void {}
+  vblank(): void {
+    const screen = this.state.m_screen as { frame_number?: () => number; __frame?: number } | undefined;
+    if (screen) {
+      screen.__frame = (screen.__frame ?? 0) + 1;
+      screen.frame_number = () => screen.__frame ?? 0;
+    }
+  }
+}
+
+function parameterNames(parameters: string | undefined): string[] {
+  return parameterDeclarations(parameters)
+    .map(parameter => /(\w+)\s*$/.exec(parameter)?.[1])
+    .filter((name): name is string => Boolean(name));
+}
+
+function parameterDeclarations(parameters: string | undefined): string[] {
+  return (parameters ?? '').split(',').map(value => value.trim()).filter(Boolean);
+}
+
+function generatedArgumentValue(value: unknown): unknown {
+  if (
+    value && typeof value === 'object' &&
+    typeof (value as { get?: unknown }).get === 'function'
+  ) {
+    return (value as { get(): unknown }).get();
+  }
+  return value;
 }
 
 function requiredHandler(machine: GeneratedMachine, key: string): GeneratedHandler {

@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { basename, dirname, extname, join, relative } from 'node:path';
 import type { GeneratedHandlerProgram } from '../runtime/generated-machine.ts';
-import { parseMameAst, splitMameArgs } from './ast.ts';
+import { parseMameAst, splitMameArgs, type MameFunction } from './ast.ts';
 import { evalExpr } from '../kg/parse.ts';
 import { normalizeMameExecutionSource } from './cpu-compiler.ts';
 import { compileMameHandler } from './handler-ir.ts';
@@ -77,6 +77,7 @@ export interface GeneratedDiscreteSn76477Plan {
   deviceType: string;
   className: string;
   workletName: string;
+  processorName: 'discrete';
   sampleRate: number;
   ports: { method: string; offset: number }[];
   amplifier: GeneratedDiscreteAudioControl;
@@ -101,6 +102,241 @@ export interface GeneratedDiscreteSn76477Plan {
   discreteRouteGain: number;
   sourceFiles: string[];
   source: { file: string; line: number };
+}
+
+export interface GeneratedCounterLfsrDiscretePlan {
+  schemaVersion: 1;
+  type: 'COUNTER_LFSR_DISCRETE';
+  deviceType: string;
+  className: string;
+  workletName: string;
+  processorName: 'discrete';
+  methodBases: Record<string, number>;
+  methodRoles: { pitch: string; lfo: string; controls: string };
+  controls: {
+    background: number[];
+    noise: number;
+    fire: number;
+    volume: number[];
+  };
+  clockDivider: number;
+  lfsr: { bits: number; reset: number; tap0: number; tap1: number };
+  lfoResistors: number[];
+  backgroundResistors: number[];
+  backgroundCapacitors: number[];
+  toneResistors: number[];
+  hitFilter: {
+    resistance: number;
+    capacitance: number;
+    inputVoltage: number;
+    diodeDrop: number;
+    bandpass: {
+      inputResistance: number;
+      biasResistance: number;
+      feedbackResistance: number;
+      capacitance1: number;
+      capacitance2: number;
+      referenceVoltage: number;
+      positiveVoltage: number;
+      negativeVoltage: number;
+      positiveRailOffset: number;
+    };
+    mixGain: number;
+  };
+  fire: { resistance: number; capacitance: number };
+  sourceFiles: string[];
+  source: { file: string; line: number };
+}
+
+export function compileCounterLfsrDiscrete(
+  mameSrc: string,
+  definition: MameHardwareDefinition,
+): GeneratedCounterLfsrDiscretePlan {
+  const cppFile = definition.sourceFile;
+  const cpp = readFileSync(join(mameSrc, cppFile), 'utf8');
+  const ast = parseMameAst([{ file: cppFile, source: cpp }]);
+  const methods = ast.units.flatMap(unit => unit.functions)
+    .filter(fn => fn.className === definition.className);
+  const publicWrites = methods.filter(method =>
+    method.body.includes('m_discrete->write') ||
+    (method.body.includes('switch') && method.body.includes('_w(')));
+  const controlsMethod = publicWrites.find(method => method.body.includes('switch'));
+  const lfoMethod = publicWrites.find(method => method.body.includes('m_lfo_val'));
+  const pitchMethod = publicWrites.find(method =>
+    method !== controlsMethod && method !== lfoMethod &&
+    /m_discrete->write\([^,]+,\s*data\s*\)/.test(method.body));
+  const config = methods.find(method => method.name === 'device_add_mconfig');
+  const netlistName = /set_intf\(\s*(\w+)\s*\)/.exec(config?.body ?? '')?.[1];
+  const netlist = netlistName ? discreteSoundBody(cpp, netlistName) : '';
+  const mapped = [controlsMethod, lfoMethod, pitchMethod]
+    .filter((method): method is MameFunction => Boolean(method));
+  if (mapped.length !== 3 || !netlist) {
+    throw new Error(`${definition.type}: counter/LFSR discrete source shape is incomplete`);
+  }
+  const macros = preprocessorMacros(cpp);
+  const analog = (expression: string | undefined): number => {
+    let expanded = expression ?? '';
+    for (let pass = 0; pass < 4; pass++) {
+      expanded = expanded.replace(/\b[A-Za-z_]\w*\b/g, token =>
+        macros.get(token)?.replace(/\/\*[\s\S]*?\*\//g, '').trim() ?? token);
+    }
+    return requiredAnalog(expanded.replace(/\.dvalue\(\)/g, ''));
+  };
+  const lfsrName = /DISCRETE_LFSR_NOISE\([\s\S]*?&(\w+)\s*\)/.exec(netlist)?.[1];
+  const lfsr = lfsrName ? structValues(cpp, lfsrName).scalars : [];
+  const note = callArgs(netlist, 'DISCRETE_NOTE')[0] ?? [];
+  const clockSymbol = /\b([A-Za-z_]\w*)\.dvalue\(\)/.exec(note[2] ?? '')?.[1];
+  const soundClock = (clockSymbol ? macros.get(clockSymbol) ?? '' : '')
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/\/\/.*$/gm, '')
+    .trim();
+  const divider = Number(/\/\s*(\d+)\s*\)?\s*$/.exec(soundClock)?.[1]);
+  if (lfsr.length < 5 || !divider) {
+    throw new Error(`${definition.type}: counter/LFSR clock source shape is incomplete`);
+  }
+  const dac = callArgs(netlist, 'DISCRETE_DAC_R1')[0] ?? [];
+  const dacDescriptor = /&(\w+)/.exec(dac.at(-1) ?? '')?.[1];
+  const lfoResistors = dacDescriptor
+    ? structValues(cpp, dacDescriptor).firstArray.slice(0, 4).map(analog)
+    : [];
+  const astables = callArgs(netlist, 'DISCRETE_555_ASTABLE_CV')
+    .filter(args => !/^1(?:\.0)?$/.test(args[1]?.trim() ?? ''));
+  const backgroundResistors = astables.map(args => analog(args[3]));
+  const backgroundCapacitors = astables.map(args => analog(args[4]));
+  const backgroundNodes = astables.map(args => args[1]!.trim());
+  const inputData = callArgs(netlist, 'DISCRETE_INPUTX_DATA');
+  const inputResistors = new Map(inputData.map(args => [args[0]!.trim(), analog(args[1])]));
+  const bitsNode = callArgs(netlist, 'DISCRETE_BITS_DECODE')[0]?.[0]?.trim();
+  const toneMixer = callArgs(netlist, 'DISCRETE_MIXER5').find(args =>
+    bitsNode && args.some(arg => arg.includes(`${bitsNode}_`)));
+  const toneDescriptor = /&(\w+)/.exec(toneMixer?.at(-1) ?? '')?.[1];
+  const toneArrays = toneDescriptor ? structArrays(cpp, toneDescriptor) : [];
+  const fixedTone = (toneArrays[0] ?? []).slice(0, 4)
+    .filter(value => value.trim() !== '0')
+    .map(analog);
+  const variableTone = (toneArrays[1] ?? []).slice(0, 4)
+    .filter(value => value.trim() !== '0')
+    .map(value => inputResistors.get(value.trim()) ?? Number.NaN);
+  const toneResistors = [...fixedTone, ...variableTone];
+  const rcDischarges = callArgs(netlist, 'DISCRETE_RCDISC5');
+  const hit = rcDischarges.find(args => inputResistors.has(args[2]?.trim() ?? ''));
+  const fire = rcDischarges.find(args => args !== hit);
+  const hitNode = hit?.[0]?.trim();
+  const hitInput = inputData.find(args => args[0]?.trim() === hit?.[2]?.trim());
+  const hitBandpass = callArgs(netlist, 'DISCRETE_OP_AMP_FILTER').find(args =>
+    args[2]?.trim() === hitNode && args[4]?.includes('BAND_PASS_1M'));
+  const hitBandpassName = /&(\w+)/.exec(hitBandpass?.at(-1) ?? '')?.[1];
+  const hitBandpassValues = hitBandpassName
+    ? splitMameArgs(structValues(cpp, hitBandpassName).body)
+      .map(value => analog(value))
+    : [];
+  const hitFilterNode = hitBandpass?.[0]?.trim();
+  const finalMixer = callArgs(netlist, 'DISCRETE_MIXER3').find(args =>
+    hitFilterNode && args.slice(2, -1).some(arg => arg.trim() === hitFilterNode));
+  const finalMixerName = /&(\w+)/.exec(finalMixer?.at(-1) ?? '')?.[1];
+  const finalMixerResistors = finalMixerName
+    ? structValues(cpp, finalMixerName).firstArray.map(value => analog(value))
+    : [];
+  const hitMixerIndex = finalMixer?.slice(2, -1)
+    .findIndex(arg => arg.trim() === hitFilterNode) ?? -1;
+  const finalConductance = finalMixerResistors
+    .filter(value => value > 0)
+    .reduce((sum, value) => sum + 1 / value, 0);
+  const hitMixGain = hitMixerIndex >= 0 && finalConductance > 0
+    ? (1 / finalMixerResistors[hitMixerIndex]!) / finalConductance
+    : Number.NaN;
+  const discreteFilterFile = 'src/devices/sound/disc_flt.hxx';
+  const discreteHeaderFile = 'src/devices/sound/discrete.h';
+  const discreteFilterSource = readFileSync(join(mameSrc, discreteFilterFile), 'utf8');
+  const discreteHeaderSource = readFileSync(join(mameSrc, discreteHeaderFile), 'utf8');
+  const diodeDrop = Number(/DST_RCDISC5__IN\s*-\s*([\d.]+)/.exec(
+    discreteFilterSource,
+  )?.[1]);
+  const positiveRailOffset = Number(/#define\s+OP_AMP_VP_RAIL_OFFSET\s+([\d.]+)/.exec(
+    discreteHeaderSource,
+  )?.[1]);
+  const fireNode = callArgs(netlist, 'DISCRETE_LOGIC_INVERT')[0]?.[1]?.trim();
+  const volumeNodes = new Set((toneArrays[1] ?? [])
+    .map(value => value.trim())
+    .filter(value => value !== '0'));
+  const helpers = publicWrites.filter(method => !mapped.includes(method));
+  const helperTarget = (body: string): string | undefined =>
+    /m_discrete->write\(\s*(?:NODE_RELATIVE\(\s*)?(\w+)/.exec(body)?.[1];
+  const offsetsFor = (predicate: (target: string) => boolean): number[] => helpers
+    .filter(method => {
+      const target = helperTarget(method.body);
+      return target ? predicate(target) : false;
+    })
+    .flatMap(method => switchCallOffsets(controlsMethod!.body, method.name));
+  const controls = {
+    background: offsetsFor(target => target === backgroundNodes[0]),
+    noise: offsetsFor(target => target === hit?.[2]?.trim())[0] ?? -1,
+    fire: offsetsFor(target => target === fireNode)[0] ?? -1,
+    volume: offsetsFor(target => volumeNodes.has(target)),
+  };
+  if (
+    lfoResistors.length !== 4 || backgroundResistors.length !== 3 ||
+    backgroundCapacitors.length !== 3 || toneResistors.length !== 4 ||
+    !hit || !fire || hitBandpassValues.length < 11 || !Number.isFinite(hitMixGain) ||
+    !Number.isFinite(diodeDrop) || !Number.isFinite(positiveRailOffset) ||
+    controls.background.length !== 3 ||
+    controls.noise < 0 || controls.fire < 0 || controls.volume.length !== 2
+  ) {
+    throw new Error(`${definition.type}: discrete component topology is incomplete`);
+  }
+  const methodBases = Object.fromEntries(
+    mapped.map(method => method.name).sort().map((name, index) => [name, index * 0x100]),
+  );
+  return {
+    schemaVersion: 1,
+    type: 'COUNTER_LFSR_DISCRETE',
+    deviceType: definition.type,
+    className: definition.className,
+    workletName: definition.type.toLowerCase().replace(/_/g, '-'),
+    processorName: 'discrete',
+    methodBases,
+    methodRoles: {
+      pitch: pitchMethod!.name,
+      lfo: lfoMethod!.name,
+      controls: controlsMethod!.name,
+    },
+    controls,
+    clockDivider: divider,
+    lfsr: {
+      bits: lfsr[1]!,
+      reset: lfsr[2]!,
+      tap0: lfsr[3]!,
+      tap1: lfsr[4]!,
+    },
+    lfoResistors,
+    backgroundResistors,
+    backgroundCapacitors,
+    toneResistors,
+    hitFilter: {
+      resistance: analog(hit[3]),
+      capacitance: analog(hit[4]),
+      inputVoltage: analog(hitInput?.[1]),
+      diodeDrop,
+      bandpass: {
+        inputResistance: hitBandpassValues[0]!,
+        biasResistance: hitBandpassValues[1]!,
+        feedbackResistance: hitBandpassValues[4]!,
+        capacitance1: hitBandpassValues[5]!,
+        capacitance2: hitBandpassValues[6]!,
+        referenceVoltage: hitBandpassValues[8]!,
+        positiveVoltage: hitBandpassValues[9]!,
+        negativeVoltage: hitBandpassValues[10]!,
+        positiveRailOffset,
+      },
+      mixGain: hitMixGain,
+    },
+    fire: {
+      resistance: analog(fire[3]),
+      capacitance: analog(fire[4]),
+    },
+    sourceFiles: [cppFile, discreteFilterFile, discreteHeaderFile],
+    source: { file: mapped[0]!.span.file, line: mapped[0]!.span.line },
+  };
 }
 
 export function compileDiscreteSn76477(
@@ -205,7 +441,8 @@ export function compileDiscreteSn76477(
     type: 'DISCRETE_SN76477',
     deviceType: definition.type,
     className: definition.className,
-    workletName: definition.type.toLowerCase().replace(/_audio$/, ''),
+    workletName: definition.type.toLowerCase().replace(/_/g, '-'),
+    processorName: 'discrete',
     sampleRate: 48_000,
     ports: ports.map((method, offset) => ({ method: method.name, offset })),
     amplifier: { port: ampMethod, mask: 1 << ampBit },
@@ -265,6 +502,25 @@ function callArgs(source: string, name: string): string[][] {
   return result;
 }
 
+function discreteSoundBody(source: string, name: string): string {
+  const start = new RegExp(`\\bDISCRETE_SOUND_START\\s*\\(\\s*${name}\\s*\\)`).exec(source);
+  if (!start) return '';
+  const end = source.indexOf('DISCRETE_SOUND_END', start.index + start[0].length);
+  return end < 0 ? '' : source.slice(start.index + start[0].length, end);
+}
+
+function switchCallOffsets(source: string, method: string): number[] {
+  const offsets: number[] = [];
+  let pending: number[] = [];
+  for (const line of source.split('\n')) {
+    const caseValue = /\bcase\s+(0x[\da-f]+|\d+)\s*:/i.exec(line)?.[1];
+    if (caseValue) pending.push(Number(caseValue));
+    if (new RegExp(`\\b${method}\\s*\\(`).test(line)) offsets.push(...pending);
+    if (/\bbreak\s*;/.test(line)) pending = [];
+  }
+  return offsets;
+}
+
 function structValues(source: string, name: string): {
   body: string;
   scalars: number[];
@@ -286,6 +542,20 @@ function structValues(source: string, name: string): {
       ? splitMameArgs(nested.trim().replace(/^\{/, '').replace(/\}\s*$/, ''))
       : [],
   };
+}
+
+function structArrays(source: string, name: string): string[][] {
+  const match = new RegExp(`\\b${name}\\s*=\\s*\\{`).exec(source);
+  if (!match) return [];
+  const open = source.indexOf('{', match.index);
+  const close = matchingDelimiter(source, open, '{', '}');
+  if (close < 0) return [];
+  const clean = source.slice(open + 1, close)
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/\/\/.*$/gm, '');
+  return splitMameArgs(clean)
+    .filter(value => value.trim().startsWith('{'))
+    .map(value => splitMameArgs(value.trim().replace(/^\{/, '').replace(/\}\s*$/, '')));
 }
 
 function matchingDelimiter(
@@ -516,7 +786,303 @@ interface Voice {
   volume: number[];
   waveform_select: number;
 }
+
 ` + generatedNamcoWsgSuffix(plan);
+}
+
+export function generatedCounterLfsrDiscreteWorkletSource(
+  plan: GeneratedCounterLfsrDiscretePlan,
+): string {
+  return `// GENERATED from ${plan.source.file}:${plan.source.line}; do not edit.
+// Register routing, clock division, component values and LFSR topology are
+// lowered from the selected MAME discrete sound device and netlist.
+const plan = ${JSON.stringify(plan, null, 2)};
+
+export interface GeneratedDiscreteWrite { offset: number; data: number; frac?: number }
+
+const clamp = (value: number): number => Math.max(-1, Math.min(1, value));
+
+export class GeneratedDiscreteAudioCore {
+  readonly sampleRate: number;
+  private readonly clock: number;
+  private pitch = 0xff;
+  private volume = 0;
+  private tonePhase = 0;
+  private lfoValue = 0;
+  private lfoPhase = 0;
+  private readonly backgroundEnabled = [false, false, false];
+  private readonly backgroundPhase = new Float64Array(3);
+  private hitEnabled = false;
+  private hitCapacitor = 0;
+  private hitInput1 = 0;
+  private hitInput2 = 0;
+  private hitOutput1 = 0;
+  private hitOutput2 = 0;
+  private readonly hitA1: number;
+  private readonly hitA2: number;
+  private readonly hitB0: number;
+  private readonly hitB2: number;
+  private noisePhase = 0;
+  private lfsr = plan.lfsr.reset;
+  private noise = -1;
+  private fire = false;
+  private fireEnvelope = 0;
+  private firePhase = 0;
+  private fireTime = 0;
+
+  constructor(outputRate = 48_000, clock = 3_072_000) {
+    this.sampleRate = outputRate;
+    this.clock = clock;
+    const filter = plan.hitFilter.bandpass;
+    const totalResistance = 1 / (
+      1 / filter.inputResistance +
+      (filter.biasResistance > 0 ? 1 / filter.biasResistance : 0)
+    );
+    const centerHz = 1 / (2 * Math.PI * Math.sqrt(
+      totalResistance * filter.feedbackResistance *
+      filter.capacitance1 * filter.capacitance2
+    ));
+    const damping = (filter.capacitance1 + filter.capacitance2) / Math.sqrt(
+      filter.feedbackResistance / totalResistance *
+      filter.capacitance1 * filter.capacitance2
+    );
+    const twoOverT = 2 * outputRate;
+    const warped = outputRate * 2 * Math.tan(Math.PI * centerHz / outputRate);
+    const denominator = twoOverT ** 2 + damping * warped * twoOverT + warped ** 2;
+    const gain = -filter.feedbackResistance / totalResistance *
+      filter.capacitance2 / (filter.capacitance1 + filter.capacitance2);
+    this.hitA1 = 2 * (-(twoOverT ** 2) + warped ** 2) / denominator;
+    this.hitA2 = (twoOverT ** 2 - damping * warped * twoOverT + warped ** 2) /
+      denominator;
+    this.hitB0 = damping * warped * twoOverT / denominator * gain;
+    this.hitB2 = -this.hitB0;
+  }
+
+  write(encodedOffset: number, data: number): void {
+    const method = Object.entries(plan.methodBases)
+      .find(([, base]) => encodedOffset >= base && encodedOffset < base + 0x100);
+    if (!method) return;
+    const offset = encodedOffset - method[1];
+    data &= 0xff;
+    if (method[0] === plan.methodRoles.pitch) {
+      this.pitch = data;
+      return;
+    }
+    if (method[0] === plan.methodRoles.lfo) {
+      this.lfoValue = (this.lfoValue & ~(1 << offset)) | ((data & 1) << offset);
+      return;
+    }
+    if (method[0] !== plan.methodRoles.controls) return;
+    const bit = (data & 1) !== 0;
+    const background = plan.controls.background.indexOf(offset);
+    if (background >= 0) {
+      this.backgroundEnabled[background] = bit;
+      return;
+    }
+    if (offset === plan.controls.noise) {
+      this.hitEnabled = bit;
+      return;
+    }
+    if (offset === plan.controls.fire) {
+      if (bit && !this.fire) {
+        this.fireEnvelope = 1;
+        this.fireTime = 0;
+        this.firePhase = 0;
+      }
+      this.fire = bit;
+      return;
+    }
+    const volume = plan.controls.volume.indexOf(offset);
+    if (volume >= 0) {
+      this.volume = (this.volume & ~(1 << volume)) | (Number(bit) << volume);
+    }
+  }
+
+  render(output: Float32Array): void {
+    for (let index = 0; index < output.length; index++) output[index] = this.sample();
+  }
+
+  sample(): number {
+    const dt = 1 / this.sampleRate;
+    const soundClock = this.clock / plan.clockDivider;
+    let mix = 0;
+
+    if (this.pitch !== 0xff) {
+      const counterRate = soundClock / Math.max(1, 256 - this.pitch);
+      this.tonePhase = (this.tonePhase + counterRate * dt) % 16;
+      const counter = Math.floor(this.tonePhase) & 15;
+      const conductances = [
+        (counter & 1) ? 1 / plan.toneResistors[0] : 0,
+        (counter & 4) ? 1 / plan.toneResistors[1] : 0,
+        (counter & 4) && (this.volume & 1) ? 1 / plan.toneResistors[2] : 0,
+        (counter & 8) && (this.volume & 2) ? 1 / plan.toneResistors[3] : 0,
+      ];
+      const maximum = plan.toneResistors.reduce((sum, resistance) => sum + 1 / resistance, 0);
+      mix += (conductances.reduce((sum, value) => sum + value, 0) / maximum - 0.25) * 0.7;
+    }
+
+    let lfoConductance = 1 / 330_000;
+    plan.lfoResistors.forEach((resistance, bit) => {
+      if (this.lfoValue & (1 << bit)) lfoConductance += 1 / resistance;
+    });
+    const lfoHz = 0.15 + 600_000 * lfoConductance;
+    this.lfoPhase = (this.lfoPhase + lfoHz * dt) % 1;
+    const sweep = this.lfoPhase < 0.5 ? this.lfoPhase * 2 : 2 - this.lfoPhase * 2;
+    for (let voice = 0; voice < 3; voice++) {
+      if (!this.backgroundEnabled[voice]) continue;
+      const r = plan.backgroundResistors[voice];
+      const c = plan.backgroundCapacitors[voice];
+      const base = 1.44 / ((100_000 + 2 * r) * c);
+      this.backgroundPhase[voice] = (this.backgroundPhase[voice]! +
+        base * (0.68 + 0.32 * sweep) * dt) % 1;
+      mix += (this.backgroundPhase[voice]! < 0.5 ? 1 : -1) * 0.075;
+    }
+
+    this.noisePhase += 7_920 * dt;
+    while (this.noisePhase >= 1) {
+      this.noisePhase -= 1;
+      const feedback = ((this.lfsr >> plan.lfsr.tap0) ^
+        (this.lfsr >> plan.lfsr.tap1) ^ 1) & 1;
+      this.lfsr = ((this.lfsr << 1) | feedback) & ((2 ** plan.lfsr.bits) - 1);
+      this.noise = this.lfsr & 1 ? 1 : -1;
+    }
+    const hitTarget = this.hitEnabled
+      ? Math.max(0, plan.hitFilter.inputVoltage - plan.hitFilter.diodeDrop)
+      : 0;
+    let hitDifference = hitTarget - this.hitCapacitor;
+    let hitNode = 0;
+    if (this.noise > 0) {
+      if (hitDifference < 0) {
+        hitDifference *= 1 - Math.exp(
+          -dt / (plan.hitFilter.resistance * plan.hitFilter.capacitance),
+        );
+      }
+      this.hitCapacitor += hitDifference;
+      hitNode = this.hitCapacitor;
+    } else if (hitDifference > 0) {
+      this.hitCapacitor = hitTarget;
+    }
+    const hitUnclipped = -this.hitA1 * this.hitOutput1 - this.hitA2 * this.hitOutput2 +
+      this.hitB0 * hitNode + this.hitB2 * this.hitInput2;
+    const hitVoltage = Math.max(
+      plan.hitFilter.bandpass.negativeVoltage,
+      Math.min(
+        plan.hitFilter.bandpass.positiveVoltage -
+          plan.hitFilter.bandpass.positiveRailOffset,
+        hitUnclipped + plan.hitFilter.bandpass.referenceVoltage,
+      ),
+    );
+    const hitFiltered = hitVoltage - plan.hitFilter.bandpass.referenceVoltage;
+    this.hitInput2 = this.hitInput1;
+    this.hitInput1 = hitNode;
+    this.hitOutput2 = this.hitOutput1;
+    this.hitOutput1 = hitFiltered;
+    const hitSupply = plan.hitFilter.bandpass.positiveVoltage -
+      plan.hitFilter.bandpass.negativeVoltage;
+    mix += hitFiltered / hitSupply * plan.hitFilter.mixGain;
+
+    if (this.fireEnvelope > 0.0001) {
+      const tau = plan.fire.resistance * plan.fire.capacitance;
+      const frequency = 150 + 1_350 * Math.exp(-this.fireTime / Math.max(0.04, tau * 0.7)) +
+        this.noise * 90;
+      this.firePhase = (this.firePhase + frequency * dt) % 1;
+      mix += (this.firePhase < 0.5 ? 1 : -1) * this.fireEnvelope * 0.28;
+      this.fireEnvelope *= Math.exp(-dt / Math.max(0.08, tau * 2));
+      this.fireTime += dt;
+    }
+    return clamp(mix * 0.9);
+  }
+}
+
+export class GeneratedDiscreteAudioFrameRenderer {
+  private carry = 0;
+  private readonly core: GeneratedDiscreteAudioCore;
+  private readonly outputRate: number;
+  private readonly refresh: number;
+
+  constructor(
+    core: GeneratedDiscreteAudioCore,
+    outputRate: number,
+    refresh: number,
+  ) {
+    this.core = core;
+    this.outputRate = outputRate;
+    this.refresh = refresh;
+  }
+
+  render(writes: readonly GeneratedDiscreteWrite[]): Float32Array {
+    this.carry += this.outputRate / this.refresh;
+    const count = Math.floor(this.carry);
+    this.carry -= count;
+    const output = new Float32Array(count);
+    let index = 0;
+    for (const write of writes) {
+      const at = Math.ceil(Math.max(0, Math.min(1, write.frac ?? 0)) * count);
+      while (index < at) output[index++] = this.core.sample();
+      this.core.write(write.offset, write.data);
+    }
+    while (index < count) output[index++] = this.core.sample();
+    return output;
+  }
+}
+
+declare const sampleRate: number;
+declare class AudioWorkletProcessor { readonly port: MessagePort; constructor(); }
+declare function registerProcessor(
+  name: string,
+  processorCtor: new () => AudioWorkletProcessor,
+): void;
+
+class GeneratedDiscreteAudioProcessor extends AudioWorkletProcessor {
+  private core?: GeneratedDiscreteAudioCore;
+  private renderer?: GeneratedDiscreteAudioFrameRenderer;
+  private readonly frames: Float32Array[] = [];
+  private current?: Float32Array;
+  private position = 0;
+
+  constructor() {
+    super();
+    this.port.onmessage = (event: MessageEvent) => {
+      const message = event.data as {
+        type: string; clock?: number; refresh?: number;
+        offset?: number; data?: number; writes?: GeneratedDiscreteWrite[];
+      };
+      if (message.type === 'init') {
+        this.core = new GeneratedDiscreteAudioCore(sampleRate, message.clock ?? 3_072_000);
+        this.renderer = new GeneratedDiscreteAudioFrameRenderer(
+          this.core, sampleRate, message.refresh ?? 60.606,
+        );
+      } else if (message.type === 'write') {
+        this.core?.write(message.offset ?? 0, message.data ?? 0);
+      } else if (message.type === 'batch' && this.renderer) {
+        this.frames.push(this.renderer.render(message.writes ?? []));
+      }
+    };
+  }
+
+  private nextSample(): number {
+    while (!this.current || this.position >= this.current.length) {
+      this.current = this.frames.shift();
+      this.position = 0;
+      if (!this.current) return 0;
+    }
+    return this.current[this.position++]!;
+  }
+
+  process(_inputs: Float32Array[][], outputs: Float32Array[][]): boolean {
+    const channels = outputs[0];
+    const output = channels?.[0];
+    if (!output) return true;
+    for (let index = 0; index < output.length; index++) output[index] = this.nextSample();
+    for (let channel = 1; channel < (channels?.length ?? 0); channel++) {
+      channels![channel]!.set(output);
+    }
+    return true;
+  }
+}
+
+registerProcessor(plan.processorName, GeneratedDiscreteAudioProcessor);
+`;
 }
 
 export function generatedAy8910WorkletSource(plan: GeneratedAy8910Plan): string {
@@ -1174,7 +1740,7 @@ class GeneratedDiscreteAudioProcessor extends AudioWorkletProcessor {
   }
 }
 
-registerProcessor(plan.workletName, GeneratedDiscreteAudioProcessor);
+registerProcessor(plan.processorName, GeneratedDiscreteAudioProcessor);
 `;
 }
 

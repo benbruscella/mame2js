@@ -39,7 +39,9 @@ const BINARY_PRECEDENCE: Record<string, number> = {
   '%': 10,
 };
 
-const ASSIGNMENT_OPERATORS = new Set(['=', '+=', '-=', '&=', '|=', '^=', '<<=', '>>=']);
+const ASSIGNMENT_OPERATORS = new Set([
+  '=', '+=', '-=', '*=', '/=', '%=', '&=', '|=', '^=', '<<=', '>>=',
+]);
 
 /**
  * Compile the deliberately small C++ subset used by MAME driver handlers.
@@ -484,6 +486,14 @@ class HandlerParser {
           kind: 'identifier',
           name: `${expressionName(expression)}::${property.text}`,
         };
+      } else if (this.consume('++') || this.consume('--')) {
+        expression = {
+          kind: 'assignment',
+          target: expression,
+          operator: this.tokens[this.index - 1]!.text === '++' ? '+=' : '-=',
+          value: { kind: 'number', value: 1 },
+          postfix: true,
+        };
       } else {
         break;
       }
@@ -570,7 +580,7 @@ function tokenize(source: string): Token[] {
   const tokens: Token[] = [];
   const operators = [
     '>>=', '<<=', '->', '::', '==', '!=', '<=', '>=', '&&', '||', '<<', '>>',
-    '+=', '-=', '&=', '|=', '^=', '++', '--',
+    '+=', '-=', '*=', '/=', '%=', '&=', '|=', '^=', '++', '--',
   ];
   let index = 0;
   while (index < masked.length) {

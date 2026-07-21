@@ -195,7 +195,7 @@ export function lowerGeneratedMachine(
   const generatedSoundboard = ayDevices.length
     ? undefined
     : devices.find(device =>
-        device.type.endsWith('_AUDIO') &&
+        (device.type.endsWith('_AUDIO') || device.type.endsWith('_SOUND')) &&
         mappedWriteKeys.some(key => key.startsWith(`${device.tag}.`)));
   const audioRoutes = lowerAudioRoutes(graph, ayDevices);
   const sound = soundDevice
@@ -228,14 +228,17 @@ export function lowerGeneratedMachine(
           const writeMethods = [...new Set(maps.flatMap(map => map.ranges)
             .map(range => range.write)
             .filter((key): key is string => Boolean(key?.startsWith(`${generatedSoundboard.tag}.`)))
-            .map(key => key.slice(generatedSoundboard.tag.length + 1)))];
+            .map(key => key.slice(generatedSoundboard.tag.length + 1)))].sort();
           return {
-            kind: generatedSoundboard.type.toLowerCase().replace(/_audio$/, ''),
+            kind: generatedSoundboard.type.toLowerCase().replace(/_(?:audio|sound)$/, ''),
             deviceTag: generatedSoundboard.tag,
             deviceType: generatedSoundboard.type,
             writeMethods,
             writeMethodOffsets: Object.fromEntries(
-              writeMethods.map((method, offset) => [method, offset]),
+              writeMethods.map((method, offset) => [
+                method,
+                offset * (generatedSoundboard.type.endsWith('_SOUND') ? 0x100 : 1),
+              ]),
             ),
             enableMethods: [],
             controlOffset: -1,

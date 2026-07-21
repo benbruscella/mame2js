@@ -19,8 +19,10 @@ export interface RomLoad {
 export interface RomRegionSpec { region: string; size: number; loads: RomLoad[] }
 
 export interface SoundSpec {
-  /** SoundCore/worklet kind: 'wsg' | 'galaxian' | 'ay8910' | 'none' */
+  /** Generic SoundCore/AudioWorklet processor kind. */
   kind: string;
+  /** Generated worklet artifact stem when several MAME devices share a processor kind. */
+  worklet?: string;
   clock?: number;
   /** rom region holding the wavetable (wsg only) */
   waveRegion?: string;
@@ -243,7 +245,7 @@ export async function runShell(cfg: ShellConfig, preloaded?: Regions): Promise<v
         refresh: cfg.board.screen.refresh,
         debug: input.debug,
       },
-      `${cfg.runtimeUrl}${cfg.sound.kind}-worklet.js`,
+      `${cfg.runtimeUrl}${cfg.sound.worklet ?? cfg.sound.kind}-worklet.js`,
       cfg.sound.kind,
     ).then(() => {
       // per-core master gains: wsg = MAME route gain 0.90*10/16; the AY bank

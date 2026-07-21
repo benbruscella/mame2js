@@ -22,8 +22,12 @@ export function compileMameVideo(
   mameSrc: string,
   machineId: string,
 ): CompiledMameVideo | undefined {
+  const fail = (reason: string): undefined => {
+    if (process.env.MAMEKIT_DEBUG_VIDEO === '1') console.error(`video compiler: ${reason}`);
+    return undefined;
+  };
   const machine = graph.nodes.find(node => node.id === machineId);
-  if (!machine) return undefined;
+  if (!machine) return fail(`missing machine ${machineId}`);
   const files = graph.nodes
     .filter(node => node.label === 'SourceFile')
     .map(node => String(node.props.path))
@@ -43,6 +47,12 @@ export function compileMameVideo(
   const ast = new MameAstIndex(parseMameAst(
     [...new Set(files)].map(file => ({ file, source: readFileSync(join(mameSrc, file), 'utf8') })),
   ));
+  const source = [...new Set(files)]
+    .map(file => readFileSync(join(mameSrc, file), 'utf8'))
+    .join('\n');
+  const constants = sourceNumericConstants(source);
+  const memberDefaults = sourceMemberDefaults(source, constants);
+  const machineIds = machineConfigClosure(graph, machineId);
   const screenCallback = graph.nodes.find(node =>
     node.label === 'Callback' &&
     node.props.signal === 'set_screen_update');
@@ -63,34 +73,40 @@ export function compileMameVideo(
     };
   }
   const config = ast.findFunction(String(machine.props.cls), String(machine.props.name));
-  if (!config) return undefined;
+  if (!config) return fail(`missing config source ${String(machine.props.cls)}::${String(machine.props.name)}`);
   const startMatch =
     /MCFG_VIDEO_START_OVERRIDE\s*\(\s*(\w+)\s*,\s*(\w+)\s*\)/.exec(config.body);
   const start = startMatch
     ? ast.findFunction(startMatch[1]!, `video_start_${startMatch[2]}`)
     : ast.findFunctionInHierarchy(String(machine.props.cls), 'video_start');
-  if (!start) return undefined;
+  if (!start) return fail(`missing video_start for ${String(machine.props.cls)}`);
 
-  const tilemaps = compileTilemaps(start);
-  if (!tilemaps.length) return undefined;
-  const handlers: GeneratedHandler[] = [];
-  for (const tilemap of tilemaps) {
-    for (const key of [tilemap.mapper, tilemap.tileInfo]) {
-      const [ownerClass, method] = splitHandlerKey(key);
-      const fn = ast.findFunctionInHierarchy(ownerClass, method);
-      if (fn) addHandler(handlers, fn);
-    }
-  }
-  if (screen) {
-    for (const name of calledSourceMethods(screen.body)) {
-      const fn = ast.findFunctionInHierarchy(screen.className, name);
-      if (fn && fn !== screen) addHandler(handlers, fn);
-    }
-  }
-
-  const decodeEdge = graph.edges.find(edge => edge.from === machineId && edge.rel === 'DECODES');
+  const decodeEdge = graph.edges.find(edge =>
+    machineIds.has(edge.from) && edge.rel === 'DECODES');
   const decode = decodeEdge && graph.nodes.find(node => node.id === decodeEdge.to);
-  if (!decode) return undefined;
+  if (!decode) return fail(`missing gfx decode in machine composition`);
+  const renderScale = graph.edges
+    .filter(edge => edge.from === decode.id && edge.rel === 'HAS_ENTRY')
+    .map(edge => graph.nodes.find(node => node.id === edge.to))
+    .filter((node): node is KGNode => Boolean(node))
+    .reduce((scale, entry) => Math.max(scale, Number(entry.props.xscale ?? 1)), 1);
+  const tilemaps = compileTilemaps(start, { ...constants, ...memberDefaults })
+    .filter((tilemap, index, all) =>
+      all.findIndex(candidate => candidate.member === tilemap.member) === index);
+  if (!tilemaps.length) return fail(`video_start emitted no tilemaps`);
+  const handlers: GeneratedHandler[] = [];
+  const game = graph.nodes.find(node => node.label === 'Game');
+  const delegates = compileInitDelegates(
+    ast,
+    String(machine.props.cls),
+    String(game?.props.init ?? ''),
+  );
+  const roots = [
+    ...tilemaps.flatMap(tilemap => [tilemap.mapper, tilemap.tileInfo]),
+    ...(screen ? [`${screen.className}.${screen.name}`] : []),
+    ...Object.values(delegates),
+  ];
+  addHandlerClosure(handlers, ast, roots, constants);
   const gfx = graph.edges
     .filter(edge => edge.from === decode.id && edge.rel === 'HAS_ENTRY')
     .map(edge => graph.nodes.find(node => node.id === edge.to))
@@ -118,15 +134,27 @@ export function compileMameVideo(
         },
       };
     });
-  const palette = compilePalette(graph, machineId, ast);
-  if (!palette) return undefined;
+  const palette = compilePalette(graph, machineIds, ast, constants);
+  if (!palette) return fail(`palette callback did not lower`);
+  const colorTables = compileVideoColorTables(source, constants);
+  const lfsrTable = compileVideoLfsr(ast, String(machine.props.cls), constants);
+  const needsClassDefaults = renderScale !== 1 ||
+    Object.keys(delegates).length > 0 ||
+    Boolean(lfsrTable);
 
   return {
     plan: {
       gfx,
       palette,
       tilemaps,
-      initialState: initialState(start.body),
+      initialState: {
+        ...(needsClassDefaults ? memberDefaults : {}),
+        ...initialState(start.body),
+      },
+      ...(renderScale !== 1 ? { renderScale: { x: renderScale, y: 1 } } : {}),
+      ...(Object.keys(delegates).length ? { delegates } : {}),
+      ...(Object.keys(colorTables).length ? { colorTables } : {}),
+      ...(lfsrTable ? { lfsrTable } : {}),
       source: sourceRef(start),
     },
     handlers,
@@ -180,7 +208,10 @@ function compileDirectBitmap(
   };
 }
 
-function compileTilemaps(start: MameFunction): GeneratedVideoPlan['tilemaps'] {
+function compileTilemaps(
+  start: MameFunction,
+  values: Record<string, number> = {},
+): GeneratedVideoPlan['tilemaps'] {
   const plans: GeneratedVideoPlan['tilemaps'] = [];
   const createRe = /\b(m_\w+)\s*=\s*&?[^;]*?\.create\s*\(/g;
   let match: RegExpExecArray | null;
@@ -192,14 +223,35 @@ function compileTilemaps(start: MameFunction): GeneratedVideoPlan['tilemaps'] {
     const tileInfo = funcKey(args[1]);
     const mapper = funcKey(args[2]) ?? standardTilemapMapper(args[2]);
     if (!tileInfo || !mapper || args.length < 7) continue;
+    const member = match[1]!;
+    const nextCreate = start.body.slice(close + 1).search(createRe);
+    const setupEnd = nextCreate < 0 ? start.body.length : close + 1 + nextCreate;
+    const setup = start.body.slice(close + 1, setupEnd);
+    const scrollColumns = expressionNumber(
+      new RegExp(`${member}->set_scroll_cols\\s*\\(([^)]+)\\)`).exec(setup)?.[1],
+      values,
+    );
+    const scrollRows = expressionNumber(
+      new RegExp(`${member}->set_scroll_rows\\s*\\(([^)]+)\\)`).exec(setup)?.[1],
+      values,
+    );
+    const transparentExpression =
+      new RegExp(`${member}->set_transparent_pen\\s*\\(([^)]+)\\)`).exec(setup)?.[1]
+        ?? new RegExp(`${member}->set_transparent_pen\\s*\\(([^)]+)\\)`).exec(start.body)?.[1];
+    const transparentPen = transparentExpression === undefined
+      ? undefined
+      : expressionNumber(transparentExpression, values);
     plans.push({
-      member: match[1]!,
-      tileWidth: expressionNumber(args[3]),
-      tileHeight: expressionNumber(args[4]),
-      columns: expressionNumber(args[5]),
-      rows: expressionNumber(args[6]),
+      member,
+      tileWidth: expressionNumber(args[3], values),
+      tileHeight: expressionNumber(args[4], values),
+      columns: expressionNumber(args[5], values),
+      rows: expressionNumber(args[6], values),
       mapper,
       tileInfo,
+      ...(scrollColumns > 0 ? { scrollColumns } : {}),
+      ...(scrollRows > 0 ? { scrollRows } : {}),
+      ...(transparentPen !== undefined && transparentPen >= 0 ? { transparentPen } : {}),
       source: sourceRef(start),
     });
     createRe.lastIndex = close + 1;
@@ -209,19 +261,26 @@ function compileTilemaps(start: MameFunction): GeneratedVideoPlan['tilemaps'] {
 
 function compilePalette(
   graph: KnowledgeGraph,
-  machineId: string,
+  machineIds: Set<string>,
   ast: MameAstIndex,
+  constants: Record<string, number> = {},
 ): GeneratedPromPalettePlan | undefined {
   const deviceIds = new Set(graph.edges
-    .filter(edge => edge.from === machineId && edge.rel === 'HAS_DEVICE')
+    .filter(edge => machineIds.has(edge.from) && edge.rel === 'HAS_DEVICE')
     .map(edge => edge.to));
   const palette = graph.nodes.find(node =>
     deviceIds.has(node.id) && node.label === 'Device' && node.props.type === 'PALETTE');
   const raw = ((palette?.props.config as string[] | undefined) ?? []).join('\n');
   const callback = /FUNC\(\s*(\w+)::(\w+)\s*\)/.exec(raw);
-  if (!callback) return undefined;
+  if (!callback) {
+    if (process.env.MAMEKIT_DEBUG_VIDEO === '1') console.error('video palette: callback missing', raw);
+    return undefined;
+  }
   const fn = ast.findFunctionInHierarchy(callback[1]!, callback[2]!);
-  if (!fn) return undefined;
+  if (!fn) {
+    if (process.env.MAMEKIT_DEBUG_VIDEO === '1') console.error('video palette: source function missing', callback[0]);
+    return undefined;
+  }
   const body = fn.body;
   const region = /memregion\(\s*"([^"]+)"\s*\)/.exec(body)?.[1];
   const weightsCall = findCallArguments(body, 'compute_resistor_weights');
@@ -229,19 +288,23 @@ function compilePalette(
   const channels = weightsCall
     ? compileResistorChannels(body, weightsCall)
     : compileFixedWeightChannels(body);
-  if (channels.length !== 3) return undefined;
+  if (channels.length !== 3) {
+    if (process.env.MAMEKIT_DEBUG_VIDEO === '1') console.error('video palette: channels', channels.length);
+    return undefined;
+  }
   const loops = numericForLoops(body);
   const paletteLoop = loops.find(loop =>
     loop.body.includes('set_indirect_color') ||
+    loop.body.includes('set_pen_color') ||
     /\bpalette_val\s*\[\s*i\s*\]\s*=\s*rgb_t/.test(loop.body));
   const lookupLoops = loops.filter(loop =>
     loop.body.includes('set_pen_indirect') || loop.body.includes('set_pen_color'));
   const lookupOffset = expressionNumber(/color_prom\s*\+=\s*([^;]+)/.exec(body)?.[1]);
-  const lookupMask = expressionNumber(/color_prom[^;]*?&\s*(0x[\da-f]+|\d+)/i.exec(
+  let lookupMask = expressionNumber(/color_prom[^;]*?&\s*(0x[\da-f]+|\d+)/i.exec(
     lookupLoops.map(loop => loop.body).join('\n'),
   )?.[1]);
   let postIncrementOffset = lookupOffset;
-  const banks = lookupLoops.flatMap(loop => {
+  const banks: GeneratedPromPalettePlan['banks'] = lookupLoops.flatMap(loop => {
     const method = loop.body.includes('set_pen_indirect')
       ? 'palette.set_pen_indirect'
       : 'palette.set_pen_color';
@@ -266,17 +329,44 @@ function compilePalette(
       lookupCount: Math.max(0, loop.end - loop.start),
     }];
   });
-  if (!paletteLoop || !banks.length || !lookupMask) return undefined;
+  const palettePenCall = paletteLoop?.body.includes('set_pen_color')
+    ? findCallArguments(paletteLoop.body, 'palette.set_pen_color')
+    : undefined;
+  const direct = Boolean(
+    palettePenCall && splitMameArgs(palettePenCall)[1]?.includes('rgb_t('),
+  );
+  if (direct) {
+    const regionNode = graph.nodes.find(node =>
+      node.label === 'RomRegion' && node.props.tag === region);
+    const count = Number(regionNode?.props.size ?? 0);
+    if (!count) return undefined;
+    lookupMask = 0xff;
+    banks.splice(0, banks.length, {
+      penOffset: 0,
+      colorOr: 0,
+      lookupOffset: 0,
+      lookupCount: count,
+      direct: true,
+    });
+  }
+  if (!paletteLoop || !banks.length || !lookupMask) {
+    if (process.env.MAMEKIT_DEBUG_VIDEO === '1') console.error('video palette: output', {
+      paletteLoop: Boolean(paletteLoop), banks: banks.length, lookupMask, direct,
+    });
+    return undefined;
+  }
   const args = weightsCall ? splitMameArgs(weightsCall) : [];
   return {
     region,
-    colorCount: Math.max(0, paletteLoop.end - paletteLoop.start),
-    min: weightsCall ? expressionNumber(args[0]) : 0,
-    max: weightsCall ? expressionNumber(args[1]) : 255,
+    colorCount: direct
+      ? Number(graph.nodes.find(node => node.label === 'RomRegion' && node.props.tag === region)?.props.size ?? 0)
+      : Math.max(0, paletteLoop.end - paletteLoop.start),
+    min: weightsCall ? expressionNumber(args[0], constants) : 0,
+    max: weightsCall ? expressionNumber(args[1], constants) : 255,
     scaler: weightsCall ? Number(args[2]) || -1 : 1,
     channels,
     lookupOffset,
-    lookupCount: banks[0]!.lookupCount,
+    lookupCount: banks[0]!.lookupCount ?? 0,
     lookupMask,
     banks,
     transparentIndirect: 0,
@@ -372,7 +462,11 @@ function compileResistorChannels(
   return channels;
 }
 
-function addHandler(handlers: GeneratedHandler[], fn: MameFunction): void {
+function addHandler(
+  handlers: GeneratedHandler[],
+  fn: MameFunction,
+  constants: Record<string, number> = {},
+): void {
   if (handlers.some(handler => handler.ownerClass === fn.className && handler.method === fn.name)) {
     return;
   }
@@ -383,8 +477,200 @@ function addHandler(handlers: GeneratedHandler[], fn: MameFunction): void {
     parameters: fn.parameters.trim(),
     body: fn.body.trim(),
     program: compileMameHandler(normalizeMameExecutionSource(fn.body)),
+    constants: Object.fromEntries(
+      Object.entries(constants).filter(([name]) => new RegExp(`\\b${name}\\b`).test(fn.body)),
+    ),
     source: sourceRef(fn),
   });
+}
+
+function addHandlerClosure(
+  handlers: GeneratedHandler[],
+  ast: MameAstIndex,
+  roots: string[],
+  constants: Record<string, number>,
+): void {
+  const queue = [...roots];
+  const seen = new Set<string>();
+  while (queue.length) {
+    const key = queue.shift()!;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const [ownerClass, method] = splitHandlerKey(key);
+    const fn = ast.findFunctionInHierarchy(ownerClass, method);
+    if (!fn) continue;
+    addHandler(handlers, fn, constants);
+    queue.push(...calledSourceMethods(fn.body).map(name => `${fn.className}.${name}`));
+  }
+}
+
+function machineConfigClosure(graph: KnowledgeGraph, machineId: string): Set<string> {
+  const result = new Set<string>();
+  const queue = [machineId];
+  while (queue.length) {
+    const id = queue.shift()!;
+    if (result.has(id)) continue;
+    result.add(id);
+    queue.push(...graph.edges
+      .filter(edge => edge.from === id && edge.rel === 'CALLS')
+      .map(edge => edge.to));
+  }
+  return result;
+}
+
+function sourceNumericConstants(source: string): Record<string, number> {
+  const expressions = new Map<string, string>();
+  for (const match of source.matchAll(/^\s*#define\s+(\w+)\s+([^/\r\n]+)/gm)) {
+    if (!match[2]!.includes('(') || /^\s*\(+[\dA-Za-z_]/.test(match[2]!)) {
+      expressions.set(match[1]!, match[2]!.trim());
+    }
+  }
+  for (const match of source.matchAll(
+    /\b(?:static\s+)?constexpr\s+(?:\w+\s+)+(\w+)\s*(?:\([^)]*\))?\s*=\s*([^;]+);/g,
+  )) {
+    expressions.set(match[1]!, match[2]!.trim());
+  }
+  const values: Record<string, number> = {};
+  for (let pass = 0; pass < expressions.size + 1; pass++) {
+    let changed = false;
+    for (const [name, expression] of expressions) {
+      if (values[name] !== undefined) continue;
+      const normalized = substituteNumbers(expression, values)
+        .replace(/([\d.]+)_MHz_XTAL/g, '($1*1000000)')
+        .replace(/([\d.]+)_kHz_XTAL/g, '($1*1000)')
+        .replace(/\(\s*(\d+)\s*<<\s*(\d+)\s*\)/g, (_match, value, shift) =>
+          String(Number(value) * 2 ** Number(shift)))
+        .replace(/\.dvalue\(\)/g, '');
+      const value = evalExpr(normalized);
+      if (value == null || !Number.isFinite(value)) continue;
+      values[name] = value;
+      changed = true;
+    }
+    if (!changed) break;
+  }
+  return values;
+}
+
+function sourceMemberDefaults(
+  source: string,
+  constants: Record<string, number>,
+): Record<string, number> {
+  const defaults: Record<string, number> = {};
+  const mameConstants = {
+    INPUT_LINE_NMI: -1,
+    INPUT_LINE_RESET: -2,
+    INPUT_LINE_IRQ0: 0,
+  };
+  for (const match of source.matchAll(
+    /\b(?:bool|int|u?int(?:8|16|32)_t|u8|u16|u32)\s+(m_\w+)\s*=\s*([^;]+);/g,
+  )) {
+    const expression = substituteNumbers(match[2]!, {
+      ...mameConstants,
+      ...constants,
+      ...defaults,
+    })
+      .replace(/\bfalse\b/g, '0')
+      .replace(/\btrue\b/g, '1');
+    const value = evalExpr(expression);
+    if (value != null && Number.isFinite(value)) defaults[match[1]!] = value;
+  }
+  return defaults;
+}
+
+function substituteNumbers(source: string, values: Record<string, number>): string {
+  return source.replace(/\b[A-Za-z_]\w*\b/g, token =>
+    values[token] === undefined ? token : `(${values[token]})`);
+}
+
+function compileInitDelegates(
+  ast: MameAstIndex,
+  ownerClass: string,
+  initName: string,
+): Record<string, string> {
+  const init = initName && ast.findFunctionInHierarchy(ownerClass, initName);
+  if (!init) return {};
+  for (const call of calledSourceMethods(init.body)) {
+    const helper = ast.findFunctionInHierarchy(ownerClass, call);
+    const rawArgs = findCallArguments(init.body, call);
+    if (!helper || rawArgs === undefined) continue;
+    const args = splitMameArgs(rawArgs);
+    const parameters = helper.parameters.split(',').map(parameter =>
+      /(\w+)\s*$/.exec(parameter.trim())?.[1] ?? '');
+    const byParameter = Object.fromEntries(parameters.map((name, index) => [name, args[index] ?? '']));
+    const delegates: Record<string, string> = {};
+    const assignment = /\b(m_\w+)\s*=\s*\w+_delegate\(\s*(\w+)\s*\?\s*\2\s*:\s*&([A-Za-z_]\w*)::(\w+)/g;
+    for (const match of helper.body.matchAll(assignment)) {
+      const selected = /&([A-Za-z_]\w*)::(\w+)/.exec(byParameter[match[2]!] ?? '');
+      delegates[match[1]!] = selected
+        ? `${selected[1]}.${selected[2]}`
+        : `${match[3]}.${match[4]}`;
+    }
+    if (Object.keys(delegates).length) return delegates;
+  }
+  return {};
+}
+
+function compileVideoColorTables(
+  source: string,
+  constants: Record<string, number>,
+): Record<string, number[]> {
+  const tables: Record<string, number[]> = {};
+  if (source.includes('m_star_color[i]') && constants.RGB_MAXIMUM) {
+    const maximum = constants.RGB_MAXIMUM;
+    const min = Math.trunc(maximum * 130 / 150);
+    const mid = Math.trunc(maximum * 130 / 100);
+    const max = Math.trunc(maximum * 130 / 60);
+    const map = [0, min, min + Math.trunc((255 - min) * (mid - min) / (max - min)), 255];
+    tables.m_star_color = Array.from({ length: 64 }, (_, index) => packRgb(
+      map[(((index >> 4) & 1) << 1) | ((index >> 5) & 1)]!,
+      map[(((index >> 2) & 1) << 1) | ((index >> 3) & 1)]!,
+      map[((index & 1) << 1) | ((index >> 1) & 1)]!,
+    ));
+  }
+  if (source.includes('m_bullet_color[7]') && source.includes('rgb_t(0xff,0xff,0x00)')) {
+    tables.m_bullet_color = [
+      ...Array.from({ length: 7 }, () => packRgb(255, 255, 255)),
+      packRgb(255, 255, 0),
+    ];
+  }
+  return tables;
+}
+
+function compileVideoLfsr(
+  ast: MameAstIndex,
+  ownerClass: string,
+  constants: Record<string, number>,
+): GeneratedVideoPlan['lfsrTable'] | undefined {
+  const fn = ast.findFunctionInHierarchy(ownerClass, 'stars_init');
+  if (!fn) return undefined;
+  const enabled = /\(shiftreg\s*&\s*(0x[\da-f]+|\d+)\)\s*==\s*(0x[\da-f]+|\d+)/i.exec(fn.body);
+  const color = /~shiftreg\s*&\s*(0x[\da-f]+|\d+)\)\s*>>\s*(\d+)/i.exec(fn.body);
+  const feedback = /shiftreg\s*>>\s*(\d+)\)\s*\^\s*~shiftreg[\s\S]*?<<\s*(\d+)/.exec(fn.body);
+  const period = constants.STAR_RNG_PERIOD;
+  if (!enabled || !color || !feedback || !period) return undefined;
+  const row = ast.findFunctionInHierarchy(ownerClass, 'stars_draw_row');
+  const colorMember = row && /m_star_color\s*\[/.exec(row.body)?.[0]
+    ? /\b(m_\w+)\s*\[\s*star\s*&/.exec(row.body)?.[1]
+    : undefined;
+  const scaleMember = row && /bitmap\.pix\s*\(\s*y\s*,\s*(m_\w+)\s*\*\s*x/.exec(row.body)?.[1];
+  return {
+    member: 'm_stars',
+    period,
+    enabledMask: Number(enabled[1]),
+    enabledValue: Number(enabled[2]),
+    colorMask: Number(color[1]),
+    colorShift: Number(color[2]),
+    feedbackTap: Number(feedback[1]),
+    feedbackInvertTap: 0,
+    feedbackWidth: Number(feedback[2]) + 1,
+    ...(row && colorMember && scaleMember
+      ? { rowRenderer: { method: row.name, colorMember, scaleMember } }
+      : {}),
+  };
+}
+
+function packRgb(red: number, green: number, blue: number): number {
+  return (0xff000000 | (blue << 16) | (green << 8) | red) >>> 0;
 }
 
 function initialState(body: string): Record<string, number> {
@@ -431,9 +717,12 @@ function matchingPair(source: string, open: number, left: string, right: string)
   return -1;
 }
 
-function expressionNumber(value: string | undefined): number {
+function expressionNumber(
+  value: string | undefined,
+  constants: Record<string, number> = {},
+): number {
   if (!value) return 0;
-  return evalExpr(value.trim()) ?? 0;
+  return evalExpr(substituteNumbers(value.trim(), constants)) ?? 0;
 }
 
 function expressionAt(source: string, index: number): number {

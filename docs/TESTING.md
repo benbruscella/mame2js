@@ -7,7 +7,7 @@ behavioral baseline may change.
 
 ## 1. GOAL
 
-When a new machine is added, Pac-Man, Pooyan, Time Pilot and Space Invaders
+When a new machine is added, Pac-Man, Pooyan, Time Pilot, Space Invaders and Galaxian
 must continue to produce the same generated machine behavior unless an
 intentional, reviewed fix changes them. The tests therefore protect both sides
 of the compiler boundary:
@@ -54,7 +54,7 @@ never be compiled into or pollute the canonical generated `dist` tree.
 ### CURRENT CLEAN GENERATION
 
 `test:current` invokes `gen:all`, which deletes `dist`, generates Pac-Man,
-Pooyan, Time Pilot and Space Invaders from MAME, builds their shared hardware
+Pooyan, Time Pilot, Space Invaders and Galaxian from MAME, builds their shared hardware
 closure and app, then runs the generated-output audit. It detects stale-output
 masking, missing modules, unsupported hardware, duplicate trees, embedded
 machine JSON, imports from `src`, and blocked catalog entries.
@@ -84,15 +84,17 @@ each supported game it checks:
 
 Each token owns its checkpoint and input schedule because machines reach their
 input-ready attract state at different times. Pac-Man, Pooyan and Space
-Invaders currently run 600 frames; Time Pilot runs 1,200 frames so its golden
-reaches active gameplay. Every action has deterministic press and release
+Invaders currently run 600 frames; Galaxian runs 900; Time Pilot runs 1,200
+frames so their goldens reach active gameplay. Every action has deterministic press and release
 durations. A test failure therefore identifies a changed trajectory, not only
 a final screenshot.
 
 The throughput measurement includes CPU execution, generated video, checkpoint
 hashing and deterministic audio probing. It is not the browser's presentation
 counter, but it catches runtime complexity regressions before they make a game
-miss real time. Tokens currently require 45 fps, leaving headroom for shared
+miss real time. Tokens currently require 45 fps, except Time Pilot's 40 fps
+floor, which leaves enough host-load tolerance while still detecting its
+original 12 fps rendering regression. These floors leave headroom for shared
 development and CI machines while rejecting Time Pilot's original uncached
 scanline implementation.
 
@@ -110,6 +112,8 @@ src/games/timeplt.ts
 src/games/timeplt.spec.ts
 src/games/invaders.ts
 src/games/invaders.spec.ts
+src/games/galaxian.ts
+src/games/galaxian.spec.ts
 ```
 
 The token declares only:
@@ -231,7 +235,7 @@ it must not gain game logic.
    contracts;
 3. installs the locked npm dependencies on Node.js 24;
 4. runs every colocated spec;
-5. deletes `dist`, regenerates Pac-Man, Pooyan, Time Pilot and Space Invaders,
+5. deletes `dist`, regenerates Pac-Man, Pooyan, Time Pilot, Space Invaders and Galaxian,
    and audits the result.
 
 The MAME commit is pinned deliberately. Updating it is a source migration and

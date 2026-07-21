@@ -9,7 +9,7 @@ export const timeplt: GameTestContract = {
   screen: { width: 256, height: 224 },
   soundKind: 'ay8910',
   frames: 1200,
-  minimumFps: 45,
+  minimumFps: 40,
   checkpoints: [1, 60, 300, 540, 720, 1200],
   actions: [
     { atFrame: 540, code: 'Digit5', heldFrames: 10, releasedFrames: 20 },

@@ -49,6 +49,13 @@ interface RuntimeReference {
   reference: string;
 }
 
+interface GeneratedPointer {
+  readonly generatedPointer: true;
+  readonly source?: unknown;
+  readonly offset: number;
+  readonly target?: GeneratedLValue;
+}
+
 interface ExecutionResult {
   control?: 'return' | 'break';
   value?: unknown;
@@ -79,6 +86,7 @@ const DEFAULT_CONSTANTS: Record<string, number> = {
   M6809_IRQ_LINE: 0,
   TILEMAP_FLIPX: 1,
   TILEMAP_FLIPY: 2,
+  TILEMAP_DRAW_OPAQUE: 0x80,
 };
 
 const CACHE_ONLY_METHODS = new Set([
@@ -508,8 +516,11 @@ function evaluate(expression: GeneratedExpression, context: ExecutionContext): u
     return constant ?? reference(expression.name);
   }
   if (expression.kind === 'unary') {
+    if (expression.operator === '&') return addressOf(expression.operand, context);
     const raw = evaluate(expression.operand, context);
-    if (expression.operator === '&' || expression.operator === '*') return raw;
+    if (expression.operator === '*') {
+      return isGeneratedPointer(raw) ? pointerValue(raw, 0) : raw;
+    }
     if (expression.operator === '!') return truthy(raw) ? 0 : 1;
     const value = toNumber(raw);
     if (expression.operator === '~') return ~value;
@@ -520,9 +531,10 @@ function evaluate(expression: GeneratedExpression, context: ExecutionContext): u
     return wrapValue(expression.valueType, evaluate(expression.operand, context));
   }
   if (expression.kind === 'assignment') {
+    const previous = expression.postfix ? evaluate(expression.target, context) : undefined;
     const value = evaluate(expression.value, context);
     assign(expression.target, expression.operator, value, context);
-    return evaluate(expression.target, context);
+    return expression.postfix ? previous : evaluate(expression.target, context);
   }
   if (expression.kind === 'binary') {
     const leftValue = evaluate(expression.left, context);
@@ -533,6 +545,15 @@ function evaluate(expression: GeneratedExpression, context: ExecutionContext): u
       return truthy(leftValue) || truthy(evaluate(expression.right, context)) ? 1 : 0;
     }
     const rightValue = evaluate(expression.right, context);
+    if (expression.operator === '+' && isGeneratedPointer(leftValue)) {
+      return offsetPointer(leftValue, toNumber(rightValue));
+    }
+    if (expression.operator === '+' && isGeneratedPointer(rightValue)) {
+      return offsetPointer(rightValue, toNumber(leftValue));
+    }
+    if (expression.operator === '-' && isGeneratedPointer(leftValue)) {
+      return offsetPointer(leftValue, -toNumber(rightValue));
+    }
     if (expression.operator === '==' || expression.operator === '!=') {
       const equal = comparableValue(leftValue) === comparableValue(rightValue);
       return expression.operator === '==' ? Number(equal) : Number(!equal);
@@ -685,11 +706,22 @@ function assign(
     const index = toNumber(evaluate(target.index, context));
     const current = indexValue(object, index);
     const next = toNumber(assignmentValue(operator, current, value));
-    if (ArrayBuffer.isView(object)) {
+    if (isGeneratedPointer(object)) {
+      setPointerValue(object, index, next);
+    } else if (ArrayBuffer.isView(object)) {
       (object as Uint8Array)[index] = next;
     } else if (Array.isArray(object)) {
       object[index] = next;
     }
+    return;
+  }
+  if (target.kind === 'unary' && target.operator === '*') {
+    const pointer = evaluate(target.operand, context);
+    if (!isGeneratedPointer(pointer)) {
+      throw new Error('generated dereference assignment has no pointer');
+    }
+    const current = pointerValue(pointer, 0);
+    setPointerValue(pointer, 0, assignmentValue(operator, current, value));
     return;
   }
   if (target.kind === 'member') {
@@ -794,9 +826,50 @@ function modulo(value: number, divisor: number): number {
 }
 
 function indexValue(object: unknown, index: number): unknown {
+  if (isGeneratedPointer(object)) return pointerValue(object, index);
   if (ArrayBuffer.isView(object)) return (object as Uint8Array)[index] ?? 0;
   if (Array.isArray(object)) return object[index] ?? 0;
   return 0;
+}
+
+function addressOf(expression: GeneratedExpression, context: ExecutionContext): GeneratedPointer {
+  if (expression.kind === 'index') {
+    const source = evaluate(expression.object, context);
+    const offset = toNumber(evaluate(expression.index, context));
+    return isGeneratedPointer(source)
+      ? offsetPointer(source, offset)
+      : { generatedPointer: true, source, offset };
+  }
+  return {
+    generatedPointer: true,
+    target: lValue(expression, context),
+    offset: 0,
+  };
+}
+
+function offsetPointer(pointer: GeneratedPointer, offset: number): GeneratedPointer {
+  return { ...pointer, offset: pointer.offset + offset };
+}
+
+function pointerValue(pointer: GeneratedPointer, index: number): unknown {
+  const offset = pointer.offset + index;
+  if (pointer.target) return offset === 0 ? pointer.target.get() : 0;
+  return indexValue(pointer.source, offset);
+}
+
+function setPointerValue(pointer: GeneratedPointer, index: number, value: unknown): void {
+  const offset = pointer.offset + index;
+  if (pointer.target) {
+    if (offset === 0) pointer.target.set(value);
+    return;
+  }
+  if (isGeneratedPointer(pointer.source)) {
+    setPointerValue(pointer.source, offset, value);
+  } else if (ArrayBuffer.isView(pointer.source)) {
+    (pointer.source as Uint8Array)[offset] = toNumber(value);
+  } else if (Array.isArray(pointer.source)) {
+    pointer.source[offset] = value;
+  }
 }
 
 function toNumber(value: unknown): number {
@@ -825,6 +898,13 @@ function reference(name: string): RuntimeReference {
 
 function isReference(value: unknown): value is RuntimeReference {
   return Boolean(value && typeof value === 'object' && 'reference' in value);
+}
+
+function isGeneratedPointer(value: unknown): value is GeneratedPointer {
+  return Boolean(
+    value && typeof value === 'object' &&
+    (value as GeneratedPointer).generatedPointer === true,
+  );
 }
 
 function isLValue(value: unknown): value is GeneratedLValue {

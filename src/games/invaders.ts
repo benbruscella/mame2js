@@ -7,7 +7,7 @@ export const invaders: GameTestContract = {
   machine: { className: 'invaders_state', name: 'invaders' },
   romEnvironment: 'MAMEKIT_INVADERS_ROM',
   screen: { width: 260, height: 224 },
-  soundKind: 'invaders',
+  soundKind: 'discrete',
   frames: 600,
   minimumFps: 45,
   checkpoints: [1, 60, 180, 300, 420, 600],

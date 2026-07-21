@@ -56,6 +56,7 @@ export type GeneratedExpression =
       target: GeneratedExpression;
       operator: string;
       value: GeneratedExpression;
+      postfix?: boolean;
     }
   | { kind: 'conditional'; condition: GeneratedExpression; whenTrue: GeneratedExpression; whenFalse: GeneratedExpression }
   | { kind: 'member'; object: GeneratedExpression; property: string }
@@ -216,6 +217,8 @@ export interface GeneratedPromPalettePlan {
     colorOr: number;
     lookupOffset?: number;
     lookupCount?: number;
+    /** Direct palettes map pen N to computed color N without a lookup PROM. */
+    direct?: boolean;
   }[];
   transparentIndirect: number;
   source?: GeneratedSourceRef;
@@ -229,6 +232,9 @@ export interface GeneratedTilemapPlan {
   rows: number;
   mapper: string;
   tileInfo: string;
+  scrollColumns?: number;
+  scrollRows?: number;
+  transparentPen?: number;
   source?: GeneratedSourceRef;
 }
 
@@ -249,6 +255,29 @@ export interface GeneratedVideoPlan {
   palette?: GeneratedPromPalettePlan;
   tilemaps: GeneratedTilemapPlan[];
   initialState: Record<string, number>;
+  /** MAME may render at a hardware sub-pixel scale (Galaxian uses 3x horizontally). */
+  renderScale?: { x: number; y: number };
+  /** Driver-init delegate member -> selected MAME method. */
+  delegates?: Record<string, string>;
+  /** Small source-derived color arrays used by generated video handlers. */
+  colorTables?: Record<string, number[]>;
+  /** Source-derived LFSR table initialized once and consumed by generated handlers. */
+  lfsrTable?: {
+    member: string;
+    period: number;
+    enabledMask: number;
+    enabledValue: number;
+    colorMask: number;
+    colorShift: number;
+    feedbackTap: number;
+    feedbackInvertTap: number;
+    feedbackWidth: number;
+    rowRenderer?: {
+      method: string;
+      colorMember: string;
+      scaleMember: string;
+    };
+  };
   bitmap?: GeneratedBitmapPlan;
   source?: GeneratedSourceRef;
 }

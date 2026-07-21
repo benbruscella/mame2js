@@ -230,12 +230,16 @@ emits AudioWorklet source plus audio IR. Worklets live under
 `dist/runtime/core` when required.
 
 The current audio profiles include Namco WSG, AY8910 with generated RC routing,
-and MAME soundboards composed from `DISCRETE` plus `SN76477`. The latter emits
-port wiring, control nodes, topology classes, LFSR parameters, component
-values, mixer resistances and route gains from MAME. Norton op-amp stages are
-lowered to stable browser component models; MAMEKIT does not yet implement
-MAME's complete analog discrete solver. The generated IR records that boundary
-instead of hiding it in a checked-in game sound class.
+and MAME `DISCRETE` soundboards, including SN76477 and counter/LFSR topologies.
+Discrete plans emit port wiring, method roles, control nodes, LFSR parameters,
+component values, mixer resistances and route gains from MAME. Every such board
+uses the runtime capability `sound.kind = "discrete"`; `sound.worklet` selects
+the generated MAME-device artifact in `dist`. Runtime and QA code must never
+branch on a game or board-family name.
+
+Norton op-amp stages are lowered to stable browser component models; MAMEKIT
+does not yet implement MAME's complete analog discrete solver. The generated
+IR records that boundary instead of hiding it in a checked-in game sound class.
 
 ### DSL ARTIFACTS
 

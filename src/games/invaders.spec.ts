@@ -87,6 +87,8 @@ const audioDefinition = deviceDefinitionsFromSource(audioSource, audioText)
   .find(definition => definition.type === 'INVADERS_AUDIO');
 assert.ok(audioDefinition);
 const audio = compileDiscreteSn76477(mameSrc, audioDefinition);
+assert.equal(audio.processorName, 'discrete');
+assert.equal(audio.workletName, 'invaders-audio');
 assert.deepEqual(audio.ports, [
   { method: 'p1_w', offset: 0 },
   { method: 'p2_w', offset: 1 },

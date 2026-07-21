@@ -292,6 +292,12 @@ export async function generate(graph: KnowledgeGraph, opts: GenerateOptions): Pr
     ayChips.map(device => ({ id: device.id, tag: String(device.props.tag) })),
   );
   const ymChips = devices.filter(d => d.props.type === 'YM2203');
+  const discreteDevice = devices.some(device => device.props.type === 'DISCRETE')
+    ? devices.find(device => {
+        const type = String(device.props.type);
+        return type.endsWith('_AUDIO') || type.endsWith('_SOUND');
+      })
+    : undefined;
   // Per-family analog mix weights, hand-derived from each driver's discrete
   // resistor network — the one MAME layer the graph can't carry yet (the
   // nets are data tables inside DISCRETE_SOUND_START, not device wiring).
@@ -313,10 +319,12 @@ export async function generate(graph: KnowledgeGraph, opts: GenerateOptions): Pr
     ? { kind: 'nes', clock: cpus[0].clock }
     : devices.some(d => d.props.type === 'NAMCO_WSG' || d.props.type === 'NAMCO')
     ? { kind: 'wsg', clock: Number(byTag.get('namco')?.props.clock ?? 96000), waveRegion: 'namco' }
-    : devices.some(d => d.props.type === 'GALAXIAN_SOUND')
-      ? { kind: 'galaxian', clock: cpus[0].clock }
-      : devices.some(d => d.props.type === 'INVADERS_AUDIO')
-        ? { kind: 'invaders', clock: cpus[0].clock }
+    : discreteDevice
+      ? {
+          kind: 'discrete',
+          clock: cpus[0].clock,
+          worklet: String(discreteDevice.props.type).toLowerCase().replace(/_/g, '-'),
+        }
         : ymChips.length
           ? { kind: 'ym2203', clock: Number(ymChips[0].props.clock), chips: ymChips.length }
           : ayChips.length

@@ -169,4 +169,17 @@ executeGeneratedMachineProgram(
 assert.deepEqual(filterCalls[0]?.slice(0, 4), [0, 1000, 5100, 0]);
 assert.ok(Math.abs(filterCalls[0]![4]! - 267000e-12) < 1e-15);
 
-console.log('generated-handler.spec: 12 passed');
+const spriteRam = Uint8Array.from({ length: 32 }, (_, index) => index);
+const pointerSlice = compileMameHandler(`
+  auto spritebase = &m_spriteram[m_sprites_base];
+  auto base = &spritebase[4];
+  base[2] = 0xa5;
+  return *base + base[2];
+`);
+assert.deepEqual(pointerSlice.diagnostics, []);
+assert.equal(executeGeneratedHandler(pointerSlice, {
+  members: { m_spriteram: spriteRam, m_sprites_base: 8 },
+}), 12 + 0xa5);
+assert.equal(spriteRam[14], 0xa5);
+
+console.log('generated-handler.spec: 15 passed');

@@ -3,6 +3,7 @@ import type { GeneratedMachine } from './generated-machine.ts';
 import {
   createGeneratedTileInfoTarget,
   generatedTileMemoryIndex,
+  GeneratedMameVideoPrimitives,
   GeneratedVideoRenderer,
   type GeneratedVideoPrimitives,
 } from './generated-video.ts';
@@ -89,4 +90,25 @@ if (cachedTile.gfx !== 2 || cachedTile.code !== 3 || cachedTile.color !== 4 || c
 if (generatedTileMemoryIndex(1012) !== 1012) {
   throw new Error('custom mapper memory index was folded into the logical tile count');
 }
-console.log('generated-video.spec: 6 passed');
+const screenState: Record<string, unknown> = {};
+const generatedPrimitives = new GeneratedMameVideoPrimitives(
+  machine,
+  {},
+  screenState,
+  { calls: { 'm_screen.vpos': () => 37 } },
+);
+const generatedScreen = screenState.m_screen as {
+  __frame: number;
+  frame_number(): number;
+  vpos(): number;
+  update_partial(line: number): void;
+};
+if (generatedScreen.vpos() !== 37) {
+  throw new Error('generated screen shadowed the board scanline binding');
+}
+generatedScreen.update_partial(37);
+generatedPrimitives.vblank();
+if (generatedScreen.frame_number() !== 1) {
+  throw new Error('generated screen frame counter did not advance at vblank');
+}
+console.log('generated-video.spec: 8 passed');

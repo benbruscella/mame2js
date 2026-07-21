@@ -374,6 +374,10 @@ class IrBoard implements Board {
     }
     for (const key of usedHandlers(machine, 'read')) {
       if (registry.read[key]) continue;
+      if (key.startsWith('watchdog.')) {
+        registry.read[key] = () => 0xff;
+        continue;
+      }
       const custom = config.customs?.find(candidate => candidate.member === key.split('.').at(-1));
       if (custom) registry.read[key] = () => inputs.read(custom.port) & custom.mask;
     }
@@ -483,7 +487,7 @@ class IrBoard implements Board {
       const key = `${sound.deviceTag}.${method}`;
       registry.write[key] = (_address, offset, data) => {
         sinks.soundWrite(
-          sound.writeMethodOffsets?.[method] ?? offset,
+          (sound.writeMethodOffsets?.[method] ?? 0) + offset,
           data,
           this.soundFraction(),
         );
