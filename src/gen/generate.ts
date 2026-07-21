@@ -409,7 +409,7 @@ export async function generate(graph: KnowledgeGraph, opts: GenerateOptions): Pr
   const portSpecs: { tag: string; init: number }[] = [];
   const bindings: unknown[] = [];
   const dipDefaults: unknown[] = [];
-  const customs: { port: string; mask: number; member: string }[] = [];
+  const customs: { port: string; mask: number; member: string; handler?: string }[] = [];
   for (const port of ports) {
     const tag = port.tag;
     let init = 0;
@@ -432,11 +432,16 @@ export async function generate(graph: KnowledgeGraph, opts: GenerateOptions): Pr
         // IPT_CUSTOM bits are synthesized from other ports by a named driver
         // member (invaders reads CONTP1 into IN0/IN1/IN2 bits 4-6) — emit
         // the wiring fact for the board's member table
-        const customMember = mods
-          .map(m => m.startsWith('PORT_CUSTOM_MEMBER') ? /(\w+)\s*\)*$/.exec(m)?.[1] : undefined)
-          .find(Boolean);
-        if (type === 'IPT_CUSTOM' && customMember) {
-          customs.push({ port: tag, mask, member: customMember });
+        const custom = mods
+          .map(modifier => /PORT_CUSTOM_MEMBER\s*\(\s*FUNC\s*\(\s*(\w+)::(\w+)/.exec(modifier))
+          .find((match): match is RegExpExecArray => Boolean(match));
+        if (type === 'IPT_CUSTOM' && custom) {
+          customs.push({
+            port: tag,
+            mask,
+            member: custom[2]!,
+            handler: `${custom[1]}.${custom[2]}`,
+          });
           continue;
         }
         if (mods.includes('PORT_COCKTAIL')) continue;  // player-2 cocktail path: unbound

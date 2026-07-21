@@ -72,7 +72,7 @@ export interface Cpu {
   reset(): void;
   step(): number;
   run(cycles: number): number;
-  setIrqLine(active: boolean, dataBus?: number, hold?: boolean): void;
+  setIrqLine(active: boolean, dataBus?: number | (() => number), hold?: boolean): void;
   nmi(): void;
   get(name: string): number;
   set(name: string, value: number): void;
@@ -115,7 +115,7 @@ class IrCpu implements Cpu {
   private readonly opcodes: Map<string, CpuOpcode>;
   private readonly methods: Map<string, CpuMethod>;
   private readonly bindings: GeneratedHandlerBindings;
-  private irqData = 0xff;
+  private irqData: number | (() => number) = 0xff;
   private irqHold = false;
 
   constructor(definition: GeneratedCpuDefinition, bus: CpuBus) {
@@ -208,7 +208,7 @@ class IrCpu implements Cpu {
     return total;
   }
 
-  setIrqLine(active: boolean, dataBus = 0xff, hold = false): void {
+  setIrqLine(active: boolean, dataBus: number | (() => number) = 0xff, hold = false): void {
     if (active) this.irqData = dataBus;
     this.irqHold = active && hold;
     this.execute(this.definition.input, {
@@ -293,7 +293,8 @@ class IrCpu implements Cpu {
   }
 
   private acknowledgeIrq(): number {
-    const data = this.irqData;
+    const source = this.irqData;
+    const data = typeof source === 'function' ? source() : source;
     if (this.irqHold) {
       this.irqHold = false;
       this.setIrqLine(false);

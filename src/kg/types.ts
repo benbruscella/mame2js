@@ -43,7 +43,7 @@ export type RelType =
   | 'READS'           // AddressRange -> Handler
   | 'WRITES'          // AddressRange -> Handler
   | 'HAS_CALLBACK'    // Device/MachineConfig -> Callback
-  | 'CALLS_HANDLER'   // Callback -> Handler
+  | 'CALLS_HANDLER'   // Callback/PortField/Handler -> source handler closure
   | 'TARGETS_DEVICE'  // Callback -> Device
   | 'ON_DEVICE'       // Handler -> Device (handler lives on a device rather than the driver state)
   | 'HAS_REGION'      // RomSet -> RomRegion

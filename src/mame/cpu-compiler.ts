@@ -274,7 +274,9 @@ export function compileMameI8080(mameSrc: string): GeneratedCpuDefinition {
   );
   const start = compileMameHandler(normalize(startSource));
   const reset = compileMameHandler(normalize(resetMethod.body));
-  const input = compileMameHandler(normalize(inputMethod.body));
+  const input = compileMameHandler(
+    normalize(inputMethod.body).replace(/\birqline\b/g, 'inputnum'),
+  );
   const step = compileMameHandler(normalize(singleIterationSource(runMethod.body)));
   const constants = {
     ...extractDefineConstants(header),

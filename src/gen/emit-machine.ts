@@ -136,6 +136,19 @@ export function lowerGeneratedMachine(
         handler.ownerClass === screenCallback.targetClass &&
         handler.method === screenCallback.targetMethod)
     : undefined;
+  const inputMembers = new Map<string, string[]>();
+  for (const node of graph.nodes.filter(candidate => candidate.label === 'Handler')) {
+    for (const encoded of Array.isArray(node.props.inputMembers)
+      ? node.props.inputMembers.map(String)
+      : []) {
+      const separator = encoded.indexOf('=');
+      if (separator < 1) continue;
+      inputMembers.set(
+        encoded.slice(0, separator),
+        encoded.slice(separator + 1).split(',').filter(Boolean),
+      );
+    }
+  }
   const execution: GeneratedExecutionPlan = {
     cpus: board.cpus.map(cpu => {
       const interruptVectorWriters = inferInterruptVectorWriters(
@@ -156,6 +169,9 @@ export function lowerGeneratedMachine(
       ...(deviceByTag.get('screen')?.source ? { source: deviceByTag.get('screen')!.source } : {}),
     },
     ...(board.customs?.length ? { customs: board.customs } : {}),
+    ...(inputMembers.size ? {
+      inputMembers: [...inputMembers].map(([member, tags]) => ({ member, tags })),
+    } : {}),
     frameEvents: lowerFrameEvents(
       callbacks,
       board.screen.refresh,

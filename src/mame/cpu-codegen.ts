@@ -117,7 +117,7 @@ class Pair16 {
 
 class Generated${safeName(definition.type)} implements Cpu {
   private readonly bus: CpuBus;
-  private irqData = 0xff;
+  private irqData: number | (() => number) = 0xff;
   private irqHold = false;
 ${fields}
 ${aliases}
@@ -142,7 +142,7 @@ ${step}
     return total;
   }
 
-  setIrqLine(active: boolean, dataBus = 0xff, hold = false): void {
+  setIrqLine(active: boolean, dataBus: number | (() => number) = 0xff, hold = false): void {
     if (active) this.irqData = dataBus;
     this.irqHold = active && hold;
     this.generatedInput(0, active ? 1 : 0);
@@ -154,7 +154,8 @@ ${step}
   }
 
   private acknowledgeIrq(): number {
-    const data = this.irqData;
+    const source = this.irqData;
+    const data = typeof source === 'function' ? source() : source;
     if (this.irqHold) {
       this.irqHold = false;
       this.setIrqLine(false);

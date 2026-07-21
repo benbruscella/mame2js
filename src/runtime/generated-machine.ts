@@ -161,7 +161,8 @@ export interface GeneratedFrameEvent {
 export interface GeneratedExecutionPlan {
   cpus: GeneratedExecutionCpu[];
   screen: GeneratedScreen;
-  customs?: { port: string; mask: number; member: string }[];
+  customs?: { port: string; mask: number; member: string; handler?: string }[];
+  inputMembers?: { member: string; tags: string[] }[];
   frameEvents: GeneratedFrameEvent[];
   screenUpdate?: {
     handler: string;

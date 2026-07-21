@@ -411,7 +411,7 @@ function preparedMachineCalls(
   return prepared;
 }
 
-function executeGeneratedMachineHandler(
+export function executeGeneratedMachineHandler(
   machine: GeneratedMachine,
   handler: GeneratedHandler,
   bindings: GeneratedHandlerBindings,

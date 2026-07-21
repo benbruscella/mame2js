@@ -14,6 +14,7 @@ import {
   dispatchGeneratedCallback,
   dispatchGeneratedCallbacks,
   executeGeneratedCallbackHandler,
+  executeGeneratedMachineHandler,
   generatedHandlerRegistry,
   wireGeneratedDevice,
   type GeneratedHandlerBindings,
@@ -111,6 +112,10 @@ class IrBoard implements Board {
 
     const calls: NonNullable<GeneratedHandlerBindings['calls']> = {};
     this.bindings = { members: this.state, inputs, calls };
+    for (const input of machine.execution.inputMembers ?? []) {
+      const ports = input.tags.map(tag => ({ read: () => inputs.read(tag) }));
+      this.state[input.member] = ports.length === 1 ? ports[0] : ports;
+    }
     const screen = machine.devices?.find(device => device.type === 'SCREEN');
     for (const owner of [screen?.tag, screen?.member].filter(Boolean) as string[]) {
       calls[`${owner}.vpos`] = () => this.currentLine;
@@ -194,7 +199,7 @@ class IrBoard implements Board {
         }
         cpu.setIrqLine(
           state !== 0,
-          state !== 0 ? interruptVector() : 0xff,
+          state !== 0 ? interruptVector : 0xff,
           state === 2,
         );
       };
@@ -333,6 +338,35 @@ class IrBoard implements Board {
     for (const cpu of machine.execution.cpus) {
       Object.assign(registry.read, portHandlers(cpu.ranges ?? [], inputs));
       Object.assign(registry.read, portHandlers(cpu.io?.ranges ?? [], inputs));
+    }
+    const customsByPort = new Map<string, NonNullable<BoardConfig['customs']>>();
+    for (const custom of config.customs ?? []) {
+      const entries = customsByPort.get(custom.port) ?? [];
+      entries.push(custom);
+      customsByPort.set(custom.port, entries);
+    }
+    for (const [port, customs] of customsByPort) {
+      const key = `port.${port}`;
+      const base = registry.read[key] ?? (() => inputs.read(port));
+      registry.read[key] = (address, offset) => {
+        let value = base(address, offset);
+        for (const custom of customs) {
+          const handler = machine.handlers?.find(candidate =>
+            custom.handler
+              ? `${candidate.ownerClass}.${candidate.method}` === custom.handler
+              : candidate.method === custom.member);
+          if (!handler?.program || handler.program.diagnostics.length) continue;
+          const result = executeGeneratedMachineHandler(
+            machine,
+            handler,
+            this.bindings,
+            {},
+          ) ?? 0;
+          const shift = trailingZeroBits(custom.mask);
+          value = (value & ~custom.mask) | ((result << shift) & custom.mask);
+        }
+        return value & 0xff;
+      };
     }
     for (const key of usedHandlers(machine, 'write')) {
       if (registry.write[key]) continue;
@@ -506,6 +540,13 @@ class IrBoard implements Board {
     }
     return endpoints;
   }
+}
+
+function trailingZeroBits(value: number): number {
+  if (!value) return 0;
+  let count = 0;
+  while (((value >>> count) & 1) === 0) count++;
+  return count;
 }
 
 export function bindGeneratedShareState(

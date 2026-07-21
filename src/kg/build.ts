@@ -97,6 +97,8 @@ export function buildGraph(mameSrc: string, driverFile: string): KnowledgeGraph 
     }
   }
   const consts = parseDefines(combined, extConsts);
+  const textMacros = parseTextMacros(combined);
+  const ioportMembers = parseIoportMembers(combined, textMacros.strings);
   emitSourceTimerCallbacks(g, ast, consts, definedIn);
   const memberTags = parseMemberTags(combined);
   const deviceTypes = parseDeviceTypeDecls(combined);
@@ -341,9 +343,14 @@ export function buildGraph(mameSrc: string, driverFile: string): KnowledgeGraph 
   }
 
   // --- inputs ---
-  for (const inp of parseInputPorts(combined, parseTextMacros(combined))) {
+  for (const inp of parseInputPorts(combined, textMacros)) {
     const source = ast.findMacro('INPUT_PORTS_START', 0, inp.name)?.span;
-    emitInputPorts(g, inp, source ? `file:${source.file}` : fileId, source);
+    emitInputPorts(g, inp, source ? `file:${source.file}` : fileId, source, {
+      ast,
+      constants: consts,
+      ioportMembers,
+      stringConstants: textMacros.strings,
+    });
   }
 
   // --- console control-port inputs (live on the default slot device, not the
@@ -525,6 +532,12 @@ function emitInputPorts(
   inp: InputPortsDef,
   fileId: string,
   source?: SourceSpan,
+  context?: {
+    ast: MameAstIndex;
+    constants: Record<string, number>;
+    ioportMembers: Record<string, string[]>;
+    stringConstants: Record<string, string>;
+  },
 ): void {
   const inpId = `inputs:${inp.name}`;
   g.node('InputPorts', inpId, { name: inp.name, ...spanProps(source) });
@@ -548,7 +561,83 @@ function emitInputPorts(
       }
       g.node('PortField', fid, props);
       g.edge(portId, fid, 'HAS_FIELD');
+      const custom = f.modifiers
+        ?.map(modifier => /PORT_CUSTOM_MEMBER\s*\(\s*FUNC\s*\(\s*(\w+)::(\w+)\s*\)/.exec(modifier))
+        .find((match): match is RegExpExecArray => Boolean(match));
+      if (custom && context) {
+        const handlerId = emitSourceHandlerClosure(
+          g,
+          context.ast,
+          custom[1]!,
+          custom[2]!,
+          context.constants,
+          source,
+        );
+        g.edge(fid, handlerId, 'CALLS_HANDLER');
+        annotateInputHandlerClosure(g, handlerId, context.ioportMembers, context.stringConstants);
+      }
     });
+  }
+}
+
+function parseIoportMembers(
+  source: string,
+  stringConstants: Record<string, string>,
+): Record<string, string[]> {
+  const sizes = new Map<string, number>();
+  for (const match of source.matchAll(
+    /\b(?:required|optional)_ioport(?:_array\s*<\s*(\d+)\s*>)?\s+(m_\w+)\s*;/g,
+  )) {
+    sizes.set(match[2]!, Number(match[1] ?? 1));
+  }
+
+  const members: Record<string, string[]> = {};
+  for (const [member, size] of sizes) {
+    const initializer = new RegExp(
+      `\\b${member}\\s*\\(\\s*\\*this\\s*,\\s*("[^"]+"|\\w+)` +
+      `(?:\\s*,\\s*(\\d+)(?:U|UL|ULL)?)?\\s*\\)`,
+    ).exec(source);
+    if (!initializer) continue;
+    const expression = initializer[1]!;
+    const pattern = expression.startsWith('"')
+      ? expression.slice(1, -1)
+      : stringConstants[expression];
+    if (!pattern) continue;
+    const start = Number(initializer[2] ?? 0);
+    members[member] = pattern.includes('%u')
+      ? Array.from({ length: size }, (_, index) => pattern.replace('%u', String(start + index)))
+      : [pattern];
+  }
+  return members;
+}
+
+function annotateInputHandlerClosure(
+  g: GraphBuilder,
+  root: string,
+  ioportMembers: Record<string, string[]>,
+  stringConstants: Record<string, string>,
+): void {
+  const pending = [root];
+  const seen = new Set<string>();
+  while (pending.length) {
+    const id = pending.pop()!;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    const handler = g.nodes.get(id);
+    if (handler?.label === 'Handler' && typeof handler.props.sourceBody === 'string') {
+      let body = handler.props.sourceBody;
+      for (const [name, value] of Object.entries(stringConstants)) {
+        body = body.replace(new RegExp(`\\b${name}\\b`, 'g'), JSON.stringify(value));
+      }
+      handler.props.sourceBody = body;
+      const inputs = Object.entries(ioportMembers)
+        .filter(([member]) => new RegExp(`\\b${member}\\b`).test(body))
+        .map(([member, tags]) => `${member}=${tags.join(',')}`);
+      if (inputs.length) handler.props.inputMembers = inputs;
+    }
+    for (const edge of g.edges) {
+      if (edge.from === id && edge.rel === 'CALLS_HANDLER') pending.push(edge.to);
+    }
   }
 }
 
