@@ -81,8 +81,8 @@ export const galaga: GameTestContract = {
       writes: 402787,
       nonzeroWrites: 100563,
       writeHash: 'b7c4c69c',
-      pcmHash: '4086878a',
-      rms: 0.104602,
+      pcmHash: '03bbf644',
+      rms: 0.091483,
     },
   },
 };

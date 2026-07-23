@@ -39,10 +39,10 @@ interface AyFrameRenderer {
 
 interface WsgCore {
   readonly sampleRate: number;
-  soundEnable(state: number): void;
-  write(offset: number, data: number): void;
-  writeDiscrete(offset: number, data: number): void;
-  render(out: Float32Array): void;
+}
+
+interface WsgFrameRenderer {
+  render(writes: readonly SoundWrite[]): Float32Array;
 }
 
 interface DiscreteAudioCore {
@@ -299,6 +299,10 @@ async function createAudioProbe(
         clock: number,
         auxiliary?: ShellConfig['sound']['auxiliary'],
       ) => WsgCore;
+      GeneratedNamcoWsgFrameRenderer: new (
+        core: WsgCore,
+        refresh: number,
+      ) => WsgFrameRenderer;
     };
     const waveRom = regions[config.sound.waveRegion ?? 'namco'];
     assert.ok(waveRom, `${config.game}: WSG wave ROM is missing`);
@@ -308,19 +312,13 @@ async function createAudioProbe(
       config.sound.auxiliary,
     );
     const chunks: Float32Array[] = [];
-    let sampleCarry = 0;
+    const renderer = new generated.GeneratedNamcoWsgFrameRenderer(
+      core,
+      config.board.screen.refresh,
+    );
     return {
       render(writes, capture) {
-        for (const write of writes) {
-          if (write.method === 'discrete') core.writeDiscrete(write.offset, write.data);
-          else if (write.offset < 0) core.soundEnable(write.data);
-          else core.write(write.offset, write.data);
-        }
-        sampleCarry += core.sampleRate / config.board.screen.refresh;
-        const count = Math.floor(sampleCarry);
-        sampleCarry -= count;
-        const samples = new Float32Array(count);
-        core.render(samples);
+        const samples = renderer.render(writes);
         if (capture) chunks.push(samples);
       },
       finish(writes) {

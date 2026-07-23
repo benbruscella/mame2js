@@ -1890,6 +1890,13 @@ interface BiquadState {
   y2: number;
 }
 
+export interface GeneratedNamcoWsgWrite {
+  offset: number;
+  data: number;
+  frac?: number;
+  method?: string;
+}
+
 class GeneratedDacFilterCore {
   private readonly values = new Float64Array(3);
   private readonly filters: BiquadState[];
@@ -2009,6 +2016,53 @@ export class GeneratedNamcoWsgCore {
     }
     this.discrete?.renderInto(out);
   }
+
+  renderFrame(out: Float32Array, writes: readonly GeneratedNamcoWsgWrite[]): void {
+    const discreteWrites: GeneratedNamcoWsgWrite[] = [];
+    for (const write of writes) {
+      if (write.method === 'discrete') discreteWrites.push(write);
+      else if (write.offset < 0) this.soundEnable(write.data);
+      else this.write(write.offset, write.data);
+    }
+
+    let rendered = 0;
+    let index = 0;
+    while (index < discreteWrites.length) {
+      const frac = Math.max(0, Math.min(1, discreteWrites[index]!.frac ?? 0));
+      const position = Math.max(rendered, Math.min(out.length, Math.ceil(frac * out.length)));
+      if (position > rendered) this.render(out.subarray(rendered, position));
+      while (index < discreteWrites.length) {
+        const write = discreteWrites[index]!;
+        const writeFrac = Math.max(0, Math.min(1, write.frac ?? 0));
+        const writePosition = Math.max(rendered, Math.min(out.length, Math.ceil(writeFrac * out.length)));
+        if (writePosition !== position) break;
+        this.writeDiscrete(write.offset, write.data);
+        index++;
+      }
+      rendered = position;
+    }
+    if (rendered < out.length) this.render(out.subarray(rendered));
+  }
+}
+
+export class GeneratedNamcoWsgFrameRenderer {
+  private carry = 0;
+  private readonly core: GeneratedNamcoWsgCore;
+  private readonly refresh: number;
+
+  constructor(core: GeneratedNamcoWsgCore, refresh: number) {
+    this.core = core;
+    this.refresh = refresh;
+  }
+
+  render(writes: readonly GeneratedNamcoWsgWrite[]): Float32Array {
+    this.carry += this.core.sampleRate / this.refresh;
+    const count = Math.floor(this.carry);
+    this.carry -= count;
+    const output = new Float32Array(count);
+    this.core.renderFrame(output, writes);
+    return output;
+  }
 }
 
 declare const sampleRate: number;
@@ -2021,16 +2075,16 @@ declare function registerProcessor(
   processorCtor: new () => AudioWorkletProcessor,
 ): void;
 
-const CHUNK = 256;
-
 class GeneratedNamcoWsgProcessor extends AudioWorkletProcessor {
   private core: GeneratedNamcoWsgCore | null = null;
+  private renderer: GeneratedNamcoWsgFrameRenderer | null = null;
   private step = 1;
   private fraction = 0;
   private sample0 = 0;
   private sample1 = 0;
-  private readonly native = new Float32Array(CHUNK);
-  private nativePosition = CHUNK;
+  private readonly frames: Float32Array[] = [];
+  private current: Float32Array | null = null;
+  private nativePosition = 0;
 
   constructor() {
     super();
@@ -2039,11 +2093,12 @@ class GeneratedNamcoWsgProcessor extends AudioWorkletProcessor {
         type: string;
         waveRom?: Uint8Array;
         clock?: number;
+        refresh?: number;
         offset?: number;
         data?: number;
         method?: string;
         auxiliary?: DacFilterPlan;
-        writes?: { offset: number; data: number; method?: string }[];
+        writes?: GeneratedNamcoWsgWrite[];
       };
       if (message.type === 'init') {
         const clock = message.clock ?? 96_000;
@@ -2052,14 +2107,18 @@ class GeneratedNamcoWsgProcessor extends AudioWorkletProcessor {
           clock,
           message.auxiliary,
         );
+        this.renderer = new GeneratedNamcoWsgFrameRenderer(
+          this.core,
+          message.refresh ?? 60,
+        );
         this.step = this.core.sampleRate / sampleRate;
-        this.nativePosition = CHUNK;
+        this.current = null;
+        this.nativePosition = 0;
       } else if (message.type === 'write') {
         this.apply(message.offset ?? 0, message.data ?? 0, message.method);
-      } else if (message.type === 'batch') {
-        for (const write of message.writes ?? []) {
-          this.apply(write.offset, write.data, write.method);
-        }
+      } else if (message.type === 'batch' && this.renderer) {
+        this.frames.push(this.renderer.render(message.writes ?? []));
+        while (this.frames.length > 8) this.frames.shift();
       }
     };
   }
@@ -2071,11 +2130,12 @@ class GeneratedNamcoWsgProcessor extends AudioWorkletProcessor {
   }
 
   private nextNative(): number {
-    if (this.nativePosition >= CHUNK) {
-      this.core!.render(this.native);
+    while (!this.current || this.nativePosition >= this.current.length) {
+      this.current = this.frames.shift() ?? null;
       this.nativePosition = 0;
+      if (!this.current) return 0;
     }
-    return this.native[this.nativePosition++]!;
+    return this.current[this.nativePosition++]!;
   }
 
   process(_inputs: Float32Array[][], outputs: Float32Array[][]): boolean {

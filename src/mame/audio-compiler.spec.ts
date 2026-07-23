@@ -38,9 +38,21 @@ const javaScript = ts.transpileModule(source, {
 }).outputText;
 
 const globals = globalThis as Record<string, unknown>;
-globals.AudioWorkletProcessor = class {};
+interface WorkletHarness {
+  port: { onmessage: ((event: { data: unknown }) => void) | null };
+  process(inputs: Float32Array[][], outputs: Float32Array[][]): boolean;
+}
+let registeredWsgProcessor: (new () => WorkletHarness) | undefined;
+globals.AudioWorkletProcessor = class {
+  readonly port = { onmessage: null };
+};
 globals.sampleRate = 48_000;
-globals.registerProcessor = () => {};
+globals.registerProcessor = (
+  name: string,
+  processor: new () => WorkletHarness,
+) => {
+  if (name === 'wsg') registeredWsgProcessor = processor;
+};
 const module = await import(
   `data:text/javascript;base64,${Buffer.from(javaScript).toString('base64')}`
 ) as {
@@ -52,6 +64,24 @@ const module = await import(
     sampleRate: number;
     writeDiscrete(channel: number, data: number): void;
     render(output: Float32Array): void;
+    renderFrame(
+      output: Float32Array,
+      writes: { offset: number; data: number; frac?: number; method?: string }[],
+    ): void;
+  };
+  GeneratedNamcoWsgFrameRenderer: new (
+    core: {
+      sampleRate: number;
+      renderFrame(
+        output: Float32Array,
+        writes: { offset: number; data: number; frac?: number; method?: string }[],
+      ): void;
+    },
+    refresh: number,
+  ) => {
+    render(
+      writes: { offset: number; data: number; frac?: number; method?: string }[],
+    ): Float32Array;
   };
 };
 const core = new module.GeneratedNamcoWsgCore(new Uint8Array(0x100), 96_000);
@@ -82,6 +112,53 @@ galagaAudio.writeDiscrete(0, 0x0f);
 const galagaSamples = new Float32Array(4096);
 galagaAudio.render(galagaSamples);
 assert.ok(galagaSamples.some(sample => sample !== 0));
+const timedGalagaAudio = new module.GeneratedNamcoWsgCore(
+  new Uint8Array(0x100),
+  96_000,
+  galagaDiscrete,
+);
+const galagaRenderer = new module.GeneratedNamcoWsgFrameRenderer(timedGalagaAudio, 60);
+const timedGalagaSamples = galagaRenderer.render([
+  { offset: 0, data: 0x0f, frac: 0, method: 'discrete' },
+  { offset: 0, data: 0, frac: 0.5, method: 'discrete' },
+]);
+assert.equal(timedGalagaSamples.length, 3_200);
+assert.ok(timedGalagaSamples.slice(0, 1_600).some(sample => sample !== 0));
+assert.ok(
+  timedGalagaSamples.slice(0, 1_600).some((sample, index) =>
+    sample !== timedGalagaSamples[index + 1]!),
+  'timestamped 54XX transitions must survive frame rendering',
+);
+assert.match(source, /write\.frac/);
+assert.ok(registeredWsgProcessor);
+const processor = new registeredWsgProcessor();
+processor.port.onmessage?.({
+  data: {
+    type: 'init',
+    waveRom: new Uint8Array(0x100),
+    clock: 96_000,
+    refresh: 60,
+    auxiliary: galagaDiscrete,
+  },
+});
+processor.port.onmessage?.({
+  data: {
+    type: 'batch',
+    writes: [
+      { offset: 0, data: 0x0f, frac: 0, method: 'discrete' },
+      { offset: 0, data: 0, frac: 0.5, method: 'discrete' },
+    ],
+  },
+});
+const workletSamples = new Float32Array(800);
+for (let offset = 0; offset < workletSamples.length; offset += 128) {
+  const block = workletSamples.subarray(offset, Math.min(offset + 128, workletSamples.length));
+  assert.equal(processor.process([], [[block]]), true);
+}
+assert.ok(
+  workletSamples.some(sample => sample !== 0),
+  'generated WSG worklet must preserve timestamped 54XX transitions',
+);
 
 const ayPlan = compileAy8910(mameSrc, {
   ...definition,
