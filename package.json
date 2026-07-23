@@ -7,13 +7,20 @@
     "mamekit": "bin/mamekit.js"
   },
   "scripts": {
-    "build": "tsc",
+    "build": "tsc --noEmit",
+    "clean": "rm -rf dist",
     "serve": "node bin/mamekit.js --serve",
     "gen": "node bin/mamekit.js",
-    "gen:all": "for g in galaga digdug pacman galaxian gyruss invaders mpatrol gng junofrst rocnrope pooyan timeplt nes; do node bin/mamekit.js $g || exit 1; done",
+    "gen:all": "npm run clean && for g in pacman pooyan timeplt invaders galaxian galaga; do node bin/mamekit.js $g --skip-app || exit 1; done && node bin/mamekit.js --build-runtime --build-app --targets pacman,pooyan,timeplt,invaders,galaxian,galaga",
+    "audit:generated": "node src/gen/audit-generated.ts",
     "deploy": "bash scripts/deploy-pages.sh --artwork",
     "deploy:noart": "bash scripts/deploy-pages.sh",
-    "test": "tsc --noEmit && for f in src/kg/*.spec.ts src/runtime/*.spec.ts src/runtime/*/*.spec.ts; do node $f > /dev/null || { echo \"FAIL $f\"; exit 1; }; echo \"PASS $f\"; done"
+    "test": "npm run test:unit && npm run test:current",
+    "test:unit": "tsc --noEmit && for f in $(find src -name '*.spec.ts' -type f | sort); do node $f > /dev/null || { echo \"FAIL $f\"; exit 1; }; echo \"PASS $f\"; done",
+    "test:current": "npm run gen:all && npm run audit:generated",
+    "test:generation": "node src/gen/test-generation.ts",
+    "test:games": "node src/games/acceptance.ts",
+    "test:games:record": "MAMEKIT_UPDATE_GOLDENS=1 node src/games/acceptance.ts"
   },
   "engines": {
     "node": ">=23.6"

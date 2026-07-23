@@ -1,7 +1,6 @@
 // Phase 2: knowledge-graph subgraph -> generated browser app.
-// Emits out/<game>/app/{index.html, src/config.ts, src/main.ts, runtime copy,
-// tsconfig.json} and compiles it with tsc. Everything game-specific comes from
-// the graph; everything behavioral comes from the shared runtime.
+// Emits categorized game data, MAME-derived executable modules, one shared
+// runtime, and a small app shell. Everything game-specific comes from the graph.
 
 import { mkdirSync, writeFileSync, cpSync, existsSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { join, resolve, dirname, basename } from 'node:path';
@@ -9,6 +8,17 @@ import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import type { KnowledgeGraph, KGNode } from '../kg/types.ts';
 import { parseSoftwareList, buildCatalog } from '../kg/softlist.ts';
+import {
+  buildRuntimeReport, runtimeReportMarkdown, type RuntimeConfigShape,
+} from './runtime-report.ts';
+import { emitGeneratedMachine, lowerAudioRoutes } from './emit-machine.ts';
+import type { BoardConfig } from '../runtime/types.ts';
+import { compileMameVideo } from '../mame/video-compiler.ts';
+import {
+  GAME_CATEGORIES,
+  gameDataPath,
+  gameOutputDir,
+} from './output-layout.ts';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const projectRoot = resolve(here, '../..');
@@ -46,6 +56,10 @@ const KEYMAP: Record<string, string[]> = {
 // softlist catalog carries every cart's slot; the app greys out the rest.
 const CART_SLOT_SUPPORT: Record<string, string[]> = {
   nes: ['nrom', 'uxrom', 'cnrom', 'sxrom', 'txrom'], // iNES mappers 0, 2, 3, 1, 4
+};
+
+const CART_INTERFACE_BY_FAMILY: Record<string, string> = {
+  nes: 'nes_cart',
 };
 
 // Explicitly supported cartridge titles (softlist parent short-names; clones
@@ -125,6 +139,8 @@ export async function generate(graph: KnowledgeGraph, opts: GenerateOptions): Pr
     }
   }
   const kind: 'console' | undefined = game.props.kind === 'console' ? 'console' : undefined;
+  const category = game.props.kind === 'arcade' ? 'arcade' : 'consoles';
+  const dataPath = gameDataPath(category, opts.game);
   const byTag = new Map(devices.map(d => [String(d.props.tag), d]));
 
   // --- cpus + address maps ----------------------------------------------------
@@ -253,10 +269,14 @@ export async function generate(graph: KnowledgeGraph, opts: GenerateOptions): Pr
   const screen = {
     width: (hbstart - hbend) / xscale,
     height: vbstart - vbend,
+    xOffset: hbend / xscale,
+    yOffset: vbend,
     refresh: pixclock / (htotal * vtotal),
     vtotal,
     vbstart,
     vbend,
+    updateMode: (screenDev?.props.screenVideoAttributes as string[] | undefined)
+      ?.includes('VIDEO_UPDATE_SCANLINE') ? 'scanline' as const : 'frame' as const,
     rotate: monitor === 'ROT90' ? 90 : monitor === 'ROT270' ? 270 : monitor === 'ROT180' ? 180 : 0,
   };
 
@@ -267,7 +287,17 @@ export async function generate(graph: KnowledgeGraph, opts: GenerateOptions): Pr
   };
   // sound device -> runtime SoundCore kind (device-library mapping, not game-specific)
   const ayChips = devices.filter(d => d.props.type === 'AY8910');
+  const ayRoutes = lowerAudioRoutes(
+    graph,
+    ayChips.map(device => ({ id: device.id, tag: String(device.props.tag) })),
+  );
   const ymChips = devices.filter(d => d.props.type === 'YM2203');
+  const discreteDevice = devices.some(device => device.props.type === 'DISCRETE')
+    ? devices.find(device => {
+        const type = String(device.props.type);
+        return type.endsWith('_AUDIO') || type.endsWith('_SOUND');
+      })
+    : undefined;
   // Per-family analog mix weights, hand-derived from each driver's discrete
   // resistor network — the one MAME layer the graph can't carry yet (the
   // nets are data tables inside DISCRETE_SOUND_START, not device wiring).
@@ -289,14 +319,22 @@ export async function generate(graph: KnowledgeGraph, opts: GenerateOptions): Pr
     ? { kind: 'nes', clock: cpus[0].clock }
     : devices.some(d => d.props.type === 'NAMCO_WSG' || d.props.type === 'NAMCO')
     ? { kind: 'wsg', clock: Number(byTag.get('namco')?.props.clock ?? 96000), waveRegion: 'namco' }
-    : devices.some(d => d.props.type === 'GALAXIAN_SOUND')
-      ? { kind: 'galaxian', clock: cpus[0].clock }
-      : devices.some(d => d.props.type === 'INVADERS_AUDIO')
-        ? { kind: 'invaders', clock: cpus[0].clock }
+    : discreteDevice
+      ? {
+          kind: 'discrete',
+          clock: cpus[0].clock,
+          worklet: String(discreteDevice.props.type).toLowerCase().replace(/_/g, '-'),
+        }
         : ymChips.length
           ? { kind: 'ym2203', clock: Number(ymChips[0].props.clock), chips: ymChips.length }
           : ayChips.length
-            ? { kind: 'ay8910', clock: Number(ayChips[0].props.clock), chips: ayChips.length, ...AY_MIX[soundFamily] }
+            ? {
+                kind: 'ay8910',
+                clock: Number(ayChips[0].props.clock),
+                chips: ayChips.length,
+                ...(ayRoutes.length ? { routes: ayRoutes } : {}),
+                ...AY_MIX[soundFamily],
+              }
             : { kind: 'none' };
 
   // --- roms ----------------------------------------------------------------------
@@ -379,7 +417,7 @@ export async function generate(graph: KnowledgeGraph, opts: GenerateOptions): Pr
   const portSpecs: { tag: string; init: number }[] = [];
   const bindings: unknown[] = [];
   const dipDefaults: unknown[] = [];
-  const customs: { port: string; mask: number; member: string }[] = [];
+  const customs: { port: string; mask: number; member: string; handler?: string }[] = [];
   for (const port of ports) {
     const tag = port.tag;
     let init = 0;
@@ -402,11 +440,16 @@ export async function generate(graph: KnowledgeGraph, opts: GenerateOptions): Pr
         // IPT_CUSTOM bits are synthesized from other ports by a named driver
         // member (invaders reads CONTP1 into IN0/IN1/IN2 bits 4-6) — emit
         // the wiring fact for the board's member table
-        const customMember = mods
-          .map(m => m.startsWith('PORT_CUSTOM_MEMBER') ? /(\w+)\s*\)*$/.exec(m)?.[1] : undefined)
-          .find(Boolean);
-        if (type === 'IPT_CUSTOM' && customMember) {
-          customs.push({ port: tag, mask, member: customMember });
+        const custom = mods
+          .map(modifier => /PORT_CUSTOM_MEMBER\s*\(\s*FUNC\s*\(\s*(\w+)::(\w+)/.exec(modifier))
+          .find((match): match is RegExpExecArray => Boolean(match));
+        if (type === 'IPT_CUSTOM' && custom) {
+          customs.push({
+            port: tag,
+            mask,
+            member: custom[2]!,
+            handler: `${custom[1]}.${custom[2]}`,
+          });
           continue;
         }
         if (mods.includes('PORT_COCKTAIL')) continue;  // player-2 cocktail path: unbound
@@ -465,11 +508,20 @@ export async function generate(graph: KnowledgeGraph, opts: GenerateOptions): Pr
       if (listNode.props.status !== 'original') continue;
       const listName = String(listNode.props.name);
       const xmlPath = join(opts.mameSrc, 'hash', `${listName}.xml`);
-      if (!existsSync(xmlPath)) continue;
-      const parsed = parseSoftwareList(readFileSync(xmlPath, 'utf8'));
-      const catalog = buildCatalog(parsed, listNode.props.filter ? String(listNode.props.filter) : undefined);
-      // compact on purpose: ~4.5k entries; indented it triples in size
-      writeFileSync(join(opts.outDir, 'softlist.json'), JSON.stringify(catalog));
+      const catalogPath = join(opts.outDir, 'softlist.json');
+      const catalog = existsSync(xmlPath)
+        ? buildCatalog(
+            parseSoftwareList(readFileSync(xmlPath, 'utf8')),
+            listNode.props.filter ? String(listNode.props.filter) : undefined,
+          )
+        : existsSync(catalogPath)
+          ? JSON.parse(readFileSync(catalogPath, 'utf8'))
+          : null;
+      if (!catalog) continue;
+      if (existsSync(xmlPath)) {
+        // compact on purpose: ~4.5k entries; indented it triples in size
+        writeFileSync(catalogPath, JSON.stringify(catalog));
+      }
       cart = {
         interface: catalog.interface,
         list: listName,
@@ -480,6 +532,19 @@ export async function generate(graph: KnowledgeGraph, opts: GenerateOptions): Pr
       cartEntries = catalog.entries.length;
       console.log(`softlist "${listName}": ${catalog.entries.length} cartridges catalogued`);
       break;
+    }
+    if (!cart) {
+      const listNode = softlistNodes.find(node => node.props.status === 'original');
+      const cartInterface = CART_INTERFACE_BY_FAMILY[family];
+      if (listNode && cartInterface) {
+        cart = {
+          interface: cartInterface,
+          list: String(listNode.props.name),
+          catalogUrl: 'softlist.json',
+          slots: CART_SLOT_SUPPORT[family] ?? [],
+          games: CART_GAME_SUPPORT[family] ?? [],
+        };
+      }
     }
     if (!cart) console.warn('  ! console machine has no resolvable software list — carts will be header-identified only');
   }
@@ -498,6 +563,7 @@ export async function generate(graph: KnowledgeGraph, opts: GenerateOptions): Pr
     title,
     family,
     ...(kind ? { kind } : {}),
+    dataPath,
     board: { family, cpus, ranges, ...(io ? { io } : {}), ...(customs.length ? { customs } : {}), screen, clocks },
     sound,
     roms,
@@ -509,7 +575,7 @@ export async function generate(graph: KnowledgeGraph, opts: GenerateOptions): Pr
     // no romUrl: ROMs are never fetched — the shell only accepts user drops
     // (console carts are remembered per-browser in IndexedDB via
     // runtime/cartstore.ts, by explicit user approval 2026-07-07)
-    runtimeUrl: './dist/runtime/',
+    runtimeUrl: '../runtime/generated/audio/',
     menuUrl: './',
   };
 
@@ -582,10 +648,22 @@ export async function generate(graph: KnowledgeGraph, opts: GenerateOptions): Pr
   // the game itself is pure knowledge-graph data — the unified app at
   // out/app loads it at runtime (no per-game compile)
   writeFileSync(join(opts.outDir, 'config.json'), JSON.stringify(config, null, 2));
+  const runtimeReport = buildRuntimeReport(graph, config as unknown as RuntimeConfigShape);
+  writeFileSync(join(opts.outDir, 'runtime-report.json'), JSON.stringify(runtimeReport, null, 2));
+  writeFileSync(join(opts.outDir, 'runtime-report.md'), runtimeReportMarkdown(runtimeReport));
+  const compiledVideo = compileMameVideo(graph, opts.mameSrc, machine.id);
+  emitGeneratedMachine(
+    graph,
+    opts.game,
+    family,
+    opts.outDir,
+    config.board as unknown as BoardConfig,
+    compiledVideo,
+  );
 
   // the full dossier: everything above as a standalone markdown document,
-  // readable outside the app (out/<game>/README.md, linked from the modal)
-  writeFileSync(join(opts.outDir, 'README.md'), gameMarkdown({
+  // readable outside the app (games/<category>/<game>/DOSSIER.md)
+  writeFileSync(join(opts.outDir, 'DOSSIER.md'), machineDossierMarkdown({
     game: opts.game, title, fullname: String(game.props.fullname),
     year: String(game.props.year), company: String(game.props.company),
     family, driverFile: String(graph.meta.driverFile),
@@ -596,7 +674,7 @@ export async function generate(graph: KnowledgeGraph, opts: GenerateOptions): Pr
       cart: { list: String(cart.list), entries: cartEntries, slots: cart.slots as string[] },
     } : {}),
   }));
-  console.log(`\ngenerated ${join(opts.outDir, 'config.json')} (+ meta.json, README.md)`);
+  console.log(`\ngenerated ${join(opts.outDir, 'config.json')} (+ meta.json, DOSSIER.md, runtime report)`);
   if (!existsSync(join(projectRoot, 'roms', `${opts.game}.zip`))) {
     console.log(`note: put ${opts.game}.zip in ${join(projectRoot, 'roms')}/ to auto-load ROMs (or drop the zip onto the page)`);
   }
@@ -607,7 +685,7 @@ export async function generate(graph: KnowledgeGraph, opts: GenerateOptions): Pr
  * as one standalone markdown document. Nothing here is hand-written — every
  * fact flows from the graph (or MAME git / Gaming History side-channels).
  */
-function gameMarkdown(d: {
+function machineDossierMarkdown(d: {
   game: string; title: string; fullname: string; year: string; company: string;
   family: string; driverFile: string; license?: string; copyrightHolders?: string;
   cpus: { tag: string; type?: string; clock: number; ranges: unknown[] }[];
@@ -719,33 +797,115 @@ function gameMarkdown(d: {
 
   md.push('---');
   md.push('');
-  md.push(`*Generated by [mamekit](https://github.com/benbruscella/mamekit) from the knowledge graph of MAME driver \`${d.family}\`. Play it at [../app/g/${d.game}/](../app/g/${d.game}/) or [explore the knowledge graph](viewer.html).*`);
+  md.push(`*Generated by [mamekit](https://github.com/benbruscella/mamekit) from the knowledge graph of MAME driver \`${d.family}\`. Play it at [../../../app/g/${d.game}/](../../../app/g/${d.game}/) or [explore the knowledge graph](viewer.html).*`);
   md.push('');
   return md.join('\n');
 }
 
-/**
- * Build the unified browser app at <outRoot>/app: one runtime compile shared
- * by every generated game. /app/ is the boot menu; /app/?g=<game> boots a
- * game from its /<game>/config.json.
- */
+/** Build the app, shared runtime, and canonical per-game executable modules. */
 export function buildApp(outRoot: string): boolean {
   const appDir = join(outRoot, 'app');
-  const srcDir = join(appDir, 'src');
-  // clean copy: files DELETED from src/runtime must vanish from the app too
-  // (a stale compiled romstore.js once outlived its source — never again)
-  rmSync(srcDir, { recursive: true, force: true });
-  rmSync(join(appDir, 'dist'), { recursive: true, force: true });
-  mkdirSync(srcDir, { recursive: true });
+  const runtimeCoreDir = join(outRoot, 'runtime/core');
+  const buildDir = join(outRoot, '.build');
+  const srcDir = join(buildDir, 'src');
+  // Recreate every compiled tree so renamed modules cannot survive a rebuild.
+  rmSync(appDir, { recursive: true, force: true });
+  rmSync(runtimeCoreDir, { recursive: true, force: true });
+  rmSync(buildDir, { recursive: true, force: true });
+  mkdirSync(appDir, { recursive: true });
+  mkdirSync(join(srcDir, 'app'), { recursive: true });
 
-  cpSync(join(projectRoot, 'src/runtime'), join(srcDir, 'runtime'), { recursive: true });
+  cpSync(join(projectRoot, 'src/runtime'), join(srcDir, 'runtime/core'), {
+    recursive: true,
+    filter: source => !source.endsWith('.spec.ts'),
+  });
+  const hardwareImports: string[] = [];
+  const cpuBindings: string[] = [];
+  const deviceBindings: string[] = [];
+  const hardwareManifestPath = join(outRoot, 'runtime/generated/hardware-manifest.json');
+  if (existsSync(hardwareManifestPath)) {
+    cpSync(
+      join(outRoot, 'runtime/generated'),
+      join(srcDir, 'runtime/generated'),
+      { recursive: true },
+    );
+    const manifest = JSON.parse(readFileSync(hardwareManifestPath, 'utf8')) as {
+      hardware?: {
+        type: string;
+        executable?: boolean;
+        executableKind?: 'cpu' | 'device' | 'audio' | 'composition';
+        executableArtifact?: string;
+      }[];
+    };
+    for (const hardware of manifest.hardware ?? []) {
+      if (!hardware.executable) continue;
+      const slug = hardware.type.toLowerCase();
+      if (!['cpu', 'device'].includes(hardware.executableKind ?? '')) continue;
+      const binding = hardware.executableKind === 'device'
+        ? `device_${deviceBindings.length}`
+        : `cpu_${cpuBindings.length}`;
+      hardwareImports.push(
+        `import ${binding} from '../runtime/generated/devices/${slug}.ts';`,
+      );
+      if (hardware.executableKind === 'device') deviceBindings.push(binding);
+      else cpuBindings.push(binding);
+    }
+  }
+  const generatedImports: string[] = [];
+  const generatedEntries: { binding: string; dataPath: string }[] = [];
+  for (const category of GAME_CATEGORIES) {
+    const categoryDir = join(outRoot, 'games', category);
+    if (!existsSync(categoryDir)) continue;
+    for (const entry of readdirSync(categoryDir).sort()) {
+      const generatedDir = join(gameOutputDir(outRoot, category, entry), 'generated');
+      if (!existsSync(join(generatedDir, 'board.ts'))) continue;
+      const target = join(srcDir, gameDataPath(category, entry), 'generated');
+      mkdirSync(target, { recursive: true });
+      cpSync(generatedDir, target, { recursive: true });
+      const binding = `board_${generatedImports.length}`;
+      const dataPath = gameDataPath(category, entry);
+      generatedImports.push(
+        `import ${binding} from '../${dataPath}/generated/board.ts';`,
+      );
+      generatedEntries.push({ binding, dataPath });
+    }
+  }
+  writeFileSync(join(srcDir, 'app/registry.ts'), `// GENERATED by mamekit — do not edit.
+import { registerGeneratedMachine } from '../runtime/core/generated-machine.ts';
+import { registerGeneratedBoard } from '../runtime/core/generated-board.ts';
+import { registerGeneratedCpu } from '../runtime/core/generated-cpu.ts';
+import { registerGeneratedDevice } from '../runtime/core/generated-device.ts';
+${hardwareImports.join('\n')}
+${generatedImports.join('\n')}
 
-  writeFileSync(join(srcDir, 'main.ts'), `// GENERATED by mamekit — do not edit.
+const games = [
+${generatedEntries.map(entry =>
+    `  { dataPath: '${entry.dataPath}', board: ${entry.binding} },`).join('\n')}
+];
+
+export function registerGeneratedMachines(): void {
+  for (const cpu of [${cpuBindings.join(', ')}]) registerGeneratedCpu(cpu);
+  for (const device of [${deviceBindings.join(', ')}]) registerGeneratedDevice(device);
+  for (const { board } of games) {
+    registerGeneratedMachine(board.machine);
+    registerGeneratedBoard(board.machine.game, board.createBoard);
+  }
+}
+
+export function generatedGamePath(game: string): string | undefined {
+  return games.find(entry => entry.board.machine.game === game)?.dataPath;
+}
+`);
+
+  writeFileSync(join(srcDir, 'app/main.ts'), `// GENERATED by mamekit — do not edit.
 // Unified app: no ?g= -> boot menu; ?g=<game> -> load that game's generated
 // config (pure knowledge-graph data) and run it.
-import { runShell, type ShellConfig } from './runtime/shell.ts';
-import { runConsole } from './runtime/console.ts';
-import { runMenu } from './runtime/menu.ts';
+import { runShell, type ShellConfig } from '../runtime/core/shell.ts';
+import { runConsole } from '../runtime/core/console.ts';
+import { runMenu } from '../runtime/core/menu.ts';
+import { generatedGamePath, registerGeneratedMachines } from './registry.ts';
+
+registerGeneratedMachines();
 
 // force https on real domains: AudioWorklet (all sound) needs a secure
 // context, and github's own enforcement only kicks in after cert issuance
@@ -762,7 +922,9 @@ const fail = (err: unknown) => {
     '<pre style="color:#f66;padding:12px">' + String((err as Error)?.stack ?? err) + '</pre>');
 };
 if (game) {
-  fetch(\`../\${encodeURIComponent(game)}/config.json\`)
+  const dataPath = generatedGamePath(game);
+  if (!dataPath) fail(new Error(\`no generated board for "\${game}"\`));
+  else fetch(\`../\${dataPath}/config.json\`)
     .then(r => { if (!r.ok) throw new Error(\`no generated config for "\${game}" — run: mamekit \${game}\`); return r.json(); })
     .then(cfg => (cfg as ShellConfig).kind === 'console'
       ? runConsole(cfg as ShellConfig)   // console room: cart shelf, drop zone, per-cart boot
@@ -773,16 +935,16 @@ if (game) {
 }
 `);
 
-  writeFileSync(join(appDir, 'tsconfig.json'), JSON.stringify({
+  writeFileSync(join(buildDir, 'tsconfig.json'), JSON.stringify({
     compilerOptions: {
       target: 'ES2022', module: 'ESNext', moduleResolution: 'bundler',
       lib: ['ES2022', 'DOM', 'DOM.Iterable'], strict: true,
+      resolveJsonModule: true,
       allowImportingTsExtensions: true, rewriteRelativeImportExtensions: true,
       erasableSyntaxOnly: true, verbatimModuleSyntax: true, skipLibCheck: true,
-      outDir: 'dist', rootDir: 'src',
+      outDir: 'out', rootDir: 'src',
     },
     include: ['src'],
-    exclude: ['src/**/*.spec.ts'],
   }, null, 2));
 
   // per-build stamp on the module URL: browsers cache module scripts hard,
@@ -797,7 +959,7 @@ if (game) {
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='13' font-size='13'>👾</text></svg>">
 </head>
 <body>
-<script type="module" src="./dist/main.js?v=${stamp}"></script>
+<script type="module" src="./main.js?v=${stamp}"></script>
 <noscript>mamekit needs JavaScript.</noscript>
 </body>
 </html>
@@ -810,13 +972,17 @@ if (game) {
   // pretty per-game routes: /app/g/<game>/ as REAL directories (static hosts
   // have no rewrites). <base href="../../"> makes every relative URL resolve
   // exactly as it does on /app/, so the one compiled bundle serves all routes.
-  for (const entry of readdirSync(outRoot)) {
-    if (!existsSync(join(outRoot, entry, 'meta.json'))) continue;
-    let title = entry;
-    try { title = JSON.parse(readFileSync(join(outRoot, entry, 'meta.json'), 'utf8')).title ?? entry; } catch { /* keep slug */ }
-    const dir = join(appDir, 'g', entry);
-    mkdirSync(dir, { recursive: true });
-    writeFileSync(join(dir, 'index.html'), `<!doctype html>
+  for (const category of GAME_CATEGORIES) {
+    const categoryDir = join(outRoot, 'games', category);
+    if (!existsSync(categoryDir)) continue;
+    for (const entry of readdirSync(categoryDir)) {
+      const gameDir = gameOutputDir(outRoot, category, entry);
+      if (!existsSync(join(gameDir, 'meta.json'))) continue;
+      let title = entry;
+      try { title = JSON.parse(readFileSync(join(gameDir, 'meta.json'), 'utf8')).title ?? entry; } catch { /* keep slug */ }
+      const dir = join(appDir, 'g', entry);
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, 'index.html'), `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -826,21 +992,36 @@ if (game) {
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='13' font-size='13'>👾</text></svg>">
 </head>
 <body>
-<script type="module" src="./dist/main.js?v=${stamp}"></script>
+<script type="module" src="./main.js?v=${stamp}"></script>
 <noscript>mamekit needs JavaScript.</noscript>
 </body>
 </html>
 `);
+    }
   }
 
   console.log('compiling unified app with tsc...');
-  const tsc = spawnSync(process.execPath, [join(projectRoot, 'node_modules/typescript/bin/tsc'), '-p', appDir], {
+  const tsc = spawnSync(process.execPath, [
+    join(projectRoot, 'node_modules/typescript/bin/tsc'),
+    '-p',
+    join(buildDir, 'tsconfig.json'),
+  ], {
     stdio: 'inherit',
   });
   if (tsc.status !== 0) {
     console.error('tsc failed — app emitted but not compiled');
+    rmSync(buildDir, { recursive: true, force: true });
+    rmSync(appDir, { recursive: true, force: true });
+    rmSync(runtimeCoreDir, { recursive: true, force: true });
     return false;
   }
+  const compiledDir = join(buildDir, 'out');
+  for (const group of ['app', 'runtime', 'games']) {
+    const compiledGroup = join(compiledDir, group);
+    if (!existsSync(compiledGroup)) continue;
+    cpSync(compiledGroup, join(outRoot, group), { recursive: true });
+  }
+  rmSync(buildDir, { recursive: true, force: true });
   console.log(`app ready: ${join(appDir, 'index.html')}`);
   return true;
 }

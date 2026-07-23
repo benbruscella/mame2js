@@ -11,6 +11,8 @@
  * first 0x100 bytes of the "namco" PROM region are the wavetable) and
  * `clock` (defaults to sampleRate — for the WSG they are the same, 96000).
  */
+import type { GeneratedAudioRoute } from './generated-machine.ts';
+
 export interface WorkletCoreConfig {
   readonly sampleRate: number;
   readonly waveRom?: Uint8Array;
@@ -20,6 +22,7 @@ export interface WorkletCoreConfig {
   readonly chips?: number;
   /** per-chip mix weights (board analog net); defaults to all-equal */
   readonly chipGains?: number[];
+  readonly routes?: GeneratedAudioRoute[];
   /** DAC route gain override */
   readonly dacGain?: number;
   /** video refresh rate (Hz) — paces the worklet's write scheduler */
@@ -32,6 +35,8 @@ interface PendingWrite {
   offset: number;
   data: number;
   frac?: number;
+  /** Target device write method; worklets route by name, never by offset math. */
+  method?: string;
 }
 
 /** A bulk sample-data push (NES DMC), queued in order with register writes. */
@@ -51,6 +56,8 @@ export class AudioOutput {
   private volume: number = 1;
   /** writes + data pushes, kept in issue order, flushed once per frame */
   private pending: PendingItem[] = [];
+  /** Complete frames produced while the async AudioWorklet is starting. */
+  private pendingFrames: PendingItem[][] = [];
 
   constructor() {}
 
@@ -83,6 +90,7 @@ export class AudioOutput {
       voices: core.voices,
       chips: core.chips,
       chipGains: core.chipGains,
+      routes: core.routes,
       dacGain: core.dacGain,
       refresh: core.refresh,
       debug: core.debug,
@@ -105,8 +113,12 @@ export class AudioOutput {
     this.node = node;
     this.gain = gain;
 
-    // replay writes/data that happened before the context existed, in order
-    this.postPending(node);
+    // Frames that ran while addModule() was awaiting are pre-audio history:
+    // collapse them into ONE batch so the register state lands correctly
+    // without queueing N rendered frames of permanent backlog latency
+    // (worklets drain exactly one queued frame per video frame).
+    const backlog = this.pendingFrames.splice(0).flat();
+    if (backlog.length) this.postFrame(node, backlog);
 
     if (ctx.state !== 'running') await ctx.resume();
   }
@@ -115,11 +127,13 @@ export class AudioOutput {
    * Queue a register write for the worklet. Writes accumulate and go out as
    * ONE batch message per video frame via flush() — junofrst's i8039 DAC
    * alone is ~4k writes/s, and per-write postMessage overhead starves the
-   * scheduler under main-thread jank. Before start() they buffer in
-   * `pending` and replay as the first batch.
+   * scheduler under main-thread jank. Complete frames produced before
+   * start() finishes remain separate in `pendingFrames`.
    */
-  write(offset: number, data: number, frac?: number): void {
-    this.pending.push({ kind: 'write', write: { offset, data, frac } });
+  write(offset: number, data: number, frac?: number, method?: string): void {
+    const write: PendingWrite = { offset, data, frac };
+    if (method !== undefined) write.method = method;
+    this.pending.push({ kind: 'write', write });
   }
 
   /**
@@ -133,17 +147,17 @@ export class AudioOutput {
 
   /** Post all queued writes/data preserving order. Call once per frame. */
   flush(): void {
-    if (this.node && this.pending.length) this.postPending(this.node);
+    const frame = this.pending.splice(0);
+    if (this.node) this.postFrame(this.node, frame);
+    else this.pendingFrames.push(frame);
   }
 
   /**
-   * Drain `pending` to the worklet, batching consecutive register writes into
+   * Drain one frame to the worklet, batching consecutive register writes into
    * one 'batch' message but breaking the batch at every data push so ordering
    * (write < data < write) is preserved across the port.
    */
-  private postPending(node: AudioWorkletNode): void {
-    if (!this.pending.length) return;
-    const items = this.pending.splice(0);
+  private postFrame(node: AudioWorkletNode, items: PendingItem[]): void {
     let batch: PendingWrite[] = [];
     for (const item of items) {
       if (item.kind === 'write') {
@@ -156,7 +170,9 @@ export class AudioOutput {
         node.port.postMessage({ type: 'data', id: item.data.id, bytes: item.data.bytes });
       }
     }
-    if (batch.length) node.port.postMessage({ type: 'batch', writes: batch });
+    // An empty batch still represents one emulated frame. Timestamp-aware
+    // worklets need it to advance sound even when no registers changed.
+    node.port.postMessage({ type: 'batch', writes: batch });
   }
 
   /** Master volume 0..1 via the GainNode. */

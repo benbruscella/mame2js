@@ -5,7 +5,7 @@
 // setter trio (set_refresh_hz/set_size/set_visarea), and slot-device default
 // option capture — plus a GAME-row regression so the arcade path can't drift.
 
-import { parseGames, parseMachineConfigs, parseDefines } from './parse.ts';
+import { parseGames, parseMachineConfigs, parseDefines, parseAddressMaps } from './parse.ts';
 
 let totalPass = 0;
 let totalFail = 0;
@@ -72,8 +72,10 @@ void nes_state::nes(machine_config &config)
 {
 	rp2a03_device &maincpu(RP2A03G(config, m_maincpu, NTSC_APU_CLOCK));
 	maincpu.set_addrmap(AS_PROGRAM, &nes_state::nes_map);
+	maincpu.add_route(0, "mono", 0.60);
 
 	SCREEN(config, m_screen, SCREEN_TYPE_RASTER);
+	m_screen->set_video_attributes(VIDEO_UPDATE_SCANLINE);
 	m_screen->set_refresh_hz(60.0988);
 	m_screen->set_size(32*8, 262);
 	m_screen->set_visarea(0*8, 32*8-1, 0*8, 30*8-1);
@@ -102,11 +104,15 @@ void nes_state::nes(machine_config &config)
 
   const cpu = cfg.devices.find(d => d.tag === 'maincpu')!;
   eq('cpu clock from external define', Math.round(cpu.clock!), Math.round(21477272 / 12));
+  eq('audio route', cpu.audioRoutes, [{
+    output: '0', target: 'mono', gain: 0.6, raw: 'maincpu.add_route(0, "mono", 0.60)',
+  }]);
 
   const screen = cfg.devices.find(d => d.tag === 'screen')!;
   eq('screen refresh hz', screen.screenRefreshHz, 60.0988);
   eq('screen size (32*8 arithmetic)', screen.screenSize, { w: 256, h: 262 });
   eq('screen visarea', screen.screenVisarea, { x0: 0, x1: 255, y0: 0, y1: 239 });
+  eq('screen video attributes', screen.screenVideoAttributes, ['VIDEO_UPDATE_SCANLINE']);
 
   const ctrl1 = cfg.devices.find(d => d.tag === 'ctrl1')!;
   eq('slot options table', ctrl1.slotOptions, 'nes_control_port1_devices');
@@ -122,6 +128,22 @@ void nes_state::nes(machine_config &config)
   const seeded = parseDefines('#define LOCAL (BASE*2)\n#define BASE 7', { BASE: 3 });
   eq('seeded constant resolves', seeded.LOCAL, 6);   // uses seed BASE=3 at eval time
   eq('local redefinition wins', seeded.BASE, 7);
+}
+
+// --- MAME inline address-map lambdas become named generated handlers ---------
+{
+  const [map] = parseAddressMaps(`
+void timeplt_state::main_map(address_map &map)
+{
+  map(0xc300, 0xc30f).lw8(NAME([this](offs_t offset, u8 data) {
+    m_mainlatch->write_d0(offset >> 1, data);
+  }));
+}
+`);
+  const handler = map.ranges[0]?.write;
+  eq('lw8 inline handler name', handler?.method, '__inline_main_map_c300_lw8');
+  eq('lw8 inline parameters', handler?.inlineParameters, 'offs_t offset, u8 data');
+  eq('lw8 inline body', handler?.inlineBody, 'm_mainlatch->write_d0(offset >> 1, data);');
 }
 
 console.log(`\nparse.spec: ${totalPass} passed, ${totalFail} failed`);

@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Unit and current games
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      MAME_SRC: ${{ github.workspace }}/.mame
+    steps:
+      - name: Check out MAMEKIT
+        uses: actions/checkout@v6
+
+      - name: Check out pinned MAME source
+        uses: actions/checkout@v6
+        with:
+          repository: mamedev/mame
+          ref: bd4827c13123cafc6010f74d406902a6bbc6b49e
+          path: .mame
+          sparse-checkout: |
+            src
+            hash/nes.xml
+          sparse-checkout-cone-mode: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run every colocated unit and lowering spec
+        run: npm run test:unit
+
+      - name: Clean-generate and audit the current four games
+        run: npm run test:current

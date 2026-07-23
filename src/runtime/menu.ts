@@ -16,7 +16,7 @@
 import { readZip, crc32 } from './zip.ts';
 import { decodeGfx, type GfxLayout } from './gfx.ts';
 import { loadArtwork } from './artwork.ts';
-import { createBoard } from './boards/index.ts';
+import { createBoard } from './generated-board.ts';
 import { openCartStore } from './cartstore.ts';
 
 interface GameEntry {
@@ -26,12 +26,16 @@ interface GameEntry {
   year: string;
   manufacturer: string;
   family: string;
+  /** canonical generated artifact directory, e.g. games/arcade/pacman */
+  dataPath: string;
   /** consoles get their own tab + room; absent means arcade */
   kind?: 'arcade' | 'console';
   hasRom: boolean;
   hasArt: boolean;
   /** the compiled app contains this game's board module (games.json) */
   supported?: boolean;
+  /** KG-reachable MAME hardware types without executable generated artifacts. */
+  generationGaps?: string[];
   // "learn" modal facts (from the driver header + MAME git history)
   driverFile?: string;
   license?: string;
@@ -279,8 +283,14 @@ export async function runMenu(): Promise<void> {
         background:${entry.supported === false ? '#666' : '#c22'};color:#fff;font-size:10px;font-weight:700;
         letter-spacing:1px;padding:4px 0;box-shadow:0 2px 6px rgba(0,0,0,.5)`);
       // a game generated before its board compiles must never offer Play
-      // (stale-bundle crash, see gotchas) — story card still opens
-      ribbon.textContent = entry.supported === false ? 'IN DEVELOPMENT' : 'INSERT ROM';
+      // (stale-bundle protection) — story card still opens
+      const gapCount = entry.generationGaps?.length ?? 0;
+      ribbon.textContent = entry.supported === false
+        ? `BLOCKED${gapCount ? ` · ${gapCount}` : ''}`
+        : 'INSERT ROM';
+      if (entry.generationGaps?.length) {
+        ribbon.title = `Missing generated hardware: ${entry.generationGaps.join(', ')}`;
+      }
       box.appendChild(ribbon);
     }
 
@@ -403,7 +413,7 @@ export async function runMenu(): Promise<void> {
     // The machine — real facts from the generated config (the knowledge graph)
     const hw = section('The machine (extracted from the MAME driver)', colA);
     try {
-      const cfg = await fetch(`../${game}/config.json`).then(r => r.json());
+      const cfg = await fetch(`../${entry.dataPath}/config.json`).then(r => r.json());
       for (const cpu of cfg.board.cpus) {
         row(hw, cpu === cfg.board.cpus[0] ? 'Processors' : '', `${(cpu.type ?? 'z80').toUpperCase()} "${cpu.tag}" @ ${(cpu.clock / 1e6).toFixed(3)} MHz`);
       }
@@ -430,7 +440,7 @@ export async function runMenu(): Promise<void> {
     // the intro shows in full, each named chapter folds open on click.
     if (entry.hasHistory) {
       const story = section('The story');
-      void fetch(`../${game}/history.txt`).then(r => r.ok ? r.text() : '').then(t => {
+      void fetch(`../${entry.dataPath}/history.txt`).then(r => r.ok ? r.text() : '').then(t => {
         if (!t) { story.remove(); return; }
         const parts = t.split(/^- ([A-Z][A-Z0-9 .&''/-]{2,}) -\s*$/m);
         const intro = el('div', 'white-space:pre-wrap;color:#c9cde8;font-size:14.5px');
@@ -472,14 +482,22 @@ export async function runMenu(): Promise<void> {
     if (entry.supported !== false) {
       links.appendChild(mkBtn('▶ Play', `g/${game}/`, true));
     } else {
-      const soon = el('span', 'padding:9px 18px;border-radius:8px;font-weight:700;border:2px solid #555;color:#888');
-      soon.textContent = '🛠 In development';
+      const soon = el('span', `padding:9px 18px;border-radius:8px;font-weight:700;
+        border:2px solid #555;color:#aaa;max-width:100%;overflow-wrap:anywhere`);
+      const gaps = entry.generationGaps ?? [];
+      soon.textContent = gaps.length
+        ? `Generation blocked: ${gaps.join(', ')}`
+        : 'Generation blocked';
       links.appendChild(soon);
     }
-    const viewer = mkBtn('Explore the knowledge graph', `../${game}/viewer.html`, false);
+    const viewer = mkBtn(
+      'Explore the knowledge graph',
+      `../${entry.dataPath}/viewer.html`,
+      false,
+    );
     viewer.target = '_blank';
     links.appendChild(viewer);
-    const dossier = mkBtn('Full dossier (markdown)', `../${game}/README.md`, false);
+    const dossier = mkBtn('Full dossier (markdown)', `../${entry.dataPath}/DOSSIER.md`, false);
     dossier.target = '_blank';
     links.appendChild(dossier);
     card.appendChild(links);
@@ -582,11 +600,16 @@ export async function runMenu(): Promise<void> {
     if (cached) return imageFrom(cached);
     if (!entry.hasRom) return null;
     try {
-      const cfg = await fetch(`../${encodeURIComponent(entry.game)}/config.json`).then(r => r.json()) as ShellCfg;
+      const cfg = await fetch(`../${entry.dataPath}/config.json`).then(r => r.json()) as ShellCfg;
       const regions = await loadRegions(entry.game, cfg);
       if (!regions) return null;
       const ports = Object.fromEntries(cfg.ports.map(p => [p.tag, p.init]));
-      const board = createBoard(cfg.board, regions, { read: t => ports[t] ?? 0xff }, { soundWrite: () => { /* silent */ } });
+      const board = createBoard(
+        { ...cfg.board, game: entry.game },
+        regions,
+        { read: t => ports[t] ?? 0xff },
+        { soundWrite: () => { /* silent */ } },
+      );
       const fb = new Uint32Array(board.fbWidth * board.fbHeight);
       for (let f = 0; f < COVER_FRAMES; f += 30) {
         for (let i = 0; i < 30; i++) board.frame(fb);

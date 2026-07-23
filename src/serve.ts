@@ -4,6 +4,11 @@
 import { createServer } from 'node:http';
 import { readFile, readdir, stat } from 'node:fs/promises';
 import { join, normalize, extname } from 'node:path';
+import {
+  GAME_CATEGORIES,
+  gameDataPath,
+  gameOutputDir,
+} from './gen/output-layout.ts';
 
 // Public ROM mirror bucket behind the drop screen's "Try web search". The
 // bucket sends no CORS headers, so the browser can't fetch it cross-origin —
@@ -28,21 +33,54 @@ const MIME: Record<string, string> = {
  *  availability. ROMs are deliberately NOT scanned: the app never reads ROMs
  *  from the server — the visitor's browser store is the only source.
  *
- *  `supported` = the COMPILED app really contains this game's board module
- *  (dist/app/dist/runtime/boards/<family>.js). A game generated before its
- *  cores compile must show as "in development", not crash at Play — a stale
- *  bundle plus a fresh manifest burned us on junofrst. */
+ * `supported` requires both a compiled generated board and a complete
+ * executable hardware closure for that game. The closure comes from the KG,
+ * so source extraction alone can never be mistaken for playability. */
 export async function gamesManifest(outRoot: string, artDir: string): Promise<string> {
   const games: unknown[] = [];
-  for (const entry of await readdir(outRoot).catch(() => [] as string[])) {
-    try {
-      const meta = JSON.parse(await readFile(join(outRoot, entry, 'meta.json'), 'utf8'));
-      await stat(join(outRoot, entry, 'config.json'));
-      meta.hasArt = await stat(join(artDir, `${entry}.zip`)).then(() => true, () => false);
-      meta.supported = await stat(join(outRoot, 'app/dist/runtime/boards', `${meta.family}.js`))
-        .then(() => true, () => false);
-      games.push(meta);
-    } catch { /* not a generated game dir */ }
+  // Fail CLOSED when the closure manifest is missing or unparseable: a stale
+  // board.js without its manifest must never present as playable (a stale
+  // bundle plus a fresh manifest burned us on junofrst once already).
+  const hardware = await readFile(
+    join(outRoot, 'runtime/generated/hardware-manifest.json'),
+    'utf8',
+  ).then(text => JSON.parse(text) as {
+    hardware?: {
+      type: string;
+      status: string;
+      executable?: boolean;
+      /** internal part satisfied by these executable host devices */
+      hostedBy?: string[];
+      uses: { game: string }[];
+    }[];
+  }, () => null);
+  for (const category of GAME_CATEGORIES) {
+    const entries = await readdir(join(outRoot, 'games', category)).catch(() => [] as string[]);
+    for (const entry of entries) {
+      try {
+        const dir = gameOutputDir(outRoot, category, entry);
+        const meta = JSON.parse(await readFile(join(dir, 'meta.json'), 'utf8'));
+        await stat(join(dir, 'config.json'));
+        meta.category = category;
+        meta.dataPath = gameDataPath(category, entry);
+        meta.hasArt = await stat(join(artDir, `${entry}.zip`)).then(() => true, () => false);
+        const generationGaps = hardware === null
+          ? ['hardware-manifest.json missing or unreadable']
+          : (hardware.hardware ?? [])
+              .filter(candidate => candidate.uses.some(use => use.game === entry))
+              .filter(candidate =>
+                candidate.status !== 'declarative-host' &&
+                !candidate.executable &&
+                !candidate.hostedBy?.length)
+              .map(candidate => candidate.type)
+              .sort();
+        const boardCompiled = await stat(join(dir, 'generated/board.js'))
+          .then(() => true, () => false);
+        meta.supported = hardware !== null && boardCompiled && generationGaps.length === 0;
+        meta.generationGaps = generationGaps;
+        games.push(meta);
+      } catch { /* not a generated game dir */ }
+    }
   }
   return JSON.stringify(games);
 }

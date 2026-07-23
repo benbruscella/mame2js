@@ -1,28 +1,37 @@
-# mamekit — agent orientation
+# MAMEKIT AGENT GUIDE
 
-**Start here: read `docs/README.md`** — it indexes everything (architecture,
-knowledge graph, runtime reference, generator, adding-a-game playbook,
-testing, gotchas, TODO). `docs/gotchas.md` is mandatory before changing code.
+Read these in order before changing the project:
 
-Quick facts:
+1. `README.md`
+2. `docs/SYSTEM_ARCHITECTURE.md`
+3. `docs/ENGINEERING_GUIDE.md`
 
-- `mamekit galaga --serve` → knowledge graph + unified app on
-  http://localhost:8280/app/ (boot menu; game at /app/?g=galaga, viewer at
-  /galaga/viewer.html). `mamekit --serve` alone serves all generated games.
-- MAME source auto-detected at `../mame` (sibling checkout) or parent;
-  override with `--mame-src` / `$MAME_SRC`. MAME is a dev-time dependency
-  only (extraction + reference for hand-porting device cores).
-- Node ≥ 23.6 runs the TS CLI directly — no build step except `tsc` for the
-  browser app (the generator runs it).
-- Hard rules: zero runtime dependencies (DOM/canvas/Web Audio only);
-  game-specific facts come from the knowledge graph, never hard-coded;
-  `src/runtime/` stays game-agnostic; `roms/` is copyrighted — never commit.
-- tsconfig uses `erasableSyntaxOnly`: no enums, no constructor parameter
-  properties; `.ts` import extensions; `import type` for types.
-- Tests: `node src/runtime/{z80,wsg}.spec.ts`,
-  `node src/runtime/video/galaga.spec.ts`,
-  `node src/runtime/boards/galaga.spec.ts`, `npx tsc --noEmit`.
-  Run all before committing runtime changes.
-- Backlog: `docs/TODO.md`. Games #2/#3 + boot menu: GitHub issue #1.
-- `sessions/` holds gzipped Claude Code transcripts + memory snapshots from
-  the sessions that built this — grep them for the full reasoning history.
+Those are the complete current documentation set. Files under `sessions/` are
+historical evidence and may describe deleted architectures.
+
+## HARD RULES
+
+- MAMEKIT is a MAME-specific source compiler, not a general C++ transpiler.
+- MAME hardware behavior must come from MAME AST/DSL lowering, the knowledge
+  graph and typed generated IR.
+- `src/runtime` is hardware-neutral browser hosting and generic IR execution.
+  Do not add handwritten CPU, device, audio, video or board implementations.
+- JSON stores generated data; TypeScript/JavaScript stores behavior.
+- Complete generation starts by deleting `dist`.
+- Generated output has one canonical location and must not import `src`.
+- ROMs are never committed, served or deployed.
+- Do not bind Control as a game input.
+
+## ENVIRONMENT AND GATES
+
+- MAME source is normally at `../mame`.
+- Node.js 23.6+ runs repository TypeScript directly.
+- `npm run gen:all` currently generates Pac-Man and Pooyan during the
+  one-machine-at-a-time issue-21 migration.
+- Run `npm run test:unit`, `npm run audit:generated`, and relevant real-ROM
+  acceptance after changes.
+- Use `npm run test:generation` for broad parser, graph, IR, runtime or output
+  topology changes; it clean-generates every required target.
+
+Historical transcripts are listed in `sessions/ARCHIVE_INDEX.md`. Never treat a
+transcript as permission to restore old handwritten runtime code.

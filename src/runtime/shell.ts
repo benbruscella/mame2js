@@ -2,12 +2,13 @@
 // keyboard input, audio bring-up, and the fixed-timestep run loop.
 // Pure DOM — no libraries.
 
-import { createBoard } from './boards/index.ts';
+import { createBoard } from './generated-board.ts';
 import { loadArtwork, type ArtWindow } from './artwork.ts';
 import { KeyboardInput, type FieldBinding, type DipDefault, type PortSpec } from './input.ts';
 import { AudioOutput } from './audio.ts';
 import { readZip, crc32 } from './zip.ts';
 import type { Regions, BoardConfig } from './types.ts';
+import type { GeneratedAudioRoute } from './generated-machine.ts';
 
 export interface RomLoad {
   file: string; offset: number; size: number; crc: string;
@@ -18,8 +19,10 @@ export interface RomLoad {
 export interface RomRegionSpec { region: string; size: number; loads: RomLoad[] }
 
 export interface SoundSpec {
-  /** SoundCore/worklet kind: 'wsg' | 'galaxian' | 'ay8910' | 'none' */
+  /** Generic SoundCore/AudioWorklet processor kind. */
   kind: string;
+  /** Generated worklet artifact stem when several MAME devices share a processor kind. */
+  worklet?: string;
   clock?: number;
   /** rom region holding the wavetable (wsg only) */
   waveRegion?: string;
@@ -27,6 +30,8 @@ export interface SoundSpec {
   chips?: number;
   /** per-chip mix weights from the board's analog net (generator-curated) */
   chipGains?: number[];
+  /** Per-output routes lowered from MAME add_route calls. */
+  routes?: GeneratedAudioRoute[];
   /** DAC route gain override (default = junofrst's 0.25) */
   dacGain?: number;
 }
@@ -138,6 +143,8 @@ export interface ShellConfig {
   family: string;
   /** 'console' machines route to the console room first (default arcade) */
   kind?: 'arcade' | 'console';
+  /** canonical generated artifact directory relative to the distribution root */
+  dataPath: string;
   board: BoardConfig;
   sound: SoundSpec;
   roms: RomRegionSpec[];
@@ -207,8 +214,8 @@ export async function runShell(cfg: ShellConfig, preloaded?: Regions): Promise<v
   if (input.debug) console.log('[input] debug on — bindings:', cfg.bindings, 'ports:', cfg.ports);
 
   const audio = new AudioOutput();
-  const board = createBoard(cfg.board, regions, input, {
-    soundWrite: (offset, data, frac) => audio.write(offset, data, frac),
+  const board = createBoard({ ...cfg.board, game: cfg.game }, regions, input, {
+    soundWrite: (offset, data, frac, method) => audio.write(offset, data, frac, method),
     soundData: (id, bytes) => audio.data(id, bytes),
   });
   ui.setNative(board.fbWidth, board.fbHeight); // the board owns true geometry
@@ -233,11 +240,12 @@ export async function runShell(cfg: ShellConfig, preloaded?: Regions): Promise<v
         waveRom: cfg.sound.waveRegion ? regions[cfg.sound.waveRegion] : undefined,
         chips: cfg.sound.chips,
         chipGains: cfg.sound.chipGains,
+        routes: cfg.sound.routes,
         dacGain: cfg.sound.dacGain,
         refresh: cfg.board.screen.refresh,
         debug: input.debug,
       },
-      `${cfg.runtimeUrl}${cfg.sound.kind}-worklet.js`,
+      `${cfg.runtimeUrl}${cfg.sound.worklet ?? cfg.sound.kind}-worklet.js`,
       cfg.sound.kind,
     ).then(() => {
       // per-core master gains: wsg = MAME route gain 0.90*10/16; the AY bank
@@ -296,7 +304,7 @@ function hex4(v: number): string { return v.toString(16).padStart(4, '0'); }
 
 // ---------------------------------------------------------------------------
 
-function assembleRegions(
+export function assembleRegions(
   specs: RomRegionSpec[],
   files: Map<string, Uint8Array>,
   status: (s: string) => void,
@@ -768,4 +776,3 @@ function waitForZip(
     });
   });
 }
-
