@@ -198,8 +198,12 @@ class IrDevice implements Device {
       members: this.members,
       invoke: (name, ...args) => {
         const method = this.methods.get(name);
-        if (!method) throw new Error(`${this.definition.type} has no generated method "${name}"`);
-        return this.executeMethod(method, this.methodParams.get(name)!, args);
+        if (method) return this.executeMethod(method, this.methodParams.get(name)!, args);
+        const binding = this.bindings.calls?.[name];
+        if (binding) return binding(...args.map(Number));
+        const member = this.members[name];
+        if (typeof member === 'function') return member(...args);
+        return 0;
       },
     };
     const pendingTimers = [...this.timers.values()];
