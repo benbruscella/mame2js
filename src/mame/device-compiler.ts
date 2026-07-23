@@ -19,6 +19,7 @@ export interface GeneratedDeviceMember {
   name: string;
   valueType: string;
   bits?: 1 | 8 | 16 | 32;
+  signed?: boolean;
   initial?: number;
   values?: number[];
 }
@@ -53,6 +54,8 @@ export interface GeneratedDeviceDefinition {
   callbacks: GeneratedDeviceCallback[];
   timers: GeneratedDeviceTimer[];
   methods: GeneratedDeviceMethod[];
+  /** Ratio between the configured input clock and one execute_run cycle. */
+  clockDivider?: number;
   start?: string;
   reset?: string;
   summary: {
@@ -149,11 +152,13 @@ export function compileMameDevice(
         return [];
       }
       const bits = integerBits(member.valueType);
+      const signed = integerSigned(member.valueType);
       const allocated = allocatedArrays.get(member.name) ?? fixedArrays.get(member.name);
       return [{
         name: member.name,
         valueType: member.valueType,
         ...(bits ? { bits } : {}),
+        ...(signed ? { signed } : {}),
         ...(allocated ? { values: allocated } : {}),
       }];
     });
@@ -204,6 +209,9 @@ export function compileMameDevice(
     callbacks,
     timers,
     methods,
+    ...(executionClockDivider(sources.map(source => source.source).join('\n'))
+      ? { clockDivider: executionClockDivider(sources.map(source => source.source).join('\n')) }
+      : {}),
     ...(methods.some(method => method.name === 'device_start') ? { start: 'device_start' } : {}),
     ...(methods.some(method => method.name === 'device_reset') ? { reset: 'device_reset' } : {}),
     summary: {
@@ -212,6 +220,31 @@ export function compileMameDevice(
       diagnostics,
     },
   };
+}
+
+export function mameDeviceRomSet(
+  mameSrc: string,
+  sourceFile: string,
+  className: string,
+): string | undefined {
+  const source = readFileSync(join(mameSrc, sourceFile), 'utf8');
+  const method = parseMameAst([{ file: sourceFile, source }]).units
+    .flatMap(unit => unit.functions)
+    .find(candidate =>
+      candidate.className === className && candidate.name === 'device_rom_region');
+  const scoped = method && /\bROM_NAME\s*\(\s*(\w+)\s*\)/.exec(method.body)?.[1];
+  if (scoped) return scoped;
+  const fallback = new RegExp(
+    `${className}::device_rom_region[\\s\\S]*?ROM_NAME\\s*\\(\\s*(\\w+)\\s*\\)`,
+  ).exec(source);
+  return fallback?.[1];
+}
+
+function executionClockDivider(source: string): number | undefined {
+  const match = /execute_cycles_to_clocks\s*\([^)]*\)[^{]*\{[^}]*return\s*\([^;]*\*\s*(\d+)\s*\)/s
+    .exec(source);
+  const divider = Number(match?.[1]);
+  return Number.isInteger(divider) && divider > 0 ? divider : undefined;
 }
 
 function localSourceFiles(mameSrc: string, sourceFile: string): string[] {
@@ -359,6 +392,11 @@ function integerBits(valueType: string): 1 | 8 | 16 | 32 | undefined {
   if (['u16', 's16', 'uint16_t', 'int16_t'].includes(normalized)) return 16;
   if (['u32', 's32', 'uint32_t', 'int32_t', 'int', 'unsigned'].includes(normalized)) return 32;
   return undefined;
+}
+
+function integerSigned(valueType: string): boolean {
+  const normalized = valueType.replace(/\bconst\b/g, '').trim();
+  return ['s8', 'int8_t', 'char', 's16', 'int16_t', 's32', 'int32_t', 'int'].includes(normalized);
 }
 
 interface Constructor {

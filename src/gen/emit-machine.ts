@@ -25,13 +25,33 @@ export function lowerGeneratedMachine(
   board: BoardConfig,
   compiledVideo?: { plan: GeneratedVideoPlan; handlers: GeneratedHandler[] },
 ): GeneratedMachine {
+  const byId = new Map(graph.nodes.map(node => [node.id, node]));
+  const nestedHostTags = new Map<string, string>();
+  for (const device of graph.nodes.filter(node => node.label === 'Device')) {
+    const ownerConfig = graph.edges.find(edge =>
+      edge.rel === 'HAS_DEVICE' && edge.to === device.id);
+    if (!ownerConfig) continue;
+    const hostEdge = graph.edges.find(edge =>
+      edge.rel === 'CALLS' && edge.to === ownerConfig.from &&
+      byId.get(edge.from)?.label === 'Device');
+    const host = hostEdge && byId.get(hostEdge.from);
+    if (host?.props.tag) nestedHostTags.set(device.id, String(host.props.tag));
+  }
+  const emittedDeviceTag = (deviceId: string, rawTag: string): string => {
+    const hostTag = nestedHostTags.get(deviceId);
+    return hostTag ? `${hostTag}:${rawTag}` : rawTag;
+  };
   const callbacks: GeneratedCallback[] = graph.nodes
     .filter(node => node.label === 'Callback')
     .map(node => {
       const props = node.props;
+      const ownerDevice = graph.edges.find(edge =>
+        edge.rel === 'HAS_CALLBACK' && edge.to === node.id);
       const callback: GeneratedCallback = {
         id: node.id,
-        ownerTag: String(props.ownerTag),
+        ownerTag: ownerDevice
+          ? emittedDeviceTag(ownerDevice.from, String(props.ownerTag))
+          : String(props.ownerTag),
         signal: String(props.signal),
         operation: String(props.operation),
       };
@@ -68,8 +88,9 @@ export function lowerGeneratedMachine(
     .filter(node => node.label === 'Device')
     .map(node => ({
       id: node.id,
-      tag: String(node.props.tag),
+      tag: emittedDeviceTag(node.id, String(node.props.tag)),
       type: String(node.props.type),
+      ...(nestedHostTags.has(node.id) ? { hostTag: nestedHostTags.get(node.id) } : {}),
       ...(deviceMember(node.props) ? { member: deviceMember(node.props) } : {}),
       ...(typeof node.props.clock === 'number' ? { clock: node.props.clock } : {}),
       ...(Array.isArray(node.props.configCalls) ? {
@@ -111,7 +132,6 @@ export function lowerGeneratedMachine(
     if (existing) Object.assign(existing, handler);
     else handlers.push(handler);
   }
-  const byId = new Map(graph.nodes.map(node => [node.id, node]));
   const maps: GeneratedAddressMap[] = graph.nodes
     .filter(node => node.label === 'AddressMap')
     .map(node => ({

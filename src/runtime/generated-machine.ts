@@ -28,6 +28,8 @@ export interface GeneratedDevice {
   id: string;
   tag: string;
   type: string;
+  /** Owning board device for a device_add_mconfig child. */
+  hostTag?: string;
   member?: string;
   clock?: number;
   configuration?: { method: string; args: number[] }[];

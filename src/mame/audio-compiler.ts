@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { basename, dirname, extname, join, relative } from 'node:path';
 import type { GeneratedHandlerProgram } from '../runtime/generated-machine.ts';
 import { parseMameAst, splitMameArgs, type MameFunction } from './ast.ts';
@@ -9,6 +9,7 @@ import type { MameHardwareDefinition } from './hardware.ts';
 import {
   AY_FILTER_CONTROL_BASE,
   AY_FILTER_CONTROL_STRIDE,
+  type GeneratedDacFilterPlan,
 } from '../runtime/audio-protocol.ts';
 
 export interface GeneratedNamcoWsgPlan {
@@ -24,6 +25,85 @@ export interface GeneratedNamcoWsgPlan {
   writeProgram: GeneratedHandlerProgram;
   sourceFiles: string[];
   source: { file: string; line: number };
+}
+
+/**
+ * Lower a NAMCO 54XX DAC/op-amp discrete netlist into a compact DSP plan.
+ * Device firmware supplies the three nibble streams; this pass preserves the
+ * source component topology and mixer weighting without copying a game driver.
+ */
+export function compileNamco54Discrete(
+  mameSrc: string,
+  driverFile: string,
+  netlist: string,
+): GeneratedDacFilterPlan {
+  const stem = basename(driverFile, extname(driverFile));
+  const candidate = join(dirname(driverFile), `${stem}_a.cpp`);
+  const sourceFile = existsSync(join(mameSrc, candidate)) ? candidate : driverFile;
+  const source = readFileSync(join(mameSrc, sourceFile), 'utf8');
+  const marker = new RegExp(`DISCRETE_SOUND_START\\s*\\(\\s*${netlist}\\s*\\)`).exec(source);
+  if (!marker) throw new Error(`${netlist}: MAME discrete netlist not found`);
+  const end = source.indexOf('DISCRETE_SOUND_END', marker.index);
+  if (end < 0) throw new Error(`${netlist}: unterminated MAME discrete netlist`);
+  const body = source.slice(marker.index, end);
+  const dacs = macroArguments(body, 'DISCRETE_DAC_R1');
+  const filters = macroArguments(body, 'DISCRETE_OP_AMP_FILTER');
+  const mixer = macroArguments(body, 'DISCRETE_MIXER3')[0];
+  if (dacs.length !== 3 || filters.length !== 3 || !mixer) {
+    throw new Error(`${netlist}: unsupported 54XX discrete topology`);
+  }
+  const mixerName = symbolName(mixer.at(-1));
+  const mixerResistors = mixerName
+    ? resistorTable(source, mixerName).slice(0, 3)
+    : [];
+  if (mixerResistors.length !== 3) {
+    throw new Error(`${netlist}: missing three-input mixer resistance table`);
+  }
+  const conductance = mixerResistors.map(value => 1 / value);
+  const conductanceTotal = conductance.reduce((sum, value) => sum + value, 0);
+  const channels = dacs.map(dac => {
+    const outputNode = symbolName(dac[0]);
+    const input = Number(/NAMCO_54XX_(\d)_DATA/.exec(dac[1]!)?.[1]);
+    const filter = filters.find(candidate => symbolName(candidate[2]) === outputNode);
+    const filterName = symbolName(filter?.at(-1));
+    const components = filterName ? structValues(source, filterName).body : '';
+    const resistors = componentValues(components, 'RES');
+    const capacitors = componentValues(components, 'CAP');
+    if (!Number.isInteger(input) || resistors.length < 3 || capacitors.length < 2) {
+      throw new Error(`${netlist}: incomplete 54XX channel component data`);
+    }
+    const [inputResistance, , feedbackResistance] = resistors;
+    const frequency = 1 / (
+      2 * Math.PI * Math.sqrt(
+        inputResistance! * feedbackResistance! * capacitors[0]! * capacitors[1]!,
+      )
+    );
+    const q = Math.max(0.25, Math.min(4, Math.sqrt(feedbackResistance! / inputResistance!) / 2));
+    const mixerIndex = filters.indexOf(filter!);
+    const gain = (feedbackResistance! / inputResistance!) *
+      (conductance[mixerIndex]! / conductanceTotal);
+    return { input, frequency, q, gain };
+  });
+  const gainTotal = channels.reduce((sum, channel) => sum + channel.gain, 0);
+  return {
+    type: 'DAC_FILTER',
+    channels: channels.map(channel => ({
+      ...channel,
+      gain: channel.gain / gainTotal,
+    })),
+    outputGain: 0.65,
+    source: {
+      file: sourceFile,
+      line: source.slice(0, marker.index).split('\n').length,
+      netlist,
+    },
+  };
+}
+
+function symbolName(expression: string | undefined): string | undefined {
+  return /&?\s*(\w+)/.exec(
+    expression?.replace(/\/\*[\s\S]*?\*\//g, '').trim() ?? '',
+  )?.[1];
 }
 
 export interface GeneratedAy8910Plan {
@@ -603,6 +683,20 @@ function componentValues(source: string, kind: 'RES' | 'CAP'): number[] {
     if (Number.isFinite(value)) result.push(value);
   }
   return result;
+}
+
+function macroArguments(source: string, name: string): string[][] {
+  const calls: string[][] = [];
+  const pattern = new RegExp(`\\b${name}\\s*\\(`, 'g');
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(source)) !== null) {
+    const open = source.indexOf('(', match.index);
+    const close = matchingDelimiter(source, open, '(', ')');
+    if (close < 0) break;
+    calls.push(splitMameArgs(source.slice(open + 1, close)));
+    pattern.lastIndex = close + 1;
+  }
+  return calls;
 }
 
 function resistorTable(source: string, name: string): number[] {
@@ -1778,6 +1872,72 @@ registerProcessor(plan.processorName, GeneratedDiscreteAudioProcessor);
 
 function generatedNamcoWsgSuffix(plan: GeneratedNamcoWsgPlan): string {
   return `
+interface DacFilterPlan {
+  channels: { input: number; frequency: number; q: number; gain: number }[];
+  outputGain: number;
+}
+
+interface BiquadState {
+  input: number;
+  gain: number;
+  b0: number;
+  b2: number;
+  a1: number;
+  a2: number;
+  x1: number;
+  x2: number;
+  y1: number;
+  y2: number;
+}
+
+class GeneratedDacFilterCore {
+  private readonly values = new Float64Array(3);
+  private readonly filters: BiquadState[];
+  private readonly outputGain: number;
+
+  constructor(plan: DacFilterPlan, sampleRate: number) {
+    this.outputGain = plan.outputGain;
+    this.filters = plan.channels.map(channel => {
+      const omega = 2 * Math.PI * channel.frequency / sampleRate;
+      const alpha = Math.sin(omega) / (2 * channel.q);
+      const a0 = 1 + alpha;
+      return {
+        input: channel.input,
+        gain: channel.gain,
+        b0: alpha / a0,
+        b2: -alpha / a0,
+        a1: -2 * Math.cos(omega) / a0,
+        a2: (1 - alpha) / a0,
+        x1: 0,
+        x2: 0,
+        y1: 0,
+        y2: 0,
+      };
+    });
+  }
+
+  write(input: number, data: number): void {
+    if (input >= 0 && input < this.values.length) this.values[input] = (data & 0x0f) / 15;
+  }
+
+  renderInto(output: Float32Array): void {
+    for (let index = 0; index < output.length; index++) {
+      let mixed = 0;
+      for (const filter of this.filters) {
+        const x = this.values[filter.input] ?? 0;
+        const y = filter.b0 * x + filter.b2 * filter.x2 -
+          filter.a1 * filter.y1 - filter.a2 * filter.y2;
+        filter.x2 = filter.x1;
+        filter.x1 = x;
+        filter.y2 = filter.y1;
+        filter.y1 = y;
+        mixed += y * filter.gain;
+      }
+      output[index] = Math.max(-1, Math.min(1, output[index]! + mixed * this.outputGain));
+    }
+  }
+}
+
 export class GeneratedNamcoWsgCore {
   readonly sampleRate: number;
   private readonly waveRom: Uint8Array;
@@ -1785,8 +1945,9 @@ export class GeneratedNamcoWsgCore {
   private readonly soundregs = new Uint8Array(plan.registerCount);
   private enabled = true;
   private readonly fracBits: number;
+  private readonly discrete?: GeneratedDacFilterCore;
 
-  constructor(waveRom: Uint8Array, clock: number) {
+  constructor(waveRom: Uint8Array, clock: number, auxiliary?: DacFilterPlan) {
     this.waveRom = waveRom;
     let nativeClock = clock;
     let clockMultiple = 0;
@@ -1802,6 +1963,7 @@ export class GeneratedNamcoWsgCore {
       volume: [0, 0, 0, 0],
       waveform_select: 0,
     }));
+    if (auxiliary) this.discrete = new GeneratedDacFilterCore(auxiliary, this.sampleRate);
   }
 
   soundEnable(state: number): void {
@@ -1823,10 +1985,13 @@ export class GeneratedNamcoWsgCore {
     );
   }
 
+  writeDiscrete(channel: number, data: number): void {
+    this.discrete?.write(channel, data);
+  }
+
   render(out: Float32Array): void {
     out.fill(0);
-    if (!this.enabled) return;
-    for (const voice of this.voices) {
+    if (this.enabled) for (const voice of this.voices) {
       const volume = voice.volume[0] ?? 0;
       if (!volume) continue;
       const waveBase = voice.waveform_select << 5;
@@ -1842,6 +2007,7 @@ export class GeneratedNamcoWsgCore {
       }
       voice.counter = counter;
     }
+    this.discrete?.renderInto(out);
   }
 }
 
@@ -1876,26 +2042,31 @@ class GeneratedNamcoWsgProcessor extends AudioWorkletProcessor {
         offset?: number;
         data?: number;
         method?: string;
-        writes?: { offset: number; data: number }[];
+        auxiliary?: DacFilterPlan;
+        writes?: { offset: number; data: number; method?: string }[];
       };
       if (message.type === 'init') {
         const clock = message.clock ?? 96_000;
         this.core = new GeneratedNamcoWsgCore(
           message.waveRom ?? new Uint8Array(0x100),
           clock,
+          message.auxiliary,
         );
         this.step = this.core.sampleRate / sampleRate;
         this.nativePosition = CHUNK;
       } else if (message.type === 'write') {
-        this.apply(message.offset ?? 0, message.data ?? 0);
+        this.apply(message.offset ?? 0, message.data ?? 0, message.method);
       } else if (message.type === 'batch') {
-        for (const write of message.writes ?? []) this.apply(write.offset, write.data);
+        for (const write of message.writes ?? []) {
+          this.apply(write.offset, write.data, write.method);
+        }
       }
     };
   }
 
-  private apply(offset: number, data: number): void {
-    if (offset < 0) this.core?.soundEnable(data);
+  private apply(offset: number, data: number, method?: string): void {
+    if (method === 'discrete') this.core?.writeDiscrete(offset, data);
+    else if (offset < 0) this.core?.soundEnable(data);
     else this.core?.write(offset, data);
   }
 

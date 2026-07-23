@@ -17,6 +17,7 @@ interface Target {
   code: string;
   valueType?: string;
   bits?: 1 | 8 | 16 | 32;
+  signed?: boolean;
 }
 
 const SAFE_BINARY_OPERATORS = new Set([
@@ -391,7 +392,13 @@ function targetInfo(expression: GeneratedExpression, context: EmitContext): Targ
       return { code: expression.name, valueType: context.locals.get(expression.name) };
     }
     const member = context.definition.members.find(candidate => candidate.name === expression.name);
-    if (member) return { code: `members.${member.name}`, bits: member.bits };
+    if (member) {
+      return {
+        code: `members.${member.name}`,
+        bits: member.bits,
+        signed: member.signed,
+      };
+    }
   }
   if (expression.kind === 'index') {
     return {
@@ -504,14 +511,20 @@ function visitExpression(
 }
 
 function wrapTarget(value: string, target: Target): string {
-  return target.bits ? wrapBits(value, target.bits) : wrapType(value, target.valueType);
+  return target.bits
+    ? wrapBits(value, target.bits, target.signed)
+    : wrapType(value, target.valueType);
 }
 
-function wrapBits(value: string, bits?: 1 | 8 | 16 | 32): string {
+function wrapBits(value: string, bits?: 1 | 8 | 16 | 32, signed = false): string {
   if (bits === 1) return `((${value}) ? 1 : 0)`;
-  if (bits === 8) return `((${value}) & 0xff)`;
-  if (bits === 16) return `((${value}) & 0xffff)`;
-  if (bits === 32) return `((${value}) >>> 0)`;
+  if (bits === 8) {
+    return signed ? `((${value}) << 24 >> 24)` : `((${value}) & 0xff)`;
+  }
+  if (bits === 16) {
+    return signed ? `((${value}) << 16 >> 16)` : `((${value}) & 0xffff)`;
+  }
+  if (bits === 32) return signed ? `((${value}) | 0)` : `((${value}) >>> 0)`;
   return value;
 }
 

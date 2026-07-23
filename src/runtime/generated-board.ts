@@ -266,6 +266,34 @@ class IrBoard implements Board {
       );
     }
 
+    const hostedProcessors = (machine.devices ?? []).flatMap(specification => {
+      if (!specification.hostTag) return [];
+      const device = this.devices.get(specification.tag);
+      const host = this.devices.get(specification.hostTag);
+      const firmware = regions[specification.tag];
+      if (
+        !device || !host || !firmware ||
+        !device.methodNames().includes('execute_run') ||
+        !device.methodNames().includes('execute_set_input')
+      ) return [];
+      this.configureHostedProcessor(
+        specification.tag,
+        device,
+        host,
+        firmware,
+        sinks,
+      );
+      return [{
+        tag: specification.tag,
+        clock: device.cycleClock(),
+        run: (cycles: number) => {
+          device.set('m_icount', cycles);
+          device.call('execute_run');
+          return cycles - device.get('m_icount');
+        },
+      }];
+    });
+
     const video = machine.execution.screenUpdate
       ? new GeneratedVideoRenderer(
           machine,
@@ -274,10 +302,10 @@ class IrBoard implements Board {
       : undefined;
     this.frameRunner = new GeneratedFrameRunner({
       machine,
-      processors: machine.execution.cpus.map(specification => ({
+      processors: [...machine.execution.cpus.map(specification => ({
         tag: specification.tag,
         enabled: () => !this.cpuHeld.get(specification.tag),
-        run: cycles => {
+        run: (cycles: number) => {
           const executed = this.cpus.get(specification.tag)!.run(cycles);
           this.cpuCycles.set(
             specification.tag,
@@ -285,7 +313,7 @@ class IrBoard implements Board {
           );
           return executed;
         },
-      })),
+      })), ...hostedProcessors],
       onEvent: event => {
         dispatchGeneratedCallback(
           machine,
@@ -303,6 +331,80 @@ class IrBoard implements Board {
       },
       video,
     });
+  }
+
+  private configureHostedProcessor(
+    tag: string,
+    device: Device,
+    host: Device,
+    firmware: Uint8Array,
+    sinks: BoardSinks,
+  ): void {
+    const dataBits = device.methodNames()
+      .map(name => /^data_(\d+)bit$/.exec(name))
+      .find((match): match is RegExpExecArray => Boolean(match));
+    const ram = new Uint8Array(1 << Number(dataBits?.[1] ?? 7));
+    device.bindCall('GETPC', () => (device.get('m_PA') << 6) + device.get('m_PC'));
+    device.bindCall('GETEA', () => (device.get('m_X') << 4) + device.get('m_Y'));
+    device.bindCall('INCPC', () => {
+      const next = device.get('m_PC') + 1;
+      if (next >= 0x40) {
+        device.set('m_PC', 0);
+        device.set('m_PA', device.get('m_PA') + 1);
+      } else {
+        device.set('m_PC', next);
+      }
+      return 0;
+    });
+    device.bindCall('READOP', address => firmware[address & (firmware.length - 1)] ?? 0);
+    device.bindCall('RDMEM', address => ram[address & (ram.length - 1)]! & 0x0f);
+    device.bindCall('WRMEM', (address, value) => {
+      ram[address & (ram.length - 1)] = value & 0x0f;
+      return 0;
+    });
+    for (const [name, member] of [
+      ['TEST_ST', 'm_st'],
+      ['TEST_ZF', 'm_zf'],
+      ['TEST_CF', 'm_cf'],
+      ['TEST_VF', 'm_vf'],
+      ['TEST_SF', 'm_sf'],
+      ['TEST_IF', 'm_if'],
+    ]) {
+      device.bindCall(name!, () => device.get(member!) & 1);
+    }
+    device.bindCall('UPDATE_ST_C', value => device.set('m_st', value & 0x10 ? 0 : 1));
+    device.bindCall('UPDATE_ST_Z', value => device.set('m_st', value === 0 ? 0 : 1));
+    device.bindCall('UPDATE_CF', value => device.set('m_cf', value & 0x10 ? 1 : 0));
+    device.bindCall('UPDATE_ZF', value => device.set('m_zf', value !== 0 ? 0 : 1));
+    device.bindCall('debugger_instruction_hook', () => 0);
+    device.bindCall('standard_irq_callback', () => 0);
+    device.bindCall('fatalerror', () => {
+      throw new Error(`${tag}: generated hosted processor fatalerror`);
+    });
+
+    for (const callback of this.machine.callbacks.filter(candidate =>
+      candidate.ownerTag === tag && candidate.targetMethod)) {
+      if (!host.methodNames().includes(callback.targetMethod!)) continue;
+      device.on(
+        callback.signal,
+        (...args) => host.call(callback.targetMethod!, ...args),
+        callback.slot ?? 0,
+      );
+    }
+    host.bindCall('m_cpu.set_input_line', (_line, state) =>
+      device.call('execute_set_input', 0, state));
+    host.bindCall('NAMCO_54XX_0_DATA', () => 0);
+    host.bindCall('NAMCO_54XX_1_DATA', () => 1);
+    host.bindCall('NAMCO_54XX_2_DATA', () => 2);
+    host.bindCall('m_discrete.write', (channel, value) => {
+      sinks.soundWrite(channel, value, this.soundFraction(), 'discrete');
+      return 0;
+    });
+    if (host.signalNames().includes('irq')) {
+      host.on('irq', state => {
+        if (state) device.reset();
+      });
+    }
   }
 
   frame(framebuffer: Uint32Array): void {

@@ -12,6 +12,7 @@
  * `clock` (defaults to sampleRate — for the WSG they are the same, 96000).
  */
 import type { GeneratedAudioRoute } from './generated-machine.ts';
+import type { GeneratedDacFilterPlan } from './audio-protocol.ts';
 
 export interface WorkletCoreConfig {
   readonly sampleRate: number;
@@ -25,6 +26,7 @@ export interface WorkletCoreConfig {
   readonly routes?: GeneratedAudioRoute[];
   /** DAC route gain override */
   readonly dacGain?: number;
+  readonly auxiliary?: GeneratedDacFilterPlan;
   /** video refresh rate (Hz) — paces the worklet's write scheduler */
   readonly refresh?: number;
   /** log worklet scheduler stats to the console once per second */
@@ -92,6 +94,7 @@ export class AudioOutput {
       chipGains: core.chipGains,
       routes: core.routes,
       dacGain: core.dacGain,
+      auxiliary: core.auxiliary,
       refresh: core.refresh,
       debug: core.debug,
     });

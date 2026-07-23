@@ -41,6 +41,7 @@ interface WsgCore {
   readonly sampleRate: number;
   soundEnable(state: number): void;
   write(offset: number, data: number): void;
+  writeDiscrete(offset: number, data: number): void;
   render(out: Float32Array): void;
 }
 
@@ -274,19 +275,27 @@ async function createAudioProbe(
   if (config.sound.kind === 'wsg') {
     const generated = await import(
       moduleUrl(join(outRoot, 'runtime/generated/audio/wsg-worklet.js'))
-    ) as { GeneratedNamcoWsgCore: new (waveRom: Uint8Array, clock: number) => WsgCore };
+    ) as {
+      GeneratedNamcoWsgCore: new (
+        waveRom: Uint8Array,
+        clock: number,
+        auxiliary?: ShellConfig['sound']['auxiliary'],
+      ) => WsgCore;
+    };
     const waveRom = regions[config.sound.waveRegion ?? 'namco'];
     assert.ok(waveRom, `${config.game}: WSG wave ROM is missing`);
     const core = new generated.GeneratedNamcoWsgCore(
       waveRom,
       config.sound.clock ?? 96_000,
+      config.sound.auxiliary,
     );
     const chunks: Float32Array[] = [];
     let sampleCarry = 0;
     return {
       render(writes, capture) {
         for (const write of writes) {
-          if (write.offset < 0) core.soundEnable(write.data);
+          if (write.method === 'discrete') core.writeDiscrete(write.offset, write.data);
+          else if (write.offset < 0) core.soundEnable(write.data);
           else core.write(write.offset, write.data);
         }
         sampleCarry += core.sampleRate / config.board.screen.refresh;

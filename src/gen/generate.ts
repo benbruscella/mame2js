@@ -14,6 +14,8 @@ import {
 import { emitGeneratedMachine, lowerAudioRoutes } from './emit-machine.ts';
 import type { BoardConfig } from '../runtime/types.ts';
 import { compileMameVideo } from '../mame/video-compiler.ts';
+import { compileNamco54Discrete } from '../mame/audio-compiler.ts';
+import { mameDeviceRomSet } from '../mame/device-compiler.ts';
 import {
   GAME_CATEGORIES,
   gameDataPath,
@@ -336,6 +338,21 @@ export async function generate(graph: KnowledgeGraph, opts: GenerateOptions): Pr
                 ...AY_MIX[soundFamily],
               }
             : { kind: 'none' };
+  const discreteNetlist = devices
+    .filter(device => device.props.type === 'DISCRETE')
+    .flatMap(device => Array.isArray(device.props.config) ? device.props.config : [])
+    .map(String)
+    .map(value => /\bDISCRETE\s*\([^,]+,[^,]+,\s*(\w+)\s*\)/.exec(value)?.[1])
+    .find((value): value is string => Boolean(value));
+  if (sound.kind === 'wsg' && discreteNetlist) {
+    Object.assign(sound, {
+      auxiliary: compileNamco54Discrete(
+        opts.mameSrc,
+        String(graph.meta.driverFile),
+        discreteNetlist,
+      ),
+    });
+  }
 
   // --- roms ----------------------------------------------------------------------
   // Clone-family alternates: MAME renames/redumps program ROMs across
@@ -380,6 +397,38 @@ export async function generate(graph: KnowledgeGraph, opts: GenerateOptions): Pr
       };
     }),
   }));
+  if (opts.fullGraph) {
+    const full = new Graph(opts.fullGraph);
+    for (const nested of devices.filter(device => device.props.type === 'MB8844')) {
+      const ownerConfigEdge = graph.edges.find(edge =>
+        edge.rel === 'HAS_DEVICE' && edge.to === nested.id);
+      const ownerConfig = ownerConfigEdge && g.node(ownerConfigEdge.from);
+      const hostEdge = ownerConfigEdge && graph.edges.find(edge =>
+        edge.rel === 'CALLS' && edge.to === ownerConfigEdge.from &&
+        g.node(edge.from)?.label === 'Device');
+      const host = hostEdge && g.node(hostEdge.from);
+      if (!ownerConfig || !host) continue;
+      const sourceFile = String(ownerConfig.props.sourceFile ?? '');
+      const className = String(ownerConfig.props.cls ?? '');
+      const romSetName = sourceFile && className
+        ? mameDeviceRomSet(opts.mameSrc, sourceFile, className)
+        : undefined;
+      const deviceRomSet = romSetName && full.node(`romset:${romSetName}`);
+      if (!deviceRomSet) continue;
+      for (const { node: region } of full.out(deviceRomSet.id, 'HAS_REGION')) {
+        roms.push({
+          region: `${host.props.tag}:${region.props.tag}`,
+          size: Number(region.props.size),
+          loads: full.out(region.id, 'LOADS').map(({ node: rom }) => ({
+            file: String(rom.props.file),
+            offset: Number(rom.props.offset),
+            size: Number(rom.props.size),
+            crc: String(rom.props.crc),
+          })),
+        });
+      }
+    }
+  }
 
   // --- inputs -----------------------------------------------------------------------
   // Port polarity comes from the graph per field: galaga/pacman inputs are

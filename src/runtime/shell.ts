@@ -9,6 +9,7 @@ import { AudioOutput } from './audio.ts';
 import { readZip, crc32 } from './zip.ts';
 import type { Regions, BoardConfig } from './types.ts';
 import type { GeneratedAudioRoute } from './generated-machine.ts';
+import type { GeneratedDacFilterPlan } from './audio-protocol.ts';
 
 export interface RomLoad {
   file: string; offset: number; size: number; crc: string;
@@ -34,6 +35,8 @@ export interface SoundSpec {
   routes?: GeneratedAudioRoute[];
   /** DAC route gain override (default = junofrst's 0.25) */
   dacGain?: number;
+  /** MAME discrete DAC/filter network mixed with the primary core. */
+  auxiliary?: GeneratedDacFilterPlan;
 }
 
 /** the ROM drop target's visual states (built by buildDom().dropZone) */
@@ -242,6 +245,7 @@ export async function runShell(cfg: ShellConfig, preloaded?: Regions): Promise<v
         chipGains: cfg.sound.chipGains,
         routes: cfg.sound.routes,
         dacGain: cfg.sound.dacGain,
+        auxiliary: cfg.sound.auxiliary,
         refresh: cfg.board.screen.refresh,
         debug: input.debug,
       },

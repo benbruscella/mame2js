@@ -9,7 +9,10 @@ const definition: GeneratedDeviceDefinition = {
   hierarchy: ['test_device'],
   sourceFiles: ['src/devices/test.cpp'],
   constants: { LIMIT: 4 },
-  members: [{ name: 'm_total', valueType: 'uint16_t', bits: 16, initial: 0 }],
+  members: [
+    { name: 'm_total', valueType: 'uint16_t', bits: 16, initial: 0 },
+    { name: 'm_budget', valueType: 'int', bits: 32, signed: true, initial: 0 },
+  ],
   callbacks: [],
   timers: [],
   methods: [
@@ -85,6 +88,11 @@ const definition: GeneratedDeviceDefinition = {
                 callee: { kind: 'identifier', name: 'step' },
                 args: [{ kind: 'identifier', name: 'x' }],
               },
+            }, {
+              op: 'assign',
+              target: { kind: 'identifier', name: 'm_budget' },
+              operator: '-=',
+              value: { kind: 'number', value: 1 },
             }],
           }],
         }],
@@ -116,8 +124,9 @@ const methods = Function(`return ${emitted.source}`)() as Record<
   string,
   (runtime: { members: Record<string, unknown> }) => unknown
 >;
-const runtime = { members: { m_total: 0 } };
+const runtime = { members: { m_total: 0, m_budget: 0 } };
 methods.render!(runtime);
 assert.equal(runtime.members.m_total, 40);
+assert.equal(runtime.members.m_budget, -16);
 
 console.log('device-codegen.spec: IR selection, dependency closure and execution passed');

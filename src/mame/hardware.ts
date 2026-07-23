@@ -432,6 +432,7 @@ export function emitHardwareClosure(closure: HardwareClosure, outRoot: string): 
         'ER2055',
         'LS259',
         'MB14241',
+        'MB8844',
         'NAMCO_06XX',
         'NAMCO_54XX',
         'STARFIELD_05XX',

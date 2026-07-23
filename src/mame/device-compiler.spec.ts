@@ -67,5 +67,14 @@ assert.equal(
   4,
   'fixed MAME MCU arrays must retain their source-declared size',
 );
+assert.equal(
+  generatedMb8844.members.find(member => member.name === 'm_icount')?.signed,
+  true,
+  'signed MAME execution counters must remain signed in device IR',
+);
+registerGeneratedDevice(generatedMb8844);
+const mb8844 = createDevice('MB8844');
+mb8844.set('m_icount', -1);
+assert.equal(mb8844.get('m_icount'), -1);
 
 console.log('device-compiler.spec: source-derived latch, ER2055 and MB8844 devices passed');
