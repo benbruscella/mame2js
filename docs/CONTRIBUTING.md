@@ -90,6 +90,23 @@ The target outcome is a small QA token plus reusable compiler improvements.
 Adding the next machine should not add a board implementation, CPU port,
 renderer, or sound class under `src`.
 
+### QUICK PATH
+
+For an already listed target, the normal sequence is:
+
+```sh
+node bin/mamekit.js graph <target>       # inspect extraction first
+npm run clean
+node bin/mamekit.js <target> --skip-app  # generate only this machine
+node bin/mamekit.js --build-runtime --build-app --targets <target>
+npm run audit:generated
+npm run serve                            # verify ROM, input, video and audio
+```
+
+Do not add the target to `gen:all` while it is still being brought up. First
+fix graph, IR and generated-hardware gaps in isolation; add its adjacent game
+token and golden only after the generated machine is credible.
+
 ### STEP 1: IDENTIFY AND REGISTER THE TARGET
 
 Use the MAME short name. If it is a new required target, add it to
@@ -168,6 +185,13 @@ Implement the narrowest reusable lowering rule that faithfully represents the
 MAME source. Preserve the source file and span in the resulting IR. Add a
 colocated compiler spec for every new AST shape, expression, operation, or
 hardware semantic.
+
+Profile before adding an optimization. If a source-derived device method is
+slow because a large loop is walking handler IR, extend generic device codegen
+rather than replacing the device with handwritten TypeScript. Keep unsupported
+methods on the interpreter path and add a compiled-versus-interpreted
+differential spec covering writes, framebuffer effects and complete device
+state.
 
 Never solve a gap by:
 
@@ -275,6 +299,15 @@ Run `npm run test:generation` after broad changes to parsing, graph
 reachability, IR schemas, hardware closure, output layout, or app registration.
 It covers the wider required-target inventory and is intentionally more
 expensive than the current-game CI gate.
+
+### DEFINITION OF DONE
+
+A machine is ready for the current working set when clean generation and audit
+pass, its runtime report has no hidden blocker, its real-ROM contract and
+minimum fps pass, coin/start/gameplay/video/audio have been checked in the
+browser, existing game goldens remain unchanged, and every new compiler rule
+has a colocated reusable test. At that point the checked-in game-specific
+surface should still be only `src/games/<target>.ts` and its adjacent spec.
 
 ## 5. TEST AND REVIEW REQUIREMENTS
 
