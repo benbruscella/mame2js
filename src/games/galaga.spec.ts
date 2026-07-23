@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { generatedDeviceMethodsSource } from '../mame/device-codegen.ts';
 import { compileMameDevice } from '../mame/device-compiler.ts';
 import { indexMameHardware } from '../mame/hardware.ts';
 import { compileNamco51Protocol } from '../mame/namco51-compiler.ts';
@@ -8,6 +9,7 @@ import {
   createDevice,
   registerGeneratedDevice,
   type GeneratedDeviceDefinition,
+  type GeneratedDeviceMethodMap,
 } from '../runtime/generated-device.ts';
 import { galaga } from './galaga.ts';
 import { assertGameContract, gameSourceGraph, mameSourceRoot } from './test-support.ts';
@@ -42,22 +44,54 @@ assert.equal(starfield.summary.methods, 8);
 assert.equal(starfield.constants.LFSR_SEED, 0x7fff);
 clearGeneratedDevices();
 registerGeneratedDevice(starfield as unknown as GeneratedDeviceDefinition);
-const device = createDevice('STARFIELD_05XX');
-device.call('enable_starfield', 1);
-device.call('set_scroll_speed', 6, 0);
-device.call('set_active_starfield_sets', 1, 2);
-device.call('set_starfield_config', 16, 0, 272);
-const pens = new Map<number, number>();
-const bitmap = {
-  'pix=': (_y: number, _x: number, pen: number) => pens.set(pen, (pens.get(pen) ?? 0) + 1),
-  fill: () => {},
-};
+const interpreted = createDevice('STARFIELD_05XX');
+const emitted = generatedDeviceMethodsSource(starfield);
+assert.deepEqual(emitted.methods.sort(), ['draw_starfield', 'get_next_lfsr_state']);
+// Evaluating emitted source is test-only. Production imports this as static JS
+// from the generated device module and never uses runtime code generation.
+const compiledMethods = Function(`return ${emitted.source}`)() as GeneratedDeviceMethodMap;
+registerGeneratedDevice({
+  ...starfield,
+  compiledMethods,
+} as unknown as GeneratedDeviceDefinition);
+const compiled = createDevice('STARFIELD_05XX');
+for (const device of [interpreted, compiled]) {
+  device.call('enable_starfield', 1);
+  device.call('set_scroll_speed', 6, 0);
+  device.call('set_active_starfield_sets', 1, 2);
+  device.call('set_starfield_config', 16, 0, 272);
+}
 const cliprect = {
   min_x: 0, max_x: 287, min_y: 0, max_y: 223,
   contains: (x: number, y: number) => x >= 0 && x <= 287 && y >= 0 && y <= 223,
 };
-(device as unknown as { call(name: string, ...args: unknown[]): number })
-  .call('draw_starfield', bitmap, cliprect, 0);
+const draw = (device: ReturnType<typeof createDevice>): {
+  elapsed: number;
+  pixels: [number, number, number][];
+} => {
+  const pixels: [number, number, number][] = [];
+  const bitmap = {
+    'pix=': (y: number, x: number, pen: number) => pixels.push([y, x, pen]),
+    fill: () => {},
+  };
+  const started = performance.now();
+  (device as unknown as { call(name: string, ...args: unknown[]): number })
+    .call('draw_starfield', bitmap, cliprect, 0);
+  return { elapsed: performance.now() - started, pixels };
+};
+const interpretedDraw = draw(interpreted);
+const compiledDraw = draw(compiled);
+assert.deepEqual(compiledDraw.pixels, interpretedDraw.pixels);
+for (const member of starfield.members) {
+  assert.equal(compiled.get(member.name), interpreted.get(member.name), member.name);
+}
+assert.ok(
+  compiledDraw.elapsed * 5 < interpretedDraw.elapsed,
+  `compiled starfield must be at least 5x faster ` +
+    `(${interpretedDraw.elapsed.toFixed(1)}ms vs ${compiledDraw.elapsed.toFixed(1)}ms)`,
+);
+const pens = new Map<number, number>();
+for (const [, , pen] of compiledDraw.pixels) pens.set(pen, (pens.get(pen) ?? 0) + 1);
 assert.ok(pens.size >= 30, `05xx must draw stars (got ${pens.size} distinct pens)`);
 assert.ok([...pens.keys()].every(pen => pen >= 512 && pen < 512 + 64),
   '05xx star pens live at STARS_COLOR_BASE');

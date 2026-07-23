@@ -12,9 +12,8 @@ export const galaga: GameTestContract = {
   // and the WSG is silent until then (matches real hardware: the boot boom is
   // the 54xx discrete circuit, not the WSG) — so all actions land post-boot.
   frames: 1600,
-  // Interpreter-bound today: the 05xx advances its LFSR 65536x per frame
-  // through handler IR. Device codegen (the CPU-style emit path) lifts this.
-  minimumFps: 10,
+  // The generated 05xx hot loop is AOT-compiled from device IR.
+  minimumFps: 45,
   checkpoints: [1, 300, 720, 900, 1050, 1300, 1600],
   actions: [
     { atFrame: 950, code: 'Digit5', heldFrames: 10, releasedFrames: 20 },

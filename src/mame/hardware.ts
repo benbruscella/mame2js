@@ -14,6 +14,7 @@ import { compileMameHandler } from './handler-ir.ts';
 import { parseZ80OpcodeDsl } from './opcode-dsl.ts';
 import { compileMameI8080, compileMameZ80 } from './cpu-compiler.ts';
 import { generatedCpuExecutableSource } from './cpu-codegen.ts';
+import { generatedDeviceExecutableSource } from './device-codegen.ts';
 import { compileMameDevice } from './device-compiler.ts';
 import { compileNamco51Protocol } from './namco51-compiler.ts';
 import {
@@ -624,13 +625,10 @@ export function emitHardwareClosure(closure: HardwareClosure, outRoot: string): 
         join(devicesDir, `${slug}.device.ir.json`),
         JSON.stringify(device, null, 2),
       );
-      writeFileSync(join(devicesDir, `${slug}.ts`), `// GENERATED from MAME device source; do not edit.
-import type { GeneratedDeviceDefinition } from '../../core/generated-device.js';
-import deviceData from './${slug}.device.ir.json' with { type: 'json' };
-
-export const device = deviceData as unknown as GeneratedDeviceDefinition;
-export default device;
-`);
+      writeFileSync(
+        join(devicesDir, `${slug}.ts`),
+        generatedDeviceExecutableSource(device, `${slug}.device.ir.json`),
+      );
       continue;
     }
   }

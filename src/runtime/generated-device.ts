@@ -31,6 +31,18 @@ interface DeviceMethod {
   program: GeneratedHandlerProgram;
 }
 
+export interface GeneratedDeviceExecutionContext {
+  readonly members: Record<string, unknown>;
+  invoke(name: string, ...args: GeneratedCallArgument[]): unknown;
+}
+
+export type GeneratedDeviceMethodExecutable = (
+  runtime: GeneratedDeviceExecutionContext,
+  ...args: GeneratedCallArgument[]
+) => unknown;
+
+export type GeneratedDeviceMethodMap = Record<string, GeneratedDeviceMethodExecutable>;
+
 export interface GeneratedDeviceDefinition {
   type: string;
   constants: Record<string, number>;
@@ -38,6 +50,7 @@ export interface GeneratedDeviceDefinition {
   callbacks: DeviceCallback[];
   timers?: DeviceTimer[];
   methods: DeviceMethod[];
+  compiledMethods?: GeneratedDeviceMethodMap;
   start?: string;
   reset?: string;
   summary: {
@@ -121,6 +134,7 @@ class IrDevice implements Device {
   private readonly methodParams = new Map<string, string[]>();
   private readonly listeners = new Map<string, DeviceCallbackListener[][]>();
   private readonly bindings: GeneratedHandlerBindings;
+  private readonly executionContext: GeneratedDeviceExecutionContext;
   private readonly timers = new Map<string, { timer: IrTimer; callback: string }>();
 
   constructor(definition: GeneratedDeviceDefinition, clock: number) {
@@ -172,6 +186,14 @@ class IrDevice implements Device {
       },
       referenceCalls,
       callParameters,
+    };
+    this.executionContext = {
+      members: this.members,
+      invoke: (name, ...args) => {
+        const method = this.methods.get(name);
+        if (!method) throw new Error(`${this.definition.type} has no generated method "${name}"`);
+        return this.executeMethod(method, this.methodParams.get(name)!, args);
+      },
     };
     const pendingTimers = [...this.timers.values()];
     this.bindings.calls!.timer_alloc = () => pendingTimers.shift()?.timer ?? 0;
@@ -244,6 +266,8 @@ class IrDevice implements Device {
     parameterNames: string[],
     args: GeneratedCallArgument[],
   ): unknown {
+    const compiled = this.definition.compiledMethods?.[method.name];
+    if (compiled) return compiled(this.executionContext, ...args);
     const locals: Record<string, unknown> = {};
     for (let index = 0; index < parameterNames.length; index++) {
       locals[parameterNames[index]!] = args[index] ?? 0;
