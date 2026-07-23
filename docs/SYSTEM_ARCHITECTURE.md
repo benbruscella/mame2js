@@ -212,6 +212,20 @@ browser runtime supplies generic register, bus and program-execution machinery.
 lowers executable methods to typed programs, and emits device IR. Small device
 modules import that JSON and register it with the generic device runtime.
 
+`src/mame/device-codegen.ts` identifies methods with nested hot loops and emits
+direct, static JavaScript for those methods plus their source-defined
+dependencies. Selection is based on IR shape, not a game or device name. The
+generated module attaches compiled methods to the same device definition; any
+method omitted by codegen continues through the generic IR interpreter. This
+keeps the interpreter as the semantic reference while removing per-operation
+tree walking from pixel-scale loops such as the MAME 05XX starfield.
+
+Compiled device methods are build artifacts, not handwritten runtime ports and
+not runtime `eval`. Colocated specs execute emitted source against the
+interpreter and compare writes and complete device state. Unsupported
+expressions are excluded during generation rather than guessed or tested
+speculatively during browser registration.
+
 ### VIDEO
 
 `src/mame/video-compiler.ts` resolves screen-update methods, palette behavior,

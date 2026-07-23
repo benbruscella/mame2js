@@ -4,7 +4,6 @@ import type {
 } from '../runtime/generated-machine.ts';
 import type {
   GeneratedDeviceDefinition,
-  GeneratedDeviceMember,
   GeneratedDeviceMethod,
 } from './device-compiler.ts';
 
