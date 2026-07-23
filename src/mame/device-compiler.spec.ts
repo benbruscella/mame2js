@@ -58,4 +58,14 @@ assert.equal(
   'dynamic MAME device arrays must lower to fixed generated storage',
 );
 
-console.log('device-compiler.spec: source-derived latch and ER2055 devices passed');
+const mb8844Definition = hardware.get('MB8844');
+assert.ok(mb8844Definition, 'MAME hardware index should resolve MB8844');
+const generatedMb8844 = compileMameDevice(mameSrc, mb8844Definition);
+assert.equal(generatedMb8844.summary.diagnostics, 0);
+assert.equal(
+  generatedMb8844.members.find(member => member.name === 'm_SP')?.values?.length,
+  4,
+  'fixed MAME MCU arrays must retain their source-declared size',
+);
+
+console.log('device-compiler.spec: source-derived latch, ER2055 and MB8844 devices passed');

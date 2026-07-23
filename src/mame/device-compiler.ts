@@ -131,6 +131,10 @@ export function compileMameDevice(
     sources.map(source => source.source).join('\n'),
     constants,
   );
+  const fixedArrays = fixedMemberArrays(
+    [...classes.values()].map(declaration => declaration.body).join('\n'),
+    constants,
+  );
   const members: GeneratedDeviceMember[] = hierarchy.flatMap(className => {
     const declaration = classes.get(className);
     if (!declaration) return [];
@@ -145,7 +149,7 @@ export function compileMameDevice(
         return [];
       }
       const bits = integerBits(member.valueType);
-      const allocated = allocatedArrays.get(member.name);
+      const allocated = allocatedArrays.get(member.name) ?? fixedArrays.get(member.name);
       return [{
         name: member.name,
         valueType: member.valueType,
@@ -466,6 +470,21 @@ function allocatedMemberArrays(
       allocation[1]!,
       Array.from({ length: count }, () => initial ?? 0),
     );
+  }
+  return arrays;
+}
+
+function fixedMemberArrays(
+  source: string,
+  constants: Record<string, number>,
+): Map<string, number[]> {
+  const arrays = new Map<string, number[]>();
+  for (const declaration of source.matchAll(
+    /^\s*(?:const\s+)?[\w:]+\s+(m_\w+)\s*\[([^\]]+)\]\s*;/gm,
+  )) {
+    const count = evalExpr(declaration[2]!.trim(), constants);
+    if (count === null || !Number.isInteger(count) || count <= 0) continue;
+    arrays.set(declaration[1]!, Array.from({ length: count }, () => 0));
   }
   return arrays;
 }
