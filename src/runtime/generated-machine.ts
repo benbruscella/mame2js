@@ -387,9 +387,15 @@ export function wireDeviceCallbacks(
       ignored.push(callback);
       continue;
     }
+    // Read callbacks (set_ioport) pull a value FROM the port: the device calls
+    // the callback with no data and the transform (mask/rshift) applies to the
+    // value read back. Write callbacks push data TO the endpoint: the transform
+    // applies to the emitted argument.
     device.on(
       signal,
-      (...args) => endpoint(applySignalTransforms(args.at(-1) ?? 0, callback.transforms)),
+      callback.targetPort
+        ? () => applySignalTransforms(Number(endpoint(0)) || 0, callback.transforms)
+        : (...args) => endpoint(applySignalTransforms(args.at(-1) ?? 0, callback.transforms)),
       callback.slot ?? 0,
     );
     bound.push(target);
