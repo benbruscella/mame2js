@@ -59,7 +59,7 @@ export const galaga: GameTestContract = {
         state: 'e4d52427',
       },
       '720': {
-        video: '3a668c46',
+        video: '7f7fea0b',
         state: '8766b4c5',
       },
       '900': {

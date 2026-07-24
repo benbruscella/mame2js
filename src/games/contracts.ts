@@ -6,6 +6,7 @@ import { galaxian } from './galaxian.ts';
 import { galaga } from './galaga.ts';
 import { digdug } from './digdug.ts';
 import { mpatrol } from './mpatrol.ts';
+import { rocnrope } from './rocnrope.ts';
 
 export const supportedGameContracts = [
   pacman,
@@ -16,4 +17,5 @@ export const supportedGameContracts = [
   galaga,
   digdug,
   mpatrol,
+  rocnrope,
 ] as const;

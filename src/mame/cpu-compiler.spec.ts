@@ -1,5 +1,10 @@
 import assert from 'node:assert/strict';
-import { compileMameI8080, compileMameM6803, compileMameZ80 } from './cpu-compiler.ts';
+import {
+  compileMameI8080,
+  compileMameKonami1,
+  compileMameM6803,
+  compileMameZ80,
+} from './cpu-compiler.ts';
 import { generatedCpuExecutableSource } from './cpu-codegen.ts';
 import {
   clearGeneratedCpus,
@@ -162,4 +167,98 @@ assert.equal(m6803.get('m_d.b.h'), 0x5a);
 assert.equal(m6803.step(), 3);
 assert.deepEqual(m6803Signals.at(-1), ['out_p1_cb', 0x5a]);
 
-console.log('cpu-compiler.spec: 30 passed');
+const konami1Definition = compileMameKonami1(process.env.MAME_SRC ?? '../mame');
+assert.equal(konami1Definition.summary.opcodes, 768);
+assert.equal(konami1Definition.summary.compiledOpcodes, 768);
+assert.equal(konami1Definition.summary.diagnostics, 0);
+assert.equal(new Set(konami1Definition.opcodes.map(opcode => opcode.key)).size, 768);
+assert.equal(konami1Definition.constants.M6809_IRQ_LINE, 0);
+assert.equal(konami1Definition.constants.M6809_FIRQ_LINE, 1);
+assert.ok(konami1Definition.sourceFiles.includes('src/devices/cpu/m6809/m6809.lst'));
+assert.ok(konami1Definition.sourceFiles.includes('src/mame/konami/konami1.cpp'));
+const konami1Source = generatedCpuExecutableSource(konami1Definition);
+assert.match(konami1Source, /private readOpcode/);
+assert.match(
+  konami1Source,
+  /private method_mul[\s\S]*?method_set_flags16r\(4, result\)/,
+  'KONAMI1 MUL must preserve MAME’s declared uint16_t result in generated code',
+);
+
+clearGeneratedCpus();
+registerGeneratedCpu(konami1Definition);
+const konami1Memory = new Uint8Array(0x10000);
+// Opcode bytes are encrypted with the address-dependent XOR from konami1.cpp;
+// arguments and vectors remain plain.
+konami1Memory.set([0x86 ^ 0x22, 0x42, 0x97 ^ 0x82, 0x10], 0x8000);
+konami1Memory[0xfffe] = 0x80;
+konami1Memory[0xffff] = 0x00;
+const konami1 = createCpu('KONAMI1', {
+  read: address => konami1Memory[address]!,
+  write: (address, data) => { konami1Memory[address] = data; },
+  in: () => 0xff,
+  out: () => {},
+});
+assert.equal(konami1.step(), 2);
+assert.equal(konami1.get('m_d.b.h'), 0x42);
+assert.equal(konami1.step(), 4);
+assert.equal(konami1Memory[0x10], 0x42);
+konami1.setIrqLine(true);
+assert.equal(konami1.get('m_irq_line'), 1);
+assert.equal(konami1.get('m_firq_line'), 0);
+
+const indexedMemory = new Uint8Array(0x10000);
+indexedMemory.set([0xec ^ 0x22, 0x64], 0x8000); // LDD 4,S
+indexedMemory[0x6004] = 0x12;
+indexedMemory[0x6005] = 0x34;
+indexedMemory[0xfffe] = 0x80;
+indexedMemory[0xffff] = 0x00;
+const indexed = createCpu('KONAMI1', {
+  read: address => indexedMemory[address]!,
+  write: (address, data) => { indexedMemory[address] = data; },
+  in: () => 0xff,
+  out: () => {},
+});
+indexed.set('m_s', 0x6000);
+indexed.step();
+assert.equal(indexed.get('m_d'), 0x1234, 'KONAMI1 must lower 6809 5-bit S-relative addressing');
+
+const multiplyMemory = new Uint8Array(0x10000);
+multiplyMemory[0x8000] = 0x3d ^ 0x22; // MUL
+multiplyMemory[0xfffe] = 0x80;
+multiplyMemory[0xffff] = 0x00;
+const multiply = createCpu('KONAMI1', {
+  read: address => multiplyMemory[address]!,
+  write: (address, data) => { multiplyMemory[address] = data; },
+  in: () => 0xff,
+  out: () => {},
+});
+multiply.set('m_d.b.h', 0x10);
+multiply.set('m_d.b.l', 0x20);
+multiply.step();
+assert.equal(
+  multiply.get('m_d'),
+  0x0200,
+  'KONAMI1 MUL must not truncate a 16-bit product through the 8-bit flag helper',
+);
+
+const cwaiMemory = new Uint8Array(0x10000);
+cwaiMemory.set([0x3c ^ 0x22, 0xef], 0x8000); // CWAI #$EF: enable IRQ, then wait
+cwaiMemory[0xfff8] = 0x90;
+cwaiMemory[0xfff9] = 0x00;
+cwaiMemory[0xfffe] = 0x80;
+cwaiMemory[0xffff] = 0x00;
+const cwai = createCpu('KONAMI1', {
+  read: address => cwaiMemory[address]!,
+  write: (address, data) => { cwaiMemory[address] = data; },
+  in: () => 0xff,
+  out: () => {},
+});
+cwai.set('m_s', 0x6000);
+cwai.step();
+const cwaiStack = cwai.get('m_s');
+cwai.setIrqLine(true);
+cwai.step();
+assert.equal(cwai.get('m_pc'), 0x9000, 'CWAI must evaluate and retain its pending IRQ vector');
+assert.equal(cwai.get('m_s'), cwaiStack, 'CWAI wake-up must not push the state twice');
+
+console.log('cpu-compiler.spec: 44 passed');

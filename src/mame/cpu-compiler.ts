@@ -11,6 +11,7 @@ import {
   type OpcodeDslOperation,
   type Z80OpcodeDsl,
 } from './opcode-dsl.ts';
+import { parseM6809Dsl } from './m6809-dsl.ts';
 
 export interface GeneratedCpuAlias {
   member: string;
@@ -59,6 +60,20 @@ export interface GeneratedCpuDefinition {
   service: GeneratedHandlerProgram;
   fetch: GeneratedHandlerProgram;
   opcodes: GeneratedCpuOpcode[];
+  registerBindings?: {
+    reg8: string[];
+    reg16: string[];
+    index: {
+      selector: string;
+      mask: number;
+      members: Record<string, string>;
+    };
+  };
+  opcodeDecrypt?: {
+    boundary: number;
+    addressMask: number;
+    xorByAddress: Record<string, number>;
+  };
   internal?: {
     ram: { start: number; end: number }[];
     ports: {
@@ -546,6 +561,338 @@ export function compileMameM6803(mameSrc: string): GeneratedCpuDefinition {
   };
 }
 
+/**
+ * Compile MAME's standard 6809 microcode DSL and apply the KONAMI-1 opcode
+ * fetch transform from the device source. Operand/data reads remain plain,
+ * matching konami1_device::mi_konami1.
+ */
+export function compileMameKonami1(mameSrc: string): GeneratedCpuDefinition {
+  const cppFile = 'src/devices/cpu/m6809/m6809.cpp';
+  const headerFile = 'src/devices/cpu/m6809/m6809.h';
+  const inlineFile = 'src/devices/cpu/m6809/m6809inl.h';
+  const dslFile = 'src/devices/cpu/m6809/m6809.lst';
+  const baseDslFile = 'src/devices/cpu/m6809/base6x09.lst';
+  const deviceFile = 'src/mame/konami/konami1.cpp';
+  const deviceHeaderFile = 'src/mame/konami/konami1.h';
+  const cpp = readFileSync(join(mameSrc, cppFile), 'utf8');
+  const header = readFileSync(join(mameSrc, headerFile), 'utf8');
+  const inline = readFileSync(join(mameSrc, inlineFile), 'utf8');
+  const dslSource = readFileSync(join(mameSrc, dslFile), 'utf8');
+  const baseDsl = readFileSync(join(mameSrc, baseDslFile), 'utf8');
+  const device = readFileSync(join(mameSrc, deviceFile), 'utf8');
+  const deviceHeader = readFileSync(join(mameSrc, deviceHeaderFile), 'utf8');
+  const dsl = parseM6809Dsl(dslSource, baseDsl);
+  const baseUnit = parseMameSource(cppFile, cpp);
+  const inlineUnit = parseMameSource(inlineFile, inline);
+  const base = (name: string, parameters?: string) => [
+    ...baseUnit.functions,
+    ...inlineUnit.functions,
+  ].find(fn =>
+    fn.className === 'm6809_base_device' &&
+    fn.name === name &&
+    (parameters === undefined || fn.parameters === parameters));
+
+  const methods: GeneratedCpuMethod[] = [];
+  const addMethod = (
+    name: string,
+    parameters: string,
+    sourceBody: string,
+    sourceFile: string,
+    sourceLine: number,
+  ): void => {
+    methods.push({
+      name,
+      parameters,
+      program: compileMameHandler(normalizeM6809Source(sourceBody)),
+      source: sourceRef(sourceFile, sourceLine),
+    });
+  };
+
+  for (const [name, parameters] of [
+    ['read_tfr_exg_816_register', 'uint8_t reg'],
+    ['read_exg_168_register', 'uint8_t reg'],
+    ['write_exgtfr_register', 'uint8_t reg, uint16_t value'],
+  ] as const) {
+    const fn = base(name);
+    if (!fn) throw new Error(`MAME M6809 source is missing ${name}`);
+    addMethod(name, parameters, fn.body, cppFile, fn.span.line);
+  }
+  for (const [sourceName, parameters, generatedName] of [
+    ['read_operand', '', 'read_operand0'],
+    ['read_operand', 'int ordinal', 'read_operand1'],
+    ['write_operand', 'uint8_t data', 'write_operand0'],
+    ['write_operand', 'int ordinal, uint8_t data', 'write_operand1'],
+    ['daa', '', 'daa'],
+    ['mul', '', 'mul'],
+  ] as const) {
+    const fn = base(sourceName, parameters);
+    if (!fn) throw new Error(`MAME M6809 source is missing ${sourceName}(${parameters})`);
+    addMethod(generatedName, parameters, fn.body, inlineFile, fn.span.line);
+  }
+  for (const name of [
+    'reset_state',
+    'write_ea',
+    'set_ea',
+    'set_ea_h',
+    'set_ea_l',
+    'nop',
+    'set_a',
+    'set_b',
+    'set_d',
+    'set_imm',
+    'add8_sets_h',
+    'hd6309_native_mode',
+    'cond_hi',
+    'cond_cc',
+    'cond_ne',
+    'cond_vc',
+    'cond_pl',
+    'cond_ge',
+    'cond_gt',
+    'set_cond',
+    'branch_taken',
+    'firq_saves_entire_state',
+    'partial_state_registers',
+    'entire_state_registers',
+    'is_ea_addressing_mode',
+  ]) {
+    const method = inlineMethodForClass(header, name, 'm6809_base_device');
+    if (!method) throw new Error(`MAME M6809 header is missing ${name}`);
+    addMethod(name, method.parameters, method.body, headerFile, lineAt(header, method.start));
+  }
+  for (const name of [
+    'eat_remaining',
+    'is_register_addressing_mode',
+    'get_pending_interrupt',
+  ]) {
+    const fn = base(name);
+    if (!fn) throw new Error(`MAME M6809 source is missing ${name}`);
+    addMethod(name, fn.parameters, fn.body, inlineFile, fn.span.line);
+  }
+
+  const setFlags = inlineUnit.functions.filter(fn =>
+    fn.className === 'm6809_base_device' && fn.name === 'set_flags');
+  const fullFlags = setFlags.find(fn => fn.parameters.includes('T a'));
+  const resultFlags = setFlags.find(fn => fn.parameters === 'uint8_t mask, T r');
+  if (!fullFlags || !resultFlags) throw new Error('MAME M6809 flag helpers are missing');
+  for (const [bits, type] of [[8, 'uint8_t'], [16, 'uint16_t']] as const) {
+    const specialize = (body: string): string => body
+      .replace(/\bT\b/g, type)
+      .replace(new RegExp(`sizeof\\(${type}\\)`, 'g'), String(bits / 8));
+    addMethod(
+      `set_flags${bits}`,
+      `uint8_t mask, ${type} a, ${type} b, uint32_t r`,
+      specialize(fullFlags.body),
+      inlineFile,
+      fullFlags.span.line,
+    );
+    addMethod(
+      `set_flags${bits}r`,
+      `uint8_t mask, ${type} r`,
+      specialize(resultFlags.body)
+        .replace(/\bset_flags\s*\(/g, `set_flags${bits}(`),
+      inlineFile,
+      resultFlags.span.line,
+    );
+  }
+
+  const rotateFunctions = inlineUnit.functions.filter(fn =>
+    fn.className === 'm6809_base_device' &&
+    (fn.name === 'rotate_left' || fn.name === 'rotate_right'));
+  for (const fn of rotateFunctions) {
+    for (const [bits, type] of [[8, 'uint8_t'], [16, 'uint16_t']] as const) {
+      addMethod(
+        `${fn.name}${bits}`,
+        `${type} value`,
+        fn.body
+          .replace(/\bT\b/g, type)
+          .replace(new RegExp(`sizeof\\(${type}\\)`, 'g'), String(bits / 8)),
+        inlineFile,
+        fn.span.line,
+      );
+    }
+  }
+
+  addMethod('ireg', '', `
+    switch (m_opcode & 0x60) {
+      case 0x00: return m_x.w;
+      case 0x20: return m_y.w;
+      case 0x40: return m_u.w;
+      case 0x60: return m_s.w;
+    }
+    return 0;
+  `, inlineFile, lineAt(inline, inline.indexOf('m6809_base_device::ireg')));
+  addMethod('set_ireg', 'uint16_t value', `
+    switch (m_opcode & 0x60) {
+      case 0x00: m_x.w = value; break;
+      case 0x20: m_y.w = value; break;
+      case 0x40: m_u.w = value; break;
+      case 0x60: m_s.w = value; break;
+    }
+  `, inlineFile, lineAt(inline, inline.indexOf('m6809_base_device::ireg')));
+
+  const opcodes = dsl.opcodes.map(opcode => ({
+    key: opcode.key,
+    dispatch: false,
+    program: compileMameHandler(normalizeM6809Source(opcode.source)),
+    source: sourceRef(dslFile, opcode.sourceLine),
+  }));
+  opcodes.push(
+    {
+      key: 'ff10',
+      dispatch: true,
+      program: compileMameHandler(
+        'm_ref = (0x10 << 16) | (OPCODE(m_pc.w++) << 8);',
+      ),
+      source: sourceRef(dslFile, lineAt(dslSource, dslSource.indexOf('case 0x10:'))),
+    },
+    {
+      key: 'ff11',
+      dispatch: true,
+      program: compileMameHandler(
+        'm_ref = (0x11 << 16) | (OPCODE(m_pc.w++) << 8);',
+      ),
+      source: sourceRef(dslFile, lineAt(dslSource, dslSource.indexOf('case 0x11:'))),
+    },
+  );
+
+  const resetMethod = base('device_reset');
+  const inputMethod = base('execute_set_input');
+  if (!resetMethod || !inputMethod) {
+    throw new Error('MAME M6809 source is missing reset/input methods');
+  }
+  const start = compileMameHandler('');
+  const reset = compileMameHandler(normalizeM6809Source(`
+    ${resetMethod.body}
+    m_pc.b.h = READ(VECTOR_RESET_FFFE);
+    m_pc.b.l = READ(VECTOR_RESET_FFFE + 1);
+    cycles = 0;
+  `));
+  const input = compileMameHandler(normalizeM6809Source(inputMethod.body));
+  const service = compileMameHandler(normalizeM6809Source(`
+    if (m_sync_wait) {
+      if (!m_nmi_asserted && !m_firq_line && !m_irq_line) {
+        cycles += 1;
+        return;
+      }
+      m_sync_wait = false;
+      m_halt = false;
+      ${dsl.waits.syncResume}
+      return;
+    }
+    if (m_cwai_wait) {
+      if ((m_ea.w = get_pending_interrupt()) == 0) {
+        cycles += 1;
+        return;
+      }
+      m_cwai_wait = false;
+      m_halt = false;
+      ${dsl.waits.cwaiResume}
+      return;
+    }
+    if (m_nmi_asserted) {
+      ${dsl.interrupts.nmi}
+      return;
+    }
+    if (!(m_cc & CC_F) && m_firq_line) {
+      ${dsl.interrupts.firq}
+      return;
+    }
+    if (!(m_cc & CC_I) && m_irq_line) {
+      ${dsl.interrupts.irq}
+      return;
+    }
+  `));
+  const fetch = compileMameHandler(`
+    m_opcode = OPCODE(m_pc.w++);
+    m_ref = m_opcode == 0x10
+      ? (0xff10 << 8)
+      : (m_opcode == 0x11 ? (0xff11 << 8) : (m_opcode << 16));
+  `);
+  const constants = {
+    ...extractEnumConstants(header, {
+      M6809_IRQ_LINE: 0,
+      M6809_FIRQ_LINE: 1,
+    }),
+    ...extractDefineConstants(header),
+    INPUT_LINE_IRQ0: 0,
+    INPUT_LINE_NMI: -1,
+    CLEAR_LINE: 0,
+    ASSERT_LINE: 1,
+    CC_IF: 0x50,
+  };
+  const members: GeneratedCpuMember[] = [
+    ...['m_pc', 'm_ppc', 'm_d', 'm_x', 'm_y', 'm_u', 'm_s', 'm_temp', 'm_ea']
+      .map(name => ({ name, bits: 16 as const, pair: true })),
+    ...[
+      'm_dp', 'm_cc', 'm_opcode', 'm_addressing_mode', 'm_reg8', 'm_reg16',
+      'm_cond', 'm_nmi_line', 'm_nmi_asserted', 'm_firq_line', 'm_irq_line',
+      'm_lds_encountered', 'm_free_run', 'm_bcount', 'm_sync_wait',
+      'm_cwai_wait', 'm_halt',
+    ].map(name => ({ name, bits: 8 as const })),
+    { name: 'm_ref', bits: 32 },
+    { name: 'm_state', bits: 32 },
+    { name: 'cycles' },
+    { name: 'm_icount' },
+  ];
+  const opcodeDecrypt = extractKonami1Decrypt(device, deviceHeader);
+  const programs = [
+    start,
+    reset,
+    input,
+    service,
+    fetch,
+    ...methods.map(method => method.program),
+    ...opcodes.map(opcode => opcode.program),
+  ];
+  return {
+    schemaVersion: 1,
+    type: 'KONAMI1',
+    dialect: 'mame-m6809-lst',
+    sourceFiles: [
+      cppFile,
+      headerFile,
+      inlineFile,
+      dslFile,
+      baseDslFile,
+      deviceFile,
+      deviceHeaderFile,
+    ],
+    constants,
+    aliases: {},
+    members,
+    methods,
+    start,
+    reset,
+    input,
+    service,
+    fetch,
+    opcodes,
+    registerBindings: {
+      reg8: ['m_d.b.h', 'm_d.b.l'],
+      reg16: ['m_d', 'm_x', 'm_y', 'm_u', 'm_s'],
+      index: {
+        selector: 'm_opcode',
+        mask: 0x60,
+        members: {
+          '0': 'm_x',
+          '32': 'm_y',
+          '64': 'm_u',
+          '96': 'm_s',
+        },
+      },
+    },
+    opcodeDecrypt,
+    summary: {
+      opcodes: opcodes.length,
+      compiledOpcodes: opcodes.filter(opcode => !opcode.program.diagnostics.length).length,
+      methods: methods.length,
+      compiledMethods: methods.filter(method => !method.program.diagnostics.length).length,
+      diagnostics: programs.reduce((count, program) => count + program.diagnostics.length, 0),
+    },
+  };
+}
+
 interface MameOperationMacro {
   parameters?: string[];
   body: string;
@@ -674,6 +1021,136 @@ function compileM6803InternalPlan(
 
 function normalizeI8080Source(source: string): string {
   return normalizePairLocals(source);
+}
+
+export function normalizeM6809Source(source: string): string {
+  const wordLocals = new Set(
+    [...source.matchAll(/\b(?:u?int16_t|[us]16)\s+([A-Za-z_]\w*)\b/g)]
+      .map(match => match[1]!),
+  );
+  const usesWordValue = (expression: string): boolean =>
+    /\b(?:m_\w+\.w|uint16_t|int16_t|u16|s16)\b/.test(expression) ||
+    [...wordLocals].some(name => new RegExp(`\\b${name}\\b`).test(expression));
+  const schedulerSafe = source
+    .replace(
+      /while\s*\(\s*!m_nmi_asserted\s*&&\s*!m_firq_line\s*&&\s*!m_irq_line\s*\)\s*\{[\s\S]*?\}/g,
+      `if (!m_nmi_asserted && !m_firq_line && !m_irq_line) {
+        m_sync_wait = true;
+        m_halt = true;
+        cycles += 1;
+        return cycles;
+      }`,
+    )
+    .replace(
+      /while\s*\(\s*\(\s*m_ea\.w\s*=\s*get_pending_interrupt\s*\(\s*\)\s*\)\s*==\s*0\s*\)\s*\{[\s\S]*?\}/g,
+      `if ((m_ea.w = get_pending_interrupt()) == 0) {
+        m_cwai_wait = true;
+        m_halt = true;
+        cycles += 1;
+        return cycles;
+      }`,
+    );
+  let normalized = normalizeMameExecutionSource(schedulerSafe)
+    .replaceAll('@', '')
+    .replace(/\bm_q\.r\.a\b/g, 'm_d.b.h')
+    .replace(/\bm_q\.r\.b\b/g, 'm_d.b.l')
+    .replace(/\bm_q\.(?:r|p)\.d\b/g, 'm_d.w')
+    .replace(/\bread_operand\s*\(\s*\)/g, 'read_operand0()')
+    .replace(/\bread_operand\s*\(/g, 'read_operand1(')
+    .replace(/\bwrite_operand\s*\(\s*([^,()]+)\s*\)/g, 'write_operand0($1)')
+    .replace(/\bwrite_operand\s*\(/g, 'write_operand1(')
+    .replace(/\bread_opcode_arg\s*\(\s*\)/g, 'ARG(POSTINC(m_pc.w))')
+    .replace(/\bread_opcode\s*\(\s*\)/g, 'OPCODE(POSTINC(m_pc.w))')
+    .replace(/\bread_vector\s*\(/g, 'READ_VECTOR(')
+    .replace(/\bread_memory\s*\(/g, 'READ(')
+    .replace(/\bwrite_memory\s*\(/g, 'WRITE(')
+    .replace(/\bdummy_read_opcode_arg\s*\((.*?)\)\s*;/gs, 'cycles += 1;')
+    .replace(/\bdummy_read_opcode\s*\((.*?)\)\s*;/gs, 'cycles += 1;')
+    .replace(/\bdummy_vma\s*\((.*?)\)\s*;/gs, 'cycles += ($1);')
+    .replace(/\beat\s*\(([^)]+)\)\s*;/g, 'cycles += $1;')
+    .replace(/\bm_lic_func\s*\([^)]*\)\s*;/g, '')
+    .replace(/\bm_syncack_write_func\s*\([^)]*\)\s*;/g, '')
+    .replace(/\bdebugger_\w+\s*\([^;]*\)\s*;/g, '')
+    .replace(/\bfatalerror\s*\([^;]*\)\s*;/g, '')
+    .replace(/\bset_flags\s*<\s*uint8_t\s*>\s*\(/g, 'set_flags8(')
+    .replace(/\bset_flags\s*<\s*uint16_t\s*>\s*\(/g, 'set_flags16(')
+    .replace(/\brotate_left\s*<\s*uint8_t\s*>\s*\(/g, 'rotate_left8(')
+    .replace(/\brotate_left\s*<\s*uint16_t\s*>\s*\(/g, 'rotate_left16(')
+    .replace(/\brotate_right\s*<\s*uint8_t\s*>\s*\(/g, 'rotate_right8(')
+    .replace(/\brotate_right\s*<\s*uint16_t\s*>\s*\(/g, 'rotate_right16(')
+    .replace(/\((?:void)\)\s*/g, '')
+    .replace(/\bireg\s*\(\s*\)\s*\+\+/g, 'set_ireg(ireg() + 1)')
+    .replace(/\bireg\s*\(\s*\)\s*--/g, 'set_ireg(ireg() - 1)')
+    .replace(/\bireg\s*\(\s*\)\s*\+=\s*([^;]+);/g, 'set_ireg(ireg() + ($1));')
+    .replace(/\bireg\s*\(\s*\)\s*-=\s*([^;]+);/g, 'set_ireg(ireg() - ($1));')
+    .replace(/\bm_ppc\s*=\s*m_pc\s*;/g, 'm_ppc.w = m_pc.w;');
+
+  const reg8 = /\bset_regop8\s*\(\s*([^)]+)\s*\)\s*;/.exec(normalized)?.[1]?.trim();
+  const reg16 = /\bset_regop16\s*\(\s*([^)]+)\s*\)\s*;/.exec(normalized)?.[1]
+    ?.trim()
+    .replace(/\.w$/, '');
+  normalized = normalized
+    .replace(/\bset_regop8\s*\([^)]+\)\s*;/g, '')
+    .replace(/\bset_regop16\s*\([^)]+\)\s*;/g, '');
+  if (reg8) normalized = normalized.replace(/\bregop8\s*\(\s*\)/g, reg8);
+  if (reg16) {
+    normalized = normalized.replace(
+      /\(\s*&\s*regop16\s*\(\s*\)\s*==\s*&\s*m_s\s*\)\s*\?\s*([^:;]+)\s*:\s*([^,;)]+)/g,
+      (_match, whenStack: string, otherwise: string) =>
+        reg16 === 'm_s' ? whenStack.trim() : otherwise.trim(),
+    );
+    normalized = normalized
+      .replace(
+        /&\s*regop16\s*\(\s*\)\s*==\s*&\s*(m_\w+)/g,
+        (_match, member: string) => reg16 === member ? '1' : '0',
+      )
+      .replace(/\(\s*1\s*\?\s*([\w.]+)\s*:\s*([\w.]+)\s*\)/g, '$1')
+      .replace(/\(\s*0\s*\?\s*([\w.]+)\s*:\s*([\w.]+)\s*\)/g, '$2')
+      .replace(/\(\s*1\s*\)\s*\?\s*([\w.]+)\s*:\s*([\w.]+)/g, '$1')
+      .replace(/\(\s*0\s*\)\s*\?\s*([\w.]+)\s*:\s*([\w.]+)/g, '$2')
+      .replace(/\bregop16\s*\(\s*\)/g, reg16);
+  }
+
+  normalized = normalized
+    .replace(/\bset_flags(8|16)\s*\(([^;]+)\)/g,
+      (_match, bits: string, argumentsSource: string) =>
+        `set_flags${bits}${splitMameArgs(argumentsSource).length === 2 ? 'r' : ''}` +
+        `(${argumentsSource})`)
+    .replace(/\bset_flags\s*\(([^;]+)\)/g, (_match, argumentsSource: string) => {
+      const args = splitMameArgs(argumentsSource);
+      const width = usesWordValue(argumentsSource) ? 16 : 8;
+      return `set_flags${width}${args.length === 2 ? 'r' : ''}(${argumentsSource})`;
+    })
+    .replace(/\brotate_left\s*\(([^)]+)\)/g, (_match, value: string) =>
+      `rotate_left${/\b(?:m_\w+\.w|uint16_t|u16)\b/.test(value) ? 16 : 8}(${value})`)
+    .replace(/\brotate_right\s*\(([^)]+)\)/g, (_match, value: string) =>
+      `rotate_right${/\b(?:m_\w+\.w|uint16_t|u16)\b/.test(value) ? 16 : 8}(${value})`);
+  return normalizePairLocals(normalized, false);
+}
+
+function extractKonami1Decrypt(
+  source: string,
+  header: string,
+): NonNullable<GeneratedCpuDefinition['opcodeDecrypt']> {
+  const boundary = Number(
+    /m_boundary\s*=\s*(0x[\da-f]+|\d+)\s*;/i.exec(source)?.[1],
+  );
+  const mask = Number(
+    /switch\s*\(\s*(?:adr|pc)\s*&\s*(0x[\da-f]+|\d+)\s*\)/i.exec(source)?.[1],
+  );
+  const body = /switch\s*\(\s*adr\s*&[^)]*\)\s*\{([\s\S]*?)\}/.exec(source)?.[1] ?? '';
+  const xorByAddress: Record<string, number> = {};
+  for (const match of body.matchAll(
+    /case\s+(0x[\da-f]+|\d+)\s*:\s*return\s+\w+\s*\^\s*(0x[\da-f]+|\d+)/gi,
+  )) {
+    xorByAddress[String(Number(match[1]))] = Number(match[2]);
+  }
+  if (!Number.isFinite(boundary) || !Number.isFinite(mask) ||
+      Object.keys(xorByAddress).length === 0 ||
+      !/\bm_boundary\b/.test(header)) {
+    throw new Error('MAME KONAMI1 opcode decryption source shape changed');
+  }
+  return { boundary, addressMask: mask, xorByAddress };
 }
 
 function normalizePairLocals(source: string, rewriteMemberPostfix = true): string {

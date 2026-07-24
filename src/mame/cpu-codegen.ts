@@ -43,7 +43,7 @@ export function generatedCpuExecutableSource(definition: GeneratedCpuDefinition)
     .join('\n');
   const methods = definition.methods.map(method => emitMethod(definition, method)).join('\n\n');
   const opcodeCases = definition.opcodes.map(opcode => {
-    const context = contextFor(definition, [], 'void');
+    const context = contextFor(definition, [], 'number');
     const body = emitProgram(opcode.program, context, 8);
     return [
       `      case 0x${opcode.key}: {`,
@@ -255,6 +255,10 @@ function emitInternalMethods(definition: GeneratedCpuDefinition): string {
       this.emitPort(${index}, ${JSON.stringify(port.outputSignal)}, ${port.outputMask});
       return;
     }`).join('');
+  const decrypt = definition.opcodeDecrypt;
+  const decryptCases = Object.entries(decrypt?.xorByAddress ?? {})
+    .map(([address, xor]) => `      case ${address}: return value ^ ${xor};`)
+    .join('\n');
   return `  private readMemory(address: number): number {
     const location = address & 0xffff;${portReads}
     if (${ramCondition}) return this.internalRam[location];
@@ -269,6 +273,18 @@ function emitInternalMethods(definition: GeneratedCpuDefinition): string {
       return;
     }
     this.bus.write(location, data);
+  }
+
+  private readOpcode(address: number): number {
+    const location = address & 0xffff;
+    const value = this.readMemory(location);
+${decrypt
+    ? `    if (location < ${decrypt.boundary}) return value;
+    switch (location & ${decrypt.addressMask}) {
+${decryptCases}
+      default: return value;
+    }`
+    : '    return value;'}
   }
 
   private emitPort(index: number, signal: string, outputMask: number): void {
@@ -564,7 +580,13 @@ function emitExpression(expression: GeneratedExpression, context: EmitContext): 
     return `((${left}) ${expression.operator} (${right}))`;
   }
   if (expression.kind === 'assignment') {
-    return `(${emitAssignment(expression.target, expression.operator, expression.value, context)})`;
+    return `(${emitAssignment(
+      expression.target,
+      expression.operator,
+      expression.value,
+      context,
+      expression.postfix,
+    )})`;
   }
   if (expression.kind === 'conditional') {
     return `((${emitExpression(expression.condition, context)}) ? ` +
@@ -610,6 +632,19 @@ function emitCall(
   }
   if (name === 'std::size') return `(${args[0] ?? '[]'}).length`;
 
+  if (name === 'READ' || name === 'ARG') {
+    return `(++this.cycles, this.readMemory((${args[0] ?? '0'}) & 0xffff) & 0xff)`;
+  }
+  if (name === 'READ_VECTOR') {
+    return `(++this.cycles, this.readMemory((this.m_ea.w + (${args[0] ?? '0'})) & 0xffff) & 0xff)`;
+  }
+  if (name === 'OPCODE') {
+    return `(++this.cycles, this.readOpcode((${args[0] ?? '0'}) & 0xffff) & 0xff)`;
+  }
+  if (name === 'WRITE') {
+    return `(++this.cycles, this.writeMemory((${args[0] ?? '0'}) & 0xffff, ` +
+      `(${args[1] ?? '0'}) & 0xff), 0)`;
+  }
   if (name === 'm_data.read_interruptible' ||
       name === 'm_opcodes.read_byte' ||
       name === 'm_args.read_byte') {
@@ -660,13 +695,17 @@ function emitAssignment(
   operator: string,
   value: GeneratedExpression,
   context: EmitContext,
+  postfix = false,
 ): string {
   const targetValue = targetInfo(target, context);
   const right = emitExpression(value, context);
   const next = operator === '='
     ? right
     : `((${targetValue.code}) ${operator.slice(0, -1)} (${right}))`;
-  return `${targetValue.code} = ${wrapTarget(next, targetValue)}`;
+  const assignment = `${targetValue.code} = ${wrapTarget(next, targetValue)}`;
+  return postfix
+    ? `(() => { const previous = ${targetValue.code}; ${assignment}; return previous; })()`
+    : assignment;
 }
 
 function targetInfo(
