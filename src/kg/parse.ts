@@ -602,6 +602,61 @@ export interface MachineConfigDef {
   raw: string;
 }
 
+export interface MemoryBankDef {
+  member: string;
+  tag: string;
+  startEntry: number;
+  entries: number;
+  region: string;
+  offset: number;
+  stride: number;
+  raw: string;
+}
+
+/** Parse MAME memory_bank configuration from a machine_start body. */
+export function parseMemoryBanks(
+  body: string,
+  memberTags: Record<string, string>,
+  consts: Record<string, number>,
+): MemoryBankDef[] {
+  const banks: MemoryBankDef[] = [];
+  const call = /\b(m_\w+)\s*->\s*configure_entries\s*\(/g;
+  let match: RegExpExecArray | null;
+  while ((match = call.exec(body)) !== null) {
+    const open = body.indexOf('(', match.index);
+    const close = matchParen(body, open);
+    if (close < 0) continue;
+    const args = splitArgs(body.slice(open + 1, close));
+    if (args.length !== 4) continue;
+    const source = /^memregion\(\s*"([^"]+)"\s*\)->base\(\)\s*(?:\+\s*(.+))?$/
+      .exec(args[2]!.trim());
+    const startEntry = evalExpr(args[0]!, consts);
+    const entries = evalExpr(args[1]!, consts);
+    const offset = evalExpr(source?.[2] ?? '0', consts);
+    const stride = evalExpr(args[3]!, consts);
+    if (
+      !source ||
+      startEntry === null ||
+      entries === null ||
+      offset === null ||
+      stride === null
+    ) continue;
+    const member = match[1]!;
+    banks.push({
+      member,
+      tag: memberTags[member] ?? member.replace(/^m_/, ''),
+      startEntry,
+      entries,
+      region: source[1]!,
+      offset,
+      stride,
+      raw: body.slice(match.index, close + 1).trim(),
+    });
+    call.lastIndex = close + 1;
+  }
+  return banks;
+}
+
 /** Parse `m_foo(*this, "tag")` from state-class constructor initializer lists. */
 export function parseMemberTags(src: string): Record<string, string> {
   const out: Record<string, string> = {};
@@ -684,6 +739,21 @@ export function parseMachineConfigs(
           dev.slotDefault = unquote(args[3]);
           dev.clock = null;
           delete dev.clockExpr;
+        }
+        for (const chain of parseChain(s.slice(close + 1))) {
+          if (chain.method !== 'add_route') continue;
+          const [output = '', target = '', gain = '', input = ''] = chain.args;
+          const parsedGain = evalExpr(gain, consts);
+          const parsedInput = input ? evalExpr(input, consts) : null;
+          if (target.trim().startsWith('"') && parsedGain !== null) {
+            (dev.audioRoutes ??= []).push({
+              output: output.trim(),
+              target: unquote(target),
+              gain: parsedGain,
+              ...(parsedInput !== null ? { input: parsedInput } : {}),
+              raw: s,
+            });
+          }
         }
         cfg.devices.push(dev);
         continue;

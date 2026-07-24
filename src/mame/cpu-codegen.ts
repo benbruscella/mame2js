@@ -298,7 +298,9 @@ ${decryptCases}
 
 function emitMember(member: GeneratedCpuMember): string {
   if (member.values) {
-    return `  private ${member.name} = [${member.values.join(', ')}];`;
+    return member.bits === 8
+      ? `  private ${member.name} = Uint8Array.from([${member.values.join(', ')}]);`
+      : `  private ${member.name} = [${member.values.join(', ')}];`;
   }
   if (member.fields) {
     const values = Object.keys(member.fields).map(name => `${name}: 0`).join(', ');
@@ -671,6 +673,36 @@ function emitCall(
   }
   if (name === 'm_io.write_byte') {
     return `(this.bus.out((${args[0] ?? '0'}) & 0xff, (${args[1] ?? '0'}) & 0xff), 0)`;
+  }
+  if (name === 'program_r') {
+    return `(this.readMemory((${args[0] ?? '0'}) & 0x0fff) & 0xff)`;
+  }
+  if (name === 'ram_r') {
+    return `(this.m_dataptr[(${args[0] ?? '0'}) & 0x7f] & 0xff)`;
+  }
+  if (name === 'ram_w') {
+    return `(this.m_dataptr[(${args[0] ?? '0'}) & 0x7f] = (${args[1] ?? '0'}) & 0xff, 0)`;
+  }
+  if (name === 'ext_r') return `(this.bus.in((${args[0] ?? '0'}) & 0xff) & 0xff)`;
+  if (name === 'ext_w') {
+    return `(this.bus.out((${args[0] ?? '0'}) & 0xff, (${args[1] ?? '0'}) & 0xff), 0)`;
+  }
+  if (name === 'port_r') {
+    return `(this.bus.signal?.('p' + (${args[0] ?? '0'}) + '_in_cb', 0) ?? 0xff)`;
+  }
+  if (name === 'port_w') {
+    return `(this.bus.signal?.('p' + (${args[0] ?? '0'}) + '_out_cb', ` +
+      `(${args[1] ?? '0'}) & 0xff) ?? 0)`;
+  }
+  if (name === 'test_r') {
+    return `(this.bus.signal?.('t' + (${args[0] ?? '0'}) + '_in_cb', 0) ?? 0)`;
+  }
+  if (name === 'bus_r') return `(this.bus.signal?.('bus_in_cb', 0) ?? 0xff)`;
+  if (name === 'bus_w') {
+    return `(this.bus.signal?.('bus_out_cb', (${args[0] ?? '0'}) & 0xff) ?? 0)`;
+  }
+  if (name === 'prog_w') {
+    return `(this.bus.signal?.('prog_out_cb', (${args[0] ?? '0'}) & 1) ?? 0)`;
   }
   if (name === 'm_in_inta_func.isunset' || name === 'm_out_status_func.isunset') return '1';
   if (name === 'm_out_inte_func' || name === 'm_out_sod_func' || name === 'm_out_status_func') {

@@ -145,7 +145,9 @@ class IrCpu implements Cpu {
     this.methods = new Map(definition.methods.map(method => [method.name, method]));
     for (const member of definition.members) {
       if (member.values) {
-        this.members[member.name] = [...member.values];
+        this.members[member.name] = member.bits === 8
+          ? Uint8Array.from(member.values)
+          : [...member.values];
       } else if (member.fields) {
         this.members[member.name] = typedObject(member.fields);
       } else if (member.pair) {
@@ -326,6 +328,29 @@ class IrCpu implements Cpu {
       'm_io.write_interruptible': (port, value) => {
         this.bus.out(port & 0xffff, value & 0xff);
       },
+      program_r: address => this.readMemory(address & 0x0fff),
+      ram_r: address => {
+        const ram = this.members.m_dataptr as Uint8Array | number[] | undefined;
+        return ram?.[address & 0x7f] ?? 0;
+      },
+      ram_w: (address, value) => {
+        const ram = this.members.m_dataptr as Uint8Array | number[] | undefined;
+        if (ram) ram[address & 0x7f] = value & 0xff;
+        return 0;
+      },
+      ext_r: address => this.bus.in(address & 0xff) & 0xff,
+      ext_w: (address, value) => {
+        this.bus.out(address & 0xff, value & 0xff);
+        return 0;
+      },
+      port_r: port => Number(this.bus.signal?.(`p${port}_in_cb`, 0) ?? 0xff),
+      port_w: (port, value) => Number(
+        this.bus.signal?.(`p${port}_out_cb`, value & 0xff) ?? 0,
+      ),
+      test_r: port => Number(this.bus.signal?.(`t${port}_in_cb`, 0) ?? 0),
+      bus_r: () => Number(this.bus.signal?.('bus_in_cb', 0) ?? 0xff),
+      bus_w: value => Number(this.bus.signal?.('bus_out_cb', value & 0xff) ?? 0),
+      prog_w: value => Number(this.bus.signal?.('prog_out_cb', value & 1) ?? 0),
       m_out_inte_func: state => this.bus.signal?.('out_inte_func', state) ?? 0,
       m_out_sod_func: state => this.bus.signal?.('out_sod_func', state) ?? 0,
       standard_irq_callback: () => this.acknowledgeIrq(),

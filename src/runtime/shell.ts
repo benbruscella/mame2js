@@ -12,6 +12,7 @@ import type { GeneratedAudioRoute } from './generated-machine.ts';
 import type {
   GeneratedAuxiliaryAudioDevice,
   GeneratedDacFilterPlan,
+  GeneratedSpeakerFilterPlan,
 } from './audio-protocol.ts';
 
 export interface RomLoad {
@@ -48,6 +49,8 @@ export interface SoundSpec {
   auxiliary?: GeneratedDacFilterPlan;
   /** Source-routed secondary stream devices mixed by the generated worklet. */
   auxiliaryDevices?: GeneratedAuxiliaryAudioDevice[];
+  /** MAME's source-derived post-mix speaker effect. */
+  speakerFilter?: GeneratedSpeakerFilterPlan;
 }
 
 /** the ROM drop target's visual states (built by buildDom().dropZone) */
@@ -258,6 +261,7 @@ export async function runShell(cfg: ShellConfig, preloaded?: Regions): Promise<v
         dacGain: cfg.sound.dacGain,
         auxiliary: cfg.sound.auxiliary,
         auxiliaryDevices: cfg.sound.auxiliaryDevices,
+        speakerFilter: cfg.sound.speakerFilter,
         refresh: cfg.board.screen.refresh,
         debug: input.debug,
       },

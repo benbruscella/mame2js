@@ -15,6 +15,7 @@ import type { GeneratedAudioRoute } from './generated-machine.ts';
 import type {
   GeneratedAuxiliaryAudioDevice,
   GeneratedDacFilterPlan,
+  GeneratedSpeakerFilterPlan,
 } from './audio-protocol.ts';
 
 export interface WorkletCoreConfig {
@@ -31,6 +32,7 @@ export interface WorkletCoreConfig {
   readonly dacGain?: number;
   readonly auxiliary?: GeneratedDacFilterPlan;
   readonly auxiliaryDevices?: GeneratedAuxiliaryAudioDevice[];
+  readonly speakerFilter?: GeneratedSpeakerFilterPlan;
   /** video refresh rate (Hz) — paces the worklet's write scheduler */
   readonly refresh?: number;
   /** log worklet scheduler stats to the console once per second */
@@ -58,6 +60,7 @@ type PendingItem =
 export class AudioOutput {
   private ctx: AudioContext | null = null;
   private node: AudioWorkletNode | null = null;
+  private filter: BiquadFilterNode | null = null;
   private gain: GainNode | null = null;
   private volume: number = 1;
   /** writes + data pushes, kept in issue order, flushed once per frame */
@@ -86,7 +89,18 @@ export class AudioOutput {
     });
     const gain = ctx.createGain();
     gain.gain.value = this.volume;
-    node.connect(gain);
+    const filter = core.speakerFilter
+      ? ctx.createBiquadFilter()
+      : null;
+    if (filter && core.speakerFilter) {
+      filter.type = core.speakerFilter.type;
+      filter.frequency.value = core.speakerFilter.frequency;
+      filter.Q.value = core.speakerFilter.q;
+      node.connect(filter);
+      filter.connect(gain);
+    } else {
+      node.connect(gain);
+    }
     gain.connect(ctx.destination);
 
     node.port.postMessage({
@@ -119,6 +133,7 @@ export class AudioOutput {
 
     this.ctx = ctx;
     this.node = node;
+    this.filter = filter;
     this.gain = gain;
 
     // Frames that ran while addModule() was awaiting are pre-audio history:

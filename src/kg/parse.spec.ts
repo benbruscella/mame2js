@@ -12,6 +12,7 @@ import {
   parseGames,
   parseGfxLayouts,
   parseMachineConfigs,
+  parseMemoryBanks,
 } from './parse.ts';
 
 let totalPass = 0;
@@ -29,6 +30,21 @@ function eq(label: string, actual: unknown, expected: unknown): void {
 }
 
 eq('expression bitwise precedence', evalExpr('(3 << 4) | (7 & 3) ^ 1'), 48 | (3 ^ 1));
+
+eq('memory bank configure_entries', parseMemoryBanks(
+  'm_mainbank->configure_entries(0, 16, memregion("maincpu")->base() + 0x10000, 0x1000);',
+  { m_mainbank: 'mainbank' },
+  {},
+), [{
+  member: 'm_mainbank',
+  tag: 'mainbank',
+  startEntry: 0,
+  entries: 16,
+  region: 'maincpu',
+  offset: 0x10000,
+  stride: 0x1000,
+  raw: 'm_mainbank->configure_entries(0, 16, memregion("maincpu")->base() + 0x10000, 0x1000)',
+}]);
 
 // --- extended graphics layout offsets ---------------------------------------
 {
@@ -97,6 +113,7 @@ void nes_state::nes(machine_config &config)
 	rp2a03_device &maincpu(RP2A03G(config, m_maincpu, NTSC_APU_CLOCK));
 	maincpu.set_addrmap(AS_PROGRAM, &nes_state::nes_map);
 	maincpu.add_route(0, "mono", 0.60, 2);
+	DAC_8BIT_R2R(config, "dac", 0).add_route(ALL_OUTPUTS, "mono", 0.25);
 
 	SCREEN(config, m_screen, SCREEN_TYPE_RASTER);
 	m_screen->set_video_attributes(VIDEO_UPDATE_SCANLINE);
@@ -131,6 +148,11 @@ void nes_state::nes(machine_config &config)
   eq('audio route', cpu.audioRoutes, [{
     output: '0', target: 'mono', gain: 0.6, input: 2,
     raw: 'maincpu.add_route(0, "mono", 0.60, 2)',
+  }]);
+  const dac = cfg.devices.find(d => d.tag === 'dac')!;
+  eq('chained constructor audio route', dac.audioRoutes, [{
+    output: 'ALL_OUTPUTS', target: 'mono', gain: 0.25,
+    raw: 'DAC_8BIT_R2R(config, "dac", 0).add_route(ALL_OUTPUTS, "mono", 0.25)',
   }]);
 
   const screen = cfg.devices.find(d => d.tag === 'screen')!;

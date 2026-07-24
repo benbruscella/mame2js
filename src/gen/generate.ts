@@ -18,7 +18,10 @@ import {
 } from './emit-machine.ts';
 import type { BoardConfig } from '../runtime/types.ts';
 import { compileMameVideo } from '../mame/video-compiler.ts';
-import { compileNamco54Discrete } from '../mame/audio-compiler.ts';
+import {
+  compileMameSpeakerFilter,
+  compileNamco54Discrete,
+} from '../mame/audio-compiler.ts';
 import { mameDeviceRomSet } from '../mame/device-compiler.ts';
 import {
   GAME_CATEGORIES,
@@ -269,6 +272,32 @@ export async function generate(graph: KnowledgeGraph, opts: GenerateOptions): Pr
         }
       }
     }
+    if (xscale === 1) {
+      const screenCallback = graph.nodes.find(node =>
+        node.label === 'Callback' && node.props.signal === 'set_screen_update');
+      const screenHandler = graph.nodes.find(node =>
+        node.label === 'Handler' &&
+        node.props.ownerClass === screenCallback?.props.targetClass &&
+        node.props.method === screenCallback?.props.targetMethod);
+      const body = String(screenHandler?.props.sourceBody ?? '');
+      const values = Object.fromEntries(
+        (Array.isArray(screenHandler?.props.sourceConstants)
+          ? screenHandler.props.sourceConstants
+          : [])
+          .map(value => /^([^=]+)=(-?(?:\d+(?:\.\d+)?|Infinity))$/.exec(String(value)))
+          .filter((match): match is RegExpExecArray => Boolean(match))
+          .map(match => [match[1], Number(match[2])]),
+      );
+      for (const [name, value] of Object.entries(values)) {
+        if (
+          value > 1 &&
+          body.includes(`cliprect.min_x / ${name}`) &&
+          body.includes(`x * ${name}`)
+        ) {
+          xscale = Math.max(xscale, value);
+        }
+      }
+    }
   }
 
   const monitor = String(game.props.monitor);
@@ -367,6 +396,11 @@ export async function generate(graph: KnowledgeGraph, opts: GenerateOptions): Pr
         String(graph.meta.driverFile),
         discreteNetlist,
       ),
+    });
+  }
+  if (sound.kind !== 'none') {
+    Object.assign(sound, {
+      speakerFilter: compileMameSpeakerFilter(opts.mameSrc),
     });
   }
 

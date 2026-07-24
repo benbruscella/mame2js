@@ -14,7 +14,7 @@ import {
   stripComments, parseDefines, parseGames, parseRomSets, parseAddressMaps,
   parseMachineConfigs, parseMemberTags, parseInputPorts, parseGfxLayouts,
   parseGfxDecodes, parseIncludes, parseDeviceTypeDecls, parseDeviceDefaultClocks,
-  parseInitPatches, parseTextMacros, evalExpr,
+  parseInitPatches, parseTextMacros, parseMemoryBanks, evalExpr,
   type InputPortsDef,
 } from './parse.ts';
 
@@ -264,6 +264,23 @@ export function buildGraph(mameSrc: string, driverFile: string): KnowledgeGraph 
     for (const callee of cfg.calls) {
       const target = cfgByName.get(callee);
       if (target) g.edge(cfgId, `machine:${target.cls}.${target.name}`, 'CALLS');
+    }
+    const machineStart = ast.findFunctionInHierarchy(cfg.cls, 'machine_start');
+    for (const bank of parseMemoryBanks(machineStart?.body ?? '', memberTags, consts)) {
+      const bankId = `bank:${cfg.cls}.${cfg.name}/${bank.tag}`;
+      g.node('MemoryBank', bankId, {
+        tag: bank.tag,
+        member: bank.member,
+        startEntry: bank.startEntry,
+        entries: bank.entries,
+        region: bank.region,
+        offset: bank.offset,
+        stride: bank.stride,
+        raw: bank.raw,
+        ...spanProps(machineStart?.span),
+      });
+      g.edge(cfgId, bankId, 'HAS_BANK');
+      definedIn(bankId, machineStart?.span);
     }
     for (const list of cfg.softwareLists) {
       const listId = `softlist:${list.name}`;

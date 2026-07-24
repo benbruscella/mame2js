@@ -22,6 +22,7 @@ export type NodeLabel =
   | 'GfxDecode'     // GFXDECODE_START(name)
   | 'GfxDecodeEntry'
   | 'AudioRoute'     // one device add_route(output, target, gain) statement
+  | 'MemoryBank'     // one configure_entries(...) bank window from machine_start
   | 'SoftwareList'  // SOFTWARE_LIST(config, "tag") — console/computer software catalog reference
   | 'HardwareType'  // a MAME device type used by one or more generated machines
   | 'HardwareImplementation' // the MAME class/source implementing a hardware type
@@ -57,6 +58,7 @@ export type RelType =
   | 'DECODES'         // MachineConfig -> GfxDecode
   | 'HAS_ENTRY'       // GfxDecode -> GfxDecodeEntry
   | 'HAS_AUDIO_ROUTE' // sound Device -> AudioRoute
+  | 'HAS_BANK'        // MachineConfig -> MemoryBank
   | 'USES_LAYOUT'     // GfxDecodeEntry -> GfxLayout
   | 'READS_REGION'    // GfxDecodeEntry -> RomRegion (by tag, resolved per romset at generation)
   | 'HAS_SOFTLIST'    // MachineConfig -> SoftwareList

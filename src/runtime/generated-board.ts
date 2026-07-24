@@ -150,6 +150,7 @@ class IrBoard implements Board {
     };
     this.installDeviceHandlers(machine, registry);
     this.installGeneratedSoundHandlers(machine, sinks, registry);
+    this.installMemoryBanks(machine, regions, registry);
     this.installDeclarativeHandlers(machine, config, inputs, registry);
     this.installInterruptVectorWriters(machine, registry);
 
@@ -532,6 +533,10 @@ class IrBoard implements Board {
     }
     for (const key of usedHandlers(machine, 'write')) {
       if (registry.write[key]) continue;
+      if (key === 'palette.write8') {
+        registry.write[key] = () => {};
+        continue;
+      }
       if (key.startsWith('watchdog.')) registry.write[key] = () => {};
     }
     for (const key of usedHandlers(machine, 'read')) {
@@ -575,6 +580,41 @@ class IrBoard implements Board {
         for (const cpuTag of cpuTags) {
           this.cpus.get(cpuTag)?.setIrqLine(false);
         }
+      };
+    }
+  }
+
+  private installMemoryBanks(
+    machine: GeneratedMachine,
+    regions: Regions,
+    registry: HandlerRegistry,
+  ): void {
+    for (const bank of machine.execution.banks ?? []) {
+      const region = regions[bank.region];
+      if (!region) {
+        throw new Error(`${machine.game}: memory bank "${bank.tag}" has no region "${bank.region}"`);
+      }
+      let entry = bank.startEntry;
+      const setEntry = (value: number): number => {
+        if (value < bank.startEntry || value >= bank.startEntry + bank.entries) {
+          throw new Error(
+            `${machine.game}: memory bank "${bank.tag}" selected invalid entry ${value}`,
+          );
+        }
+        entry = value;
+        return entry;
+      };
+      for (const alias of [bank.tag, `m_${bank.tag}`, bank.member]) {
+        this.bindings.calls![`${alias}.set_entry`] = setEntry;
+      }
+      const read = (_address: number, offset: number): number => {
+        const index = bank.offset + (entry - bank.startEntry) * bank.stride + offset;
+        return region[index] ?? 0xff;
+      };
+      registry.read[`bank.${bank.tag}`] = read;
+      registry.write[`bank.${bank.tag}`] = (_address, offset, data) => {
+        const index = bank.offset + (entry - bank.startEntry) * bank.stride + offset;
+        if (index >= 0 && index < region.length) region[index] = data;
       };
     }
   }
@@ -648,25 +688,12 @@ class IrBoard implements Board {
           this.bindings.calls![`${alias}.data_r`] = dataRead;
         }
       });
-      const filterRows: unknown[][] = [];
-      for (const route of sound.routes ?? []) {
-        if (!route.filter) continue;
-        const { bank, channel, index } = route.filter;
-        const row = (filterRows[bank] ??= []);
-        if (row[channel]) continue;
-        let previous: number[] | undefined;
-        row[channel] = {
-          filter_rc_set_RC: (type: number, r1: number, r2: number, r3: number, c: number) => {
-            const values = [type, r1, r2, r3, c];
-            if (previous?.every((value, position) => value === values[position])) return;
-            previous = values;
-            const base = AY_FILTER_CONTROL_BASE + index * AY_FILTER_CONTROL_STRIDE;
-            values.forEach((value, parameter) =>
-              sinks.soundWrite(base + parameter, value, this.soundFraction()));
-          },
-        };
-      }
-      if (filterRows.length) this.state.m_filter = filterRows;
+      bindGeneratedAudioFilters(
+        this.state,
+        sound,
+        sinks.soundWrite,
+        () => this.soundFraction(),
+      );
       for (const auxiliary of sound.auxiliaryDevices ?? []) {
         const aliases = [
           auxiliary.deviceTag,
@@ -783,9 +810,51 @@ class IrBoard implements Board {
       ) {
         endpoints[target!] = state => sinks.soundWrite(-1, state, this.soundFraction());
       }
+      const auxiliary = sound?.auxiliaryDevices?.find(device =>
+        device.deviceTag === callback.targetTag &&
+        callback.targetMethod &&
+        device.writeMethods.includes(callback.targetMethod));
+      if (target && auxiliary && callback.targetMethod) {
+        endpoints[target] = state => sinks.soundWrite(
+          0,
+          state,
+          this.soundFraction(),
+          `${auxiliary.deviceTag}.${callback.targetMethod}`,
+        );
+      }
     }
     return endpoints;
   }
+}
+
+export function bindGeneratedAudioFilters(
+  state: Record<string, unknown>,
+  sound: NonNullable<GeneratedMachine['sound']>,
+  soundWrite: BoardSinks['soundWrite'],
+  fraction: () => number = () => 0,
+): void {
+  const filterRows: unknown[][] = [];
+  for (const route of sound.routes ?? []) {
+    if (!route.filter) continue;
+    const { bank, channel, index } = route.filter;
+    const row = (filterRows[bank] ??= []);
+    if (row[channel]) continue;
+    let previous: number[] | undefined;
+    row[channel] = {
+      filter_rc_set_RC: (type: number, r1: number, r2: number, r3: number, c: number) => {
+        const values = [type, r1, r2, r3, c];
+        if (previous?.every((value, position) => value === values[position])) return;
+        previous = values;
+        const base = AY_FILTER_CONTROL_BASE + index * AY_FILTER_CONTROL_STRIDE;
+        values.forEach((value, parameter) =>
+          soundWrite(base + parameter, value, fraction()));
+      },
+    };
+  }
+  if (!filterRows.length) return;
+  state.m_filter = sound.filterLayout === 'flat'
+    ? filterRows.flatMap(row => row)
+    : filterRows;
 }
 
 export function bindGeneratedDriverState(

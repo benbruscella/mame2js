@@ -169,6 +169,16 @@ export interface GeneratedFrameEvent {
 
 export interface GeneratedExecutionPlan {
   cpus: GeneratedExecutionCpu[];
+  banks?: {
+    tag: string;
+    member: string;
+    startEntry: number;
+    entries: number;
+    region: string;
+    offset: number;
+    stride: number;
+    source?: GeneratedSourceRef;
+  }[];
   screen: GeneratedScreen;
   customs?: { port: string; mask: number; member: string; handler?: string }[];
   inputMembers?: { member: string; tags: string[] }[];
@@ -288,6 +298,25 @@ export interface GeneratedBitmapPlan {
   bytesPerRow: number;
   xOffset: number;
   lsbFirst: boolean;
+  /** Packed source pixels; omitted for the original one-bit framebuffer plan. */
+  bitsPerPixel?: number;
+  /** Source-derived palette RAM network used by packed bitmap hardware. */
+  paletteRam?: {
+    member: string;
+    entries: number;
+    min: number;
+    max: number;
+    scaler: number;
+    channels: {
+      channel: 'r' | 'g' | 'b';
+      bits: number[];
+      resistances: number[];
+      pulldown: number;
+      pullup: number;
+    }[];
+  };
+  flipXMember?: string;
+  flipYMember?: string;
   black: number;
   white: number;
   source?: GeneratedSourceRef;
@@ -338,6 +367,8 @@ export interface GeneratedSoundBinding {
   enableMethods: string[];
   controlOffset: number;
   routes?: GeneratedAudioRoute[];
+  /** Index rank inferred from MAME handler IR for the routed filter member. */
+  filterLayout?: 'flat' | 'matrix';
   auxiliaryDevices?: GeneratedAuxiliaryAudioDevice[];
 }
 

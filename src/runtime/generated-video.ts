@@ -641,6 +641,10 @@ export class GeneratedMameVideoPrimitives implements GeneratedVideoPrimitives, R
     this.state = state;
     this.width = machine.execution.screen.width;
     this.height = machine.execution.screen.height;
+    for (const [tag, bytes] of Object.entries(regions)) {
+      const member = `m_${tag.replace(/[^A-Za-z0-9_]/g, '_')}`;
+      if (!Object.hasOwn(state, member)) state[member] = bytes;
+    }
     for (const [member, value] of Object.entries(machine.video?.initialState ?? {})) {
       if (!Object.hasOwn(state, member)) {
         state[member] = Array.isArray(value) ? [...value] : value;
@@ -818,17 +822,36 @@ export class GeneratedMameVideoPrimitives implements GeneratedVideoPrimitives, R
     }
     const bytes = source as Uint8Array;
     frame.fill(plan.black >>> 0);
+    const bitsPerPixel = plan.bitsPerPixel ?? 1;
+    const pixelsPerByte = 8 / bitsPerPixel;
+    const paletteBytes = plan.paletteRam
+      ? this.state[plan.paletteRam.member]
+      : undefined;
+    const palette = plan.paletteRam && ArrayBuffer.isView(paletteBytes)
+      ? createRamPalette(plan.paletteRam, paletteBytes as Uint8Array)
+      : undefined;
+    const flipX = Boolean(plan.flipXMember && this.state[plan.flipXMember]);
+    const flipY = Boolean(plan.flipYMember && this.state[plan.flipYMember]);
     for (let outputY = 0; outputY < plan.rows; outputY++) {
-      const sourceY = plan.rowStart + outputY;
+      const rasterY = plan.rowStart + outputY;
+      const sourceY = flipY ? rasterY ^ 0xff : rasterY;
       const rowOffset = sourceY * plan.bytesPerRow;
       for (let byte = 0; byte < plan.bytesPerRow; byte++) {
         const pixels = bytes[rowOffset + byte] ?? 0;
-        for (let bit = 0; bit < 8; bit++) {
-          const sourceBit = plan.lsbFirst ? bit : 7 - bit;
-          const x = plan.xOffset + byte * 8 + bit;
+        for (let pixel = 0; pixel < pixelsPerByte; pixel++) {
+          const outputX = byte * pixelsPerByte + pixel;
+          const sourceX = flipX ? outputX ^ 0xff : outputX;
+          const sourceByte = bytes[rowOffset + Math.floor(sourceX / pixelsPerByte)] ?? pixels;
+          const sourcePixel = sourceX % pixelsPerByte;
+          const shift = plan.lsbFirst
+            ? sourcePixel * bitsPerPixel
+            : (pixelsPerByte - 1 - sourcePixel) * bitsPerPixel;
+          const value = (sourceByte >>> shift) & ((1 << bitsPerPixel) - 1);
+          const x = plan.xOffset + outputX;
           if (x < this.width && outputY < this.height) {
             frame[outputY * this.width + x] =
-              ((pixels >> sourceBit) & 1 ? plan.white : plan.black) >>> 0;
+              (palette?.[value] ??
+                (value ? plan.white : plan.black)) >>> 0;
           }
         }
       }
@@ -842,6 +865,33 @@ export class GeneratedMameVideoPrimitives implements GeneratedVideoPrimitives, R
       screen.frame_number = () => screen.__frame ?? 0;
     }
   }
+}
+
+function createRamPalette(
+  plan: NonNullable<NonNullable<GeneratedMachine['video']>['bitmap']>['paletteRam'] & {},
+  bytes: Uint8Array,
+): Uint32Array {
+  const network = {
+    min: plan.min,
+    max: plan.max,
+    scaler: plan.scaler,
+    channels: plan.channels,
+  };
+  const weights = computeWeights(network as GeneratedPromPalettePlan);
+  const colors = new Uint32Array(plan.entries);
+  for (let index = 0; index < colors.length; index++) {
+    const raw = bytes[index] ?? 0;
+    const rgb = { r: 0, g: 0, b: 0 };
+    for (const channel of plan.channels) {
+      rgb[channel.channel] = Math.floor(channel.bits.reduce(
+        (sum, bit, position) =>
+          sum + weights[channel.channel][position]! * ((raw >>> bit) & 1),
+        0,
+      ) + 0.5);
+    }
+    colors[index] = packRgb(rgb.r, rgb.g, rgb.b);
+  }
+  return colors;
 }
 
 function parameterNames(parameters: string | undefined): string[] {

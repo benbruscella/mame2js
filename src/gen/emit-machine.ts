@@ -197,11 +197,29 @@ export function lowerGeneratedMachine(
       );
       return {
         ...cpu,
-        cycleClock: cpu.type === 'mc6809' ? cpu.clock / 4 : cpu.clock,
+        cycleClock: cpu.type === 'mc6809'
+          ? cpu.clock / 4
+          : cpu.type === 'i8039'
+            ? cpu.clock / 15
+            : cpu.clock,
         ...(interruptVectorWriters.length ? { interruptVectorWriters } : {}),
         ...(deviceByTag.get(cpu.tag)?.source ? { source: deviceByTag.get(cpu.tag)!.source } : {}),
       };
     }),
+    ...(graph.nodes.some(node => node.label === 'MemoryBank') ? {
+      banks: graph.nodes
+        .filter(node => node.label === 'MemoryBank')
+        .map(node => ({
+          tag: String(node.props.tag),
+          member: String(node.props.member),
+          startEntry: Number(node.props.startEntry),
+          entries: Number(node.props.entries),
+          region: String(node.props.region),
+          offset: Number(node.props.offset),
+          stride: Number(node.props.stride),
+          ...(sourceRef(node.props) ? { source: sourceRef(node.props) } : {}),
+        })),
+    } : {}),
     screen: {
       ...board.screen,
       ...(deviceByTag.get('screen')?.source ? { source: deviceByTag.get('screen')!.source } : {}),
@@ -238,6 +256,7 @@ export function lowerGeneratedMachine(
         (device.type.endsWith('_AUDIO') || device.type.endsWith('_SOUND')) &&
         mappedWriteKeys.some(key => key.startsWith(`${device.tag}.`)));
   const audioRoutes = lowerAudioRoutes(graph, ayDevices);
+  const filterRank = inferredMemberIndexRank(handlers, 'm_filter');
   const auxiliaryDevices = lowerAuxiliaryAudioDevices(graph, devices);
   const sound = soundDevice
     ? {
@@ -263,6 +282,9 @@ export function lowerGeneratedMachine(
           enableMethods: [],
           controlOffset: -1,
           ...(audioRoutes.length ? { routes: audioRoutes } : {}),
+          ...(audioRoutes.some(route => route.filter) && filterRank ? {
+            filterLayout: filterRank === 1 ? 'flat' as const : 'matrix' as const,
+          } : {}),
           ...(auxiliaryDevices.length ? { auxiliaryDevices } : {}),
         }
     : generatedSoundboard
@@ -294,6 +316,40 @@ export function lowerGeneratedMachine(
     ...(compiledVideo ? { video: compiledVideo.plan } : {}),
     ...(sound ? { sound } : {}),
   };
+}
+
+export function inferredMemberIndexRank(
+  handlers: GeneratedHandler[],
+  member: string,
+): number {
+  let maximum = 0;
+  const visit = (value: unknown): void => {
+    if (!value || typeof value !== 'object') return;
+    const node = value as Record<string, unknown>;
+    if (node.kind === 'index') {
+      let rank = 0;
+      let object: unknown = node;
+      while (
+        object &&
+        typeof object === 'object' &&
+        (object as Record<string, unknown>).kind === 'index'
+      ) {
+        rank++;
+        object = (object as Record<string, unknown>).object;
+      }
+      if (
+        object &&
+        typeof object === 'object' &&
+        (object as Record<string, unknown>).kind === 'identifier' &&
+        (object as Record<string, unknown>).name === member
+      ) {
+        maximum = Math.max(maximum, rank);
+      }
+    }
+    for (const child of Object.values(node)) visit(child);
+  };
+  for (const handler of handlers) visit(handler.program);
+  return maximum;
 }
 
 export function lowerAudioRoutes(
@@ -347,6 +403,7 @@ export function lowerAudioRoutes(
 }
 
 const AUXILIARY_AUDIO_METHODS: Record<string, string[]> = {
+  DAC_8BIT_R2R: ['data_w'],
   MSM5205: ['data_w', 'reset_w', 'playmode_w', 's1_w', 's2_w', 'vclk_w'],
 };
 

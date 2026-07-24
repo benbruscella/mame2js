@@ -49,9 +49,11 @@ export function compileMameVideo(
     if (!resolved || files.includes(resolved)) continue;
     files.push(resolved);
     if (/\.h(?:pp)?$/.test(resolved)) {
-      const implementation = resolved.replace(/\.h(?:pp)?$/, '.cpp');
-      if (existsSync(join(mameSrc, implementation)) && !files.includes(implementation)) {
-        files.push(implementation);
+      for (const suffix of ['.cpp', '_v.cpp', '_a.cpp']) {
+        const implementation = resolved.replace(/\.h(?:pp)?$/, suffix);
+        if (existsSync(join(mameSrc, implementation)) && !files.includes(implementation)) {
+          files.push(implementation);
+        }
       }
     }
   }
@@ -70,15 +72,22 @@ export function compileMameVideo(
     node.props.signal === 'set_screen_update');
   const screenClass = String(screenCallback?.props.targetClass ?? machine.props.cls);
   const screenMethod = String(screenCallback?.props.targetMethod ?? '');
-  const screen = ast.findFunctionInHierarchy(screenClass, screenMethod);
-  const bitmap = screen && compileDirectBitmap(graph, screenClass, screenMethod, screen);
+  const screen = ast.findFunctionInHierarchy(screenClass, screenMethod)
+    ?? ast.ast.units.flatMap(unit => unit.functions)
+      .find(candidate => candidate.name === screenMethod);
+  const bitmap = screen && (
+    compilePackedPaletteBitmap(graph, ast, source, constants, screen) ??
+    compileDirectBitmap(graph, screenClass, screenMethod, screen)
+  );
   if (bitmap) {
+    const scale = Number(constants.GALAXIAN_XSCALE ?? 1);
     return {
       plan: {
         gfx: [],
         tilemaps: [],
-        initialState: {},
+        initialState: memberDefaults,
         bitmap,
+        ...(scale !== 1 ? { renderScale: { x: scale, y: 1 } } : {}),
         source: sourceRef(screen),
       },
       handlers: [],
@@ -189,6 +198,124 @@ export function compileMameVideo(
       source: sourceRef(start),
     },
     handlers,
+  };
+}
+
+function compilePackedPaletteBitmap(
+  graph: KnowledgeGraph,
+  ast: MameAstIndex,
+  source: string,
+  constants: Record<string, number>,
+  screen: MameFunction,
+): NonNullable<GeneratedVideoPlan['bitmap']> | undefined {
+  const fail = (reason: string): undefined => {
+    if (process.env.MAMEKIT_DEBUG_VIDEO === '1') {
+      console.error(`packed bitmap: ${reason}`);
+    }
+    return undefined;
+  };
+  const body = screen.body;
+  const access = /\b(m_\w+)\s*\[\s*(\w+)\s*\*\s*(\d+)\s*\+\s*(\w+)\s*\/\s*(\d+)\s*\]/.exec(body);
+  const shift = />>\s*\(\s*(\d+)\s*\*\s*\(\s*\w+\s*&\s*(\d+)\s*\)\s*\)/.exec(body);
+  if (!access || !shift) return fail(`pixel access missing in ${screen.className}::${screen.name}`);
+  const bytesPerRow = Number(access[3]);
+  const pixelsPerByte = Number(access[5]);
+  const bitsPerPixel = Number(shift[1]);
+  if (
+    !Number.isInteger(bytesPerRow) ||
+    pixelsPerByte !== 2 ||
+    bitsPerPixel !== 4
+  ) return fail('packed pixel geometry did not lower');
+  const palette = compileRawRamPalette(graph, ast, source, constants);
+  if (!palette) return fail('palette RAM network did not lower');
+  const screenDevice = graph.nodes.find(node =>
+    node.label === 'Device' && node.props.type === 'SCREEN');
+  const raw = screenDevice?.props.screenRaw as number[] | undefined;
+  if (!raw || raw.length < 7) return fail('screen raw timing is missing');
+  const rowStart = Number(raw[5]);
+  const rows = Number(raw[6]) - rowStart;
+  if (!Number.isInteger(rowStart) || !Number.isInteger(rows) || rows <= 0) {
+    return fail('visible row timing is invalid');
+  }
+  return {
+    member: access[1]!,
+    rowStart,
+    rows,
+    bytesPerRow,
+    xOffset: 0,
+    lsbFirst: true,
+    bitsPerPixel,
+    paletteRam: palette,
+    ...(/\bm_flipscreen_x\b/.test(body) ? { flipXMember: 'm_flipscreen_x' } : {}),
+    ...(/\bm_flipscreen_y\b/.test(body) ? { flipYMember: 'm_flipscreen_y' } : {}),
+    black: 0xff000000,
+    white: 0xffffffff,
+    source: sourceRef(screen),
+  };
+}
+
+function compileRawRamPalette(
+  graph: KnowledgeGraph,
+  ast: MameAstIndex,
+  source: string,
+  constants: Record<string, number>,
+): NonNullable<NonNullable<GeneratedVideoPlan['bitmap']>['paletteRam']> | undefined {
+  const fail = (reason: string): undefined => {
+    if (process.env.MAMEKIT_DEBUG_VIDEO === '1') {
+      console.error(`video RAM palette: ${reason}`);
+    }
+    return undefined;
+  };
+  const palette = graph.nodes.find(node =>
+    node.label === 'Device' && node.props.type === 'PALETTE');
+  const config = ((palette?.props.config as string[] | undefined) ?? []).join('\n');
+  const declaration = /PALETTE\s*\(\s*config\s*,\s*(m_\w+)\s*\)[^;]*?set_format\s*\(([\s\S]+)\)/.exec(config);
+  const callback = declaration && /(\w+)::(\w+)/.exec(declaration[2]!);
+  const entries = Number(declaration && splitMameArgs(declaration[2]!).at(-1));
+  if (!declaration || !callback || !Number.isInteger(entries) || entries <= 0) {
+    return fail('set_format declaration did not lower');
+  }
+  const fn = ast.findFunctionInHierarchy(callback[1]!, callback[2]!);
+  if (!fn) return fail(`missing ${callback[1]}::${callback[2]}`);
+  const networks = compilePaletteNetworks(source, fn.body, constants);
+  const channels: {
+    channel: 'r' | 'g' | 'b';
+    bits: number[];
+    network: PaletteNetwork;
+  }[] = [];
+  let start = 0;
+  for (const channel of ['r', 'g', 'b'] as const) {
+    const result = new RegExp(
+      `\\b(?:int\\s+const|int)\\s+${channel}\\s*=\\s*combine_weights\\s*\\(\\s*(\\w+)[^;]*\\)\\s*;`,
+    ).exec(fn.body.slice(start));
+    if (!result) return fail(`missing ${channel} combine_weights result`);
+    const absolute = start + result.index;
+    const segment = fn.body.slice(start, absolute);
+    const bits = [...segment.matchAll(/\bbit\d+\s*=\s*BIT\s*\(\s*raw\s*,\s*(\d+)\s*\)/g)]
+      .map(match => Number(match[1]));
+    const network = networks.get(result[1]!);
+    if (!network || bits.length !== network.resistances.length) {
+      return fail(
+        `${channel} network mismatch (${String(result[1])}, ` +
+        `${bits.length}/${network?.resistances.length ?? 0} bits)`,
+      );
+    }
+    channels.push({ channel, bits, network });
+    start = absolute + result[0].length;
+  }
+  return {
+    member: declaration[1]!,
+    entries,
+    min: channels[0]!.network.min,
+    max: channels[0]!.network.max,
+    scaler: channels[0]!.network.scaler,
+    channels: channels.map(({ channel, bits, network }) => ({
+      channel,
+      bits,
+      resistances: network.resistances,
+      pulldown: network.pulldown,
+      pullup: network.pullup,
+    })),
   };
 }
 

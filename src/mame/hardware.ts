@@ -13,6 +13,7 @@ import { parseMameSource, type MameMacro, type MameTranslationUnit } from './ast
 import { compileMameHandler } from './handler-ir.ts';
 import { parseZ80OpcodeDsl } from './opcode-dsl.ts';
 import {
+  compileMameMcs48,
   compileMameI8080,
   compileMameKonami1,
   compileMameM6803,
@@ -476,6 +477,9 @@ export function emitHardwareClosure(closure: HardwareClosure, outRoot: string): 
   const i8080 = closure.hardware.some(entry => entry.type === 'I8080')
     ? compileMameI8080(closure.mameSource)
     : undefined;
+  const i8039 = closure.hardware.some(entry => entry.type === 'I8039')
+    ? compileMameMcs48(closure.mameSource)
+    : undefined;
   const m6803 = closure.hardware.some(entry => entry.type === 'M6803')
     ? compileMameM6803(closure.mameSource)
     : undefined;
@@ -519,6 +523,8 @@ export function emitHardwareClosure(closure: HardwareClosure, outRoot: string): 
   const msm5205 = msmEntry?.definition
     ? compileMsm5205(closure.mameSource, msmEntry.definition)
     : undefined;
+  const routedDac = ay8910 && closure.hardware.some(entry =>
+    entry.type === 'DAC_8BIT_R2R');
   const snGames = new Set(
     closure.hardware.find(entry => entry.type === 'SN76477')?.uses.map(use => use.game) ?? [],
   );
@@ -561,12 +567,14 @@ export function emitHardwareClosure(closure: HardwareClosure, outRoot: string): 
   const leafExecutableTypes = new Set<string>([
     ...(z80 ? ['Z80'] : []),
     ...(i8080 ? ['I8080'] : []),
+    ...(i8039 ? ['I8039'] : []),
     ...(m6803 ? ['M6803'] : []),
     ...(konami1 ? ['KONAMI1'] : []),
     ...generatedDevices.keys(),
     ...(namcoWsg ? ['NAMCO_WSG'] : []),
     ...(ay8910 ? ['AY8910'] : []),
     ...(msm5205 && ay8910 ? ['MSM5205'] : []),
+    ...(routedDac ? ['DAC_8BIT_R2R'] : []),
     ...(discreteSn76477 ? [discreteSn76477.deviceType, 'SN76477'] : []),
     ...(counterLfsrDiscrete ? [counterLfsrDiscrete.deviceType] : []),
   ]);
@@ -598,7 +606,7 @@ export function emitHardwareClosure(closure: HardwareClosure, outRoot: string): 
       ...compactEntry(entry),
       executable: executableTypes.has(entry.type),
       ...(hostedBy(entry) ? { hostedBy: hostedBy(entry) } : {}),
-      ...(['Z80', 'I8080', 'M6803', 'KONAMI1'].includes(entry.type)
+      ...(['Z80', 'I8080', 'I8039', 'M6803', 'KONAMI1'].includes(entry.type)
         ? {
             executableKind: 'cpu',
             executableArtifact: `devices/${entry.type.toLowerCase()}.cpu.ir.json`,
@@ -622,6 +630,11 @@ export function emitHardwareClosure(closure: HardwareClosure, outRoot: string): 
           ? {
               executableKind: 'audio',
               executableArtifact: 'audio/msm5205.audio.ir.json',
+            }
+        : entry.type === 'DAC_8BIT_R2R' && routedDac
+          ? {
+              executableKind: 'audio',
+              executableArtifact: 'audio/ay8910-worklet.ts',
             }
         : compositeTypes.has(entry.type)
           ? {
@@ -709,6 +722,8 @@ export function emitHardwareClosure(closure: HardwareClosure, outRoot: string): 
       ? z80
       : entry.type === 'I8080'
         ? i8080
+        : entry.type === 'I8039'
+          ? i8039
         : entry.type === 'M6803'
           ? m6803
           : entry.type === 'KONAMI1'

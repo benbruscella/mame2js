@@ -10,7 +10,35 @@ import {
   AY_FILTER_CONTROL_BASE,
   AY_FILTER_CONTROL_STRIDE,
   type GeneratedDacFilterPlan,
+  type GeneratedSpeakerFilterPlan,
 } from '../runtime/audio-protocol.ts';
+
+export function compileMameSpeakerFilter(
+  mameSrc: string,
+): GeneratedSpeakerFilterPlan {
+  const cppFile = 'src/emu/audio_effects/filter.cpp';
+  const headerFile = 'src/emu/audio_effects/filter.h';
+  const cpp = readFileSync(join(mameSrc, cppFile), 'utf8');
+  const header = readFileSync(join(mameSrc, headerFile), 'utf8');
+  const frequencyMatch =
+    /m_fh\s*=\s*d\s*\?\s*d->fh\(\)\s*:\s*([0-9.]+)\s*;/.exec(cpp);
+  const qMatch =
+    /DEFAULT_Q\s*=\s*([0-9.]+)f?\s*;/.exec(header);
+  const enabledByDefault =
+    /m_highpass_active\s*=\s*d\s*\?\s*d->highpass_active\(\)\s*:\s*true\s*;/.test(cpp);
+  if (!frequencyMatch || !qMatch || !enabledByDefault) {
+    throw new Error('unsupported MAME default speaker filter');
+  }
+  return {
+    type: 'highpass',
+    frequency: Number(frequencyMatch[1]),
+    q: Number(qMatch[1]),
+    source: {
+      file: cppFile,
+      line: cpp.slice(0, frequencyMatch.index).split('\n').length,
+    },
+  };
+}
 
 export interface GeneratedNamcoWsgPlan {
   schemaVersion: 1;
@@ -1303,9 +1331,25 @@ export function generatedAy8910WorkletSource(
 // LFSR taps are extracted from MAME's AY implementation. RC behavior is
 // sourced from flt_rc and route/filter controls arrive from generated machine IR.
 const plan = ${JSON.stringify(plan, null, 2)};
-const msmPlan = ${JSON.stringify(msm5205 ?? null, null, 2)};
+const msmPlan: GeneratedMsm5205PlanData | null = ${JSON.stringify(msm5205 ?? null, null, 2)};
 const FILTER_CONTROL_BASE = ${AY_FILTER_CONTROL_BASE};
 const FILTER_CONTROL_STRIDE = ${AY_FILTER_CONTROL_STRIDE};
+
+interface GeneratedMsm5205PlanData {
+  schemaVersion: number;
+  type: string;
+  className: string;
+  indexShift: number[];
+  diffLookup: number[];
+  modes: Record<string, number>;
+  maximumStep: number;
+  minimumSignal: number;
+  maximumSignal: number;
+  sampleScale: number;
+  dacBits: number;
+  sourceFiles: string[];
+  source: { file: string; line: number };
+}
 
 export interface GeneratedAyRoute {
   chip: number;
@@ -1510,6 +1554,18 @@ export class GeneratedMsm5205Core {
   }
 }
 
+export class GeneratedDac8Core {
+  private value = 0x80;
+
+  write(method: string, data: number): void {
+    if (method === 'data_w') this.value = data & 0xff;
+  }
+
+  sample(): number {
+    return (this.value - 0x80) / 0x80;
+  }
+}
+
 export class GeneratedAy8910Mixer {
   private readonly cores: GeneratedAy8910Core[];
   private readonly phases: number[];
@@ -1520,7 +1576,7 @@ export class GeneratedAy8910Mixer {
   private readonly auxiliary: {
     deviceTag: string;
     gain: number;
-    core: GeneratedMsm5205Core;
+    core: GeneratedMsm5205Core | GeneratedDac8Core;
   }[];
   private readonly auxiliaryGainTotal: number;
   private readonly outputRate: number;
@@ -1562,14 +1618,24 @@ export class GeneratedAy8910Mixer {
       memory: 0,
     }));
     this.gainTotal = this.routes.reduce((sum, route) => sum + route.gain, 0) || 1;
-    this.auxiliary = auxiliaryDevices.flatMap(device =>
+    this.auxiliary = auxiliaryDevices.flatMap<{
+      deviceTag: string;
+      gain: number;
+      core: GeneratedMsm5205Core | GeneratedDac8Core;
+    }>(device =>
       device.type === 'MSM5205' && msmPlan
         ? [{
             deviceTag: device.deviceTag,
             gain: device.gain,
             core: new GeneratedMsm5205Core(device.initialMode),
           }]
-        : []);
+        : device.type === 'DAC_8BIT_R2R'
+          ? [{
+              deviceTag: device.deviceTag,
+              gain: device.gain,
+              core: new GeneratedDac8Core(),
+            }]
+          : []);
     this.auxiliaryGainTotal = this.auxiliary.reduce(
       (sum, device) => sum + device.gain,
       0,

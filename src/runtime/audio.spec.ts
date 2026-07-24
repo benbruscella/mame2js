@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import { AudioOutput } from './audio.ts';
 
 const messages: unknown[] = [];
+const connections: string[] = [];
+let createdFilter: BiquadFilterNode | undefined;
 
 class TestAudioContext {
   readonly audioWorklet = { addModule: async () => {} };
@@ -11,7 +13,20 @@ class TestAudioContext {
   readonly baseLatency = 0;
 
   createGain(): GainNode {
-    return { gain: { value: 1 }, connect: () => {} } as unknown as GainNode;
+    return {
+      gain: { value: 1 },
+      connect: () => connections.push('gain->destination'),
+    } as unknown as GainNode;
+  }
+
+  createBiquadFilter(): BiquadFilterNode {
+    createdFilter = {
+      type: 'lowpass',
+      frequency: { value: 0 },
+      Q: { value: 0 },
+      connect: () => connections.push('filter->gain'),
+    } as unknown as BiquadFilterNode;
+    return createdFilter;
   }
 
   async resume(): Promise<void> {}
@@ -26,7 +41,9 @@ class TestAudioWorkletNode {
   };
 
   constructor() {}
-  connect(): void {}
+  connect(target: unknown): void {
+    connections.push(target === createdFilter ? 'node->filter' : 'node->gain');
+  }
 }
 
 Object.assign(globalThis, {
@@ -38,7 +55,24 @@ const output = new AudioOutput();
 output.write(3, 7, 0.25);
 output.flush();
 output.flush();
-await output.start({ sampleRate: 48_000, refresh: 60 }, 'test-worklet.js', 'test');
+await output.start({
+  sampleRate: 48_000,
+  refresh: 60,
+  speakerFilter: {
+    type: 'highpass',
+    frequency: 20,
+    q: 0.7071067,
+    source: { file: 'src/emu/audio_effects/filter.cpp', line: 70 },
+  },
+}, 'test-worklet.js', 'test');
+assert.equal(createdFilter?.type, 'highpass');
+assert.equal(createdFilter?.frequency.value, 20);
+assert.equal(createdFilter?.Q.value, 0.7071067);
+assert.deepEqual(connections, [
+  'node->filter',
+  'filter->gain',
+  'gain->destination',
+]);
 
 // Frames emulated before start() are history: they collapse into ONE batch so
 // the worklet never boots with a multi-frame backlog of permanent latency.

@@ -7,6 +7,7 @@ import { galaga } from './galaga.ts';
 import { digdug } from './digdug.ts';
 import { mpatrol } from './mpatrol.ts';
 import { rocnrope } from './rocnrope.ts';
+import { junofrst } from './junofrst.ts';
 
 export const supportedGameContracts = [
   pacman,
@@ -18,4 +19,5 @@ export const supportedGameContracts = [
   digdug,
   mpatrol,
   rocnrope,
+  junofrst,
 ] as const;

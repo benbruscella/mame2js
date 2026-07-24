@@ -237,6 +237,173 @@ export function compileMameZ80(mameSrc: string): GeneratedCpuDefinition {
 }
 
 /**
+ * Compile Intel MCS-48 execution directly from MAME's opcode-handler table.
+ *
+ * MAME expresses this core as 256 OP(handler) entries backed by OPHANDLER
+ * methods rather than a .lst DSL. The table is still the instruction DSL: it
+ * selects the source method for every opcode, while the AST compiler lowers
+ * those methods and their shared execution helpers.
+ */
+export function compileMameMcs48(mameSrc: string): GeneratedCpuDefinition {
+  const cppFile = 'src/devices/cpu/mcs48/mcs48.cpp';
+  const headerFile = 'src/devices/cpu/mcs48/mcs48.h';
+  const cpp = readFileSync(join(mameSrc, cppFile), 'utf8');
+  const header = readFileSync(join(mameSrc, headerFile), 'utf8');
+  const transformed = cpp.replace(
+    /^\s*OPHANDLER\s*\(\s*(\w+)\s*\)/gm,
+    'void mcs48_cpu_device::$1()',
+  );
+  const unit = parseMameSource(cppFile, transformed);
+  const table = /s_mcs48_opcodes\s*\[\s*256\s*\]\s*=\s*\{([\s\S]*?)\};/.exec(cpp)?.[1];
+  if (!table) throw new Error('MAME MCS-48 source has no 256-entry opcode table');
+  const opcodeNames = [...table.matchAll(/\bOP\s*\(\s*(\w+)\s*\)/g)]
+    .map(match => match[1]!);
+  if (opcodeNames.length !== 256) {
+    throw new Error(`MAME MCS-48 opcode table has ${opcodeNames.length} entries`);
+  }
+
+  const normalize = (body: string): string => {
+    let source = body;
+    for (let register = 0; register < 8; register++) {
+      source = source.replace(
+        new RegExp(`\\bR${register}\\b`, 'g'),
+        `m_dataptr[((m_psw & B_FLAG) ? 24 : 0) + ${register}]`,
+      );
+    }
+    return normalizeMameExecutionSource(source)
+      .replace(/\bm_bus_out_cb\s*\(\s*0\s*,\s*([^,]+),[^)]*\)/g, 'bus_w($1)')
+      .replace(/\bupdate_regptr\s*\(\s*\)\s*;/g, '')
+      .replace(/\bupdate_ea\s*\(\s*\)\s*;/g, '')
+      .replace(
+        /^\s*if\s*\(\s*!m_t0_clk_func\.isnull\(\)\s*\)\s*[\r\n]+\s*m_t0_clk_func\([^;]*\);/gm,
+        '',
+      );
+  };
+  const functionByName = new Map(
+    unit.functions
+      .filter(fn => fn.className === 'mcs48_cpu_device')
+      .map(fn => [fn.name, fn]),
+  );
+  const helperNames = [
+    'opcode_fetch',
+    'argument_fetch',
+    'push_pc_psw',
+    'pull_pc_psw',
+    'pull_pc',
+    'execute_add',
+    'execute_addc',
+    'execute_jmp',
+    'execute_call',
+    'execute_jcc',
+    'p2_mask',
+    'expander_operation',
+    'check_irqs',
+    'burn_cycles',
+  ];
+  const methodNames = [...new Set([...helperNames, ...opcodeNames])];
+  const methods = methodNames.map(name => {
+    const fn = functionByName.get(name);
+    if (!fn) throw new Error(`MAME MCS-48 source is missing ${name}()`);
+    let body = normalize(fn.body);
+    if (name === 'burn_cycles') {
+      body = `int requested_cycles = count;\n${body}`
+        .replace(/\bcount--\s*,\s*m_icount--/g, 'count--')
+        .replace(/\bm_icount\s*-=\s*count\s*;/g, 'cycles += requested_cycles;');
+    }
+    return {
+      name,
+      parameters: fn.parameters,
+      program: compileMameHandler(body),
+      source: sourceRef(fn.span.file, fn.span.line),
+    };
+  });
+  const startMethod = functionByName.get('device_start');
+  const resetMethod = functionByName.get('device_reset');
+  const inputMethod = functionByName.get('execute_set_input');
+  if (!startMethod || !resetMethod || !inputMethod) {
+    throw new Error('MAME MCS-48 source is missing start/reset/input definitions');
+  }
+  const frameworkStart = startMethod.body.indexOf('space(AS_PROGRAM)');
+  const startBody = frameworkStart >= 0
+    ? startMethod.body.slice(0, frameworkStart)
+    : startMethod.body;
+  const start = compileMameHandler(normalize(startBody));
+  const reset = compileMameHandler(normalize(resetMethod.body));
+  const input = compileMameHandler(normalize(inputMethod.body));
+  const service = compileMameHandler(normalize(`
+    check_irqs();
+    m_irq_polled = false;
+    m_prevpc = m_pc;
+  `));
+  const fetch = compileMameHandler(normalize('m_ref = opcode_fetch() << 16;'));
+  const constants = {
+    ...extractDefineConstants(cpp),
+    ...extractEnumConstants(header, {
+      CLEAR_LINE: 0,
+      ASSERT_LINE: 1,
+    }),
+  };
+  const members = extractMembers(header, {}).filter(member => member.name !== 'm_rtemp');
+  const setInitial = (name: string, initial: number): void => {
+    const member = members.find(candidate => candidate.name === name);
+    if (member) member.initial = initial;
+    else members.push({ name, bits: 16, initial });
+  };
+  setInitial('m_feature_mask', constants.I8048_FEATURE ?? 3);
+  setInitial('m_rom_size', 0);
+  setInitial('m_ram_size', 128);
+  members.push(
+    { name: 'm_dataptr', bits: 8, values: new Array(128).fill(0) },
+    { name: 'm_ref', bits: 32, initial: 0 },
+  );
+  const opcodes = opcodeNames.map((name, opcode) => {
+    const method = methods.find(candidate => candidate.name === name)!;
+    return {
+      key: `${opcode.toString(16).padStart(2, '0')}00`,
+      description: name,
+      dispatch: false,
+      program: compileMameHandler(`${name}();`),
+      source: method.source,
+    };
+  });
+  const programs = [
+    start,
+    reset,
+    input,
+    service,
+    fetch,
+    ...methods.map(method => method.program),
+    ...opcodes.map(opcode => opcode.program),
+  ];
+  return {
+    schemaVersion: 1,
+    type: 'I8039',
+    dialect: 'mame-mcs48-ophandler-table',
+    sourceFiles: [cppFile, headerFile],
+    constants,
+    aliases: {},
+    members: members.sort((left, right) => left.name.localeCompare(right.name)),
+    methods,
+    start,
+    reset,
+    input,
+    service,
+    fetch,
+    opcodes,
+    summary: {
+      opcodes: opcodes.length,
+      compiledOpcodes: opcodes.filter(opcode => !opcode.program.diagnostics.length).length,
+      methods: methods.length,
+      compiledMethods: methods.filter(method => !method.program.diagnostics.length).length,
+      diagnostics: programs.reduce(
+        (count, program) => count + program.diagnostics.length,
+        0,
+      ),
+    },
+  };
+}
+
+/**
  * Compile MAME's shared 8080/8085 implementation with the i8080 subclass
  * overrides selected. Unlike the Z80 core, this CPU has no opcode DSL: MAME's
  * executable source is a single 256-case `execute_one` switch.

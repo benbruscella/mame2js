@@ -1,6 +1,11 @@
-import { generatedBoardSource, lowerGeneratedMachine } from './emit-machine.ts';
+import {
+  generatedBoardSource,
+  inferredMemberIndexRank,
+  lowerGeneratedMachine,
+} from './emit-machine.ts';
 import type { KnowledgeGraph } from '../kg/types.ts';
 import type { BoardConfig } from '../runtime/types.ts';
+import { compileMameHandler } from '../mame/handler-ir.ts';
 
 const graph: KnowledgeGraph = {
   meta: {
@@ -88,4 +93,25 @@ if (!source.includes("from './machine.json' with { type: 'json' }")) {
 }
 if (source.includes('JSON.parse')) throw new Error('generated board embeds machine JSON');
 
-console.log('emit-machine.spec: 8 passed, 0 failed');
+const filterHandlers = [
+  {
+    id: 'flat',
+    ownerClass: 'flat_state',
+    method: 'filter_w',
+    program: compileMameHandler('m_filter[i]->filter_rc_set_RC(0, 1, 2, 3, 4);'),
+  },
+  {
+    id: 'matrix',
+    ownerClass: 'matrix_state',
+    method: 'filter_w',
+    program: compileMameHandler('m_filter[bank][channel]->filter_rc_set_RC(0, 1, 2, 3, 4);'),
+  },
+];
+if (inferredMemberIndexRank([filterHandlers[0]!], 'm_filter') !== 1) {
+  throw new Error('flat MAME device arrays must retain one-dimensional filter layout');
+}
+if (inferredMemberIndexRank([filterHandlers[1]!], 'm_filter') !== 2) {
+  throw new Error('matrix MAME device arrays must retain two-dimensional filter layout');
+}
+
+console.log('emit-machine.spec: callbacks, provenance, IR and filter rank passed');
