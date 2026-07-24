@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { lowerAudioRoutes } from '../gen/emit-machine.ts';
 import { compileMameKonami1 } from '../mame/cpu-compiler.ts';
 import { compileMameVideo } from '../mame/video-compiler.ts';
+import { executeGeneratedProgram } from '../runtime/generated-handler.ts';
 import { rocnrope } from './rocnrope.ts';
 import {
   assertGameContract,
@@ -34,6 +35,29 @@ const video = compileMameVideo(graph, mameSrc, machine.id);
 assert.ok(video, 'Roc’n Rope MAME video source must lower to executable video IR');
 assert.equal(video.plan.tilemaps[0]?.mapper, 'TILEMAP_SCAN_ROWS');
 assert.ok(video.handlers.every(handler => !handler.program?.diagnostics.length));
+const tileInfo = video.handlers.find(
+  handler => handler.method === 'get_bg_tile_info',
+)?.program;
+assert.ok(tileInfo);
+let flags = -1;
+executeGeneratedProgram(
+  tileInfo,
+  {
+    members: {
+      m_colorram: Uint8Array.of(0x60),
+      m_videoram: Uint8Array.of(0x12),
+    },
+  },
+  {
+    tile_index: 0,
+    tileinfo: {
+      set: (_gfx: number, _code: number, _color: number, value: number) => {
+        flags = value;
+      },
+    },
+  },
+);
+assert.equal(flags, 3, 'Roc’n Rope terrain must preserve MAME tile flip flags');
 
 const game = graph.nodes.find(node =>
   node.label === 'Game' && node.props.name === rocnrope.game);

@@ -54,11 +54,11 @@ never be compiled into or pollute the canonical generated `dist` tree.
 ### CURRENT CLEAN GENERATION
 
 `test:current` invokes `gen:all`, which deletes `dist`, generates Pac-Man,
-Pooyan, Time Pilot, Space Invaders, Galaxian, Galaga and Dig Dug from MAME,
-builds their shared hardware closure and app, then runs the generated-output
-audit. It detects stale-output masking, missing modules, unsupported hardware,
-duplicate trees, embedded machine JSON, imports from `src`, and blocked
-catalog entries.
+Pooyan, Time Pilot, Space Invaders, Galaxian, Galaga, Dig Dug, Moon Patrol and
+Roc'n Rope from MAME, builds their shared hardware closure and app, then runs
+the generated-output audit. It detects stale-output masking, missing modules,
+unsupported hardware, duplicate trees, embedded machine JSON, imports from
+`src`, and blocked catalog entries.
 
 ### ALL-TARGET GENERATION
 
@@ -183,6 +183,7 @@ roms/arcade/galaxian.zip
 roms/arcade/galaga.zip
 roms/arcade/digdug.zip
 roms/arcade/mpatrol.zip
+roms/arcade/rocnrope.zip
 ```
 
 Override them without moving files:
@@ -196,6 +197,7 @@ MAMEKIT_GALAXIAN_ROM=/path/galaxian.zip \
 MAMEKIT_GALAGA_ROM=/path/galaga.zip \
 MAMEKIT_DIGDUG_ROM=/path/digdug.zip \
 MAMEKIT_MPATROL_ROM=/path/mpatrol.zip \
+MAMEKIT_ROCNROPE_ROM=/path/rocnrope.zip \
 npm run test:games
 ```
 

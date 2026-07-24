@@ -91,6 +91,15 @@ const tableProgram = compileMameHandler(normalizeMameExecutionSource(`
 assert.deepEqual(tableProgram.diagnostics, []);
 assert.equal(executeGeneratedHandler(tableProgram, {}, { row: 1, column: 0 }), 2);
 
+const tileFlags = compileMameHandler(`
+  return ((attr & 0x40) ? TILE_FLIPX : 0) |
+    ((attr & 0x20) ? TILE_FLIPY : 0);
+`);
+assert.equal(executeGeneratedHandler(tileFlags, {}, { attr: 0x00 }), 0);
+assert.equal(executeGeneratedHandler(tileFlags, {}, { attr: 0x40 }), 1);
+assert.equal(executeGeneratedHandler(tileFlags, {}, { attr: 0x20 }), 2);
+assert.equal(executeGeneratedHandler(tileFlags, {}, { attr: 0x60 }), 3);
+
 const machine: GeneratedMachine = {
   schemaVersion: 2,
   game: 'fixture',
