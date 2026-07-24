@@ -14,6 +14,7 @@ import { compileMameHandler } from './handler-ir.ts';
 import { parseZ80OpcodeDsl } from './opcode-dsl.ts';
 import {
   compileMameI8080,
+  compileMameKonami1,
   compileMameM6803,
   compileMameZ80,
 } from './cpu-compiler.ts';
@@ -352,7 +353,6 @@ function resolveDefinition(
   definitions: Map<string, MameHardwareDefinition>,
 ): MameHardwareDefinition | undefined {
   const aliases: Record<string, string> = {
-    KONAMI1: 'KONAMI',
     MC6809: 'M6809',
     MC6809E: 'M6809E',
   };
@@ -479,6 +479,9 @@ export function emitHardwareClosure(closure: HardwareClosure, outRoot: string): 
   const m6803 = closure.hardware.some(entry => entry.type === 'M6803')
     ? compileMameM6803(closure.mameSource)
     : undefined;
+  const konami1 = closure.hardware.some(entry => entry.type === 'KONAMI1')
+    ? compileMameKonami1(closure.mameSource)
+    : undefined;
   const generatedDevices = new Map(
     closure.hardware
       .filter(entry => [
@@ -559,6 +562,7 @@ export function emitHardwareClosure(closure: HardwareClosure, outRoot: string): 
     ...(z80 ? ['Z80'] : []),
     ...(i8080 ? ['I8080'] : []),
     ...(m6803 ? ['M6803'] : []),
+    ...(konami1 ? ['KONAMI1'] : []),
     ...generatedDevices.keys(),
     ...(namcoWsg ? ['NAMCO_WSG'] : []),
     ...(ay8910 ? ['AY8910'] : []),
@@ -594,7 +598,7 @@ export function emitHardwareClosure(closure: HardwareClosure, outRoot: string): 
       ...compactEntry(entry),
       executable: executableTypes.has(entry.type),
       ...(hostedBy(entry) ? { hostedBy: hostedBy(entry) } : {}),
-      ...(['Z80', 'I8080', 'M6803'].includes(entry.type)
+      ...(['Z80', 'I8080', 'M6803', 'KONAMI1'].includes(entry.type)
         ? {
             executableKind: 'cpu',
             executableArtifact: `devices/${entry.type.toLowerCase()}.cpu.ir.json`,
@@ -707,6 +711,8 @@ export function emitHardwareClosure(closure: HardwareClosure, outRoot: string): 
         ? i8080
         : entry.type === 'M6803'
           ? m6803
+          : entry.type === 'KONAMI1'
+            ? konami1
           : undefined;
     if (cpu) {
       writeFileSync(

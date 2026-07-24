@@ -54,6 +54,11 @@ export interface GeneratedCpuDefinition {
   service: GeneratedHandlerProgram;
   fetch: GeneratedHandlerProgram;
   opcodes: CpuOpcode[];
+  opcodeDecrypt?: {
+    boundary: number;
+    addressMask: number;
+    xorByAddress: Record<string, number>;
+  };
   internal?: {
     ram: { start: number; end: number }[];
     ports: {
@@ -187,6 +192,15 @@ class IrCpu implements Cpu {
       right.set(value);
       return 0;
     };
+    for (const [name, delta] of [['POSTINC', 1], ['POSTDEC', -1]] as const) {
+      callParameters[name] = ['auto &value'];
+      referenceCalls[name] = value => {
+        if (!isLValue(value)) return 0;
+        const previous = Number(value.get()) || 0;
+        value.set(previous + delta);
+        return previous;
+      };
+    }
 
     this.execute(definition.start);
     this.reset();
@@ -275,6 +289,27 @@ class IrCpu implements Cpu {
 
   private externalCalls(): NonNullable<GeneratedHandlerBindings['calls']> {
     return {
+      READ: address => {
+        this.set('cycles', this.get('cycles') + 1);
+        return this.readMemory(address);
+      },
+      READ_VECTOR: ordinal => {
+        this.set('cycles', this.get('cycles') + 1);
+        return this.readMemory(this.get('m_ea.w') + ordinal);
+      },
+      ARG: address => {
+        this.set('cycles', this.get('cycles') + 1);
+        return this.readMemory(address);
+      },
+      OPCODE: address => {
+        this.set('cycles', this.get('cycles') + 1);
+        return this.readOpcode(address);
+      },
+      WRITE: (address, value) => {
+        this.set('cycles', this.get('cycles') + 1);
+        this.writeMemory(address, value);
+        return 0;
+      },
       'm_data.read_interruptible': address => this.bus.read(address & 0xffff) & 0xff,
       'm_data.write_interruptible': (address, value) => {
         this.bus.write(address & 0xffff, value & 0xff);
@@ -323,6 +358,14 @@ class IrCpu implements Cpu {
     }
     if (this.isInternalRam(location)) return this.internalRam.get(location) ?? 0;
     return this.bus.read(location) & 0xff;
+  }
+
+  private readOpcode(address: number): number {
+    const location = address & 0xffff;
+    const value = this.readMemory(location);
+    const decrypt = this.definition.opcodeDecrypt;
+    if (!decrypt || location < decrypt.boundary) return value;
+    return value ^ (decrypt.xorByAddress[String(location & decrypt.addressMask)] ?? 0);
   }
 
   private writeMemory(address: number, value: number): void {
