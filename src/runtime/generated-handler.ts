@@ -844,8 +844,14 @@ function assignmentValue(operator: string, current: unknown, value: unknown): un
 
 function wrapValue(valueType: string | undefined, value: unknown): unknown {
   if (valueType === 'auto' || valueType?.includes('*') || valueType?.includes('&')) return value;
-  if (value && typeof value === 'object') return value;
   valueType = valueType?.replace(/\bconst\b/g, '').trim();
+  if (valueType === 'rectangle' && value && typeof value === 'object') {
+    return Object.assign(
+      Object.create(Object.getPrototypeOf(value)),
+      value,
+    );
+  }
+  if (value && typeof value === 'object') return value;
   const number = toNumber(value);
   if (valueType === 'uint8_t' || valueType === 'u8') return number & 0xff;
   if (valueType === 'int8_t' || valueType === 's8') return (number << 24) >> 24;

@@ -41,6 +41,8 @@ export interface GameTestContract {
   minimumFps: number;
   checkpoints: number[];
   actions: GameInputAction[];
+  /** Archival, non-executable chips absent from the available QA ROM set. */
+  optionalRomFiles?: string[];
   /** Required generated audio activity in a named source-device path. */
   audioRequirements?: {
     method: string;

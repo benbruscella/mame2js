@@ -11,7 +11,7 @@
     "clean": "rm -rf dist",
     "serve": "node bin/mamekit.js --serve",
     "gen": "node bin/mamekit.js",
-    "gen:all": "npm run clean && for g in pacman pooyan timeplt invaders galaxian galaga digdug; do node bin/mamekit.js $g --skip-app || exit 1; done && node bin/mamekit.js --build-runtime --build-app --targets pacman,pooyan,timeplt,invaders,galaxian,galaga,digdug",
+    "gen:all": "npm run clean && for g in pacman pooyan timeplt invaders galaxian galaga digdug mpatrol; do node bin/mamekit.js $g --skip-app || exit 1; done && node bin/mamekit.js --build-runtime --build-app --targets pacman,pooyan,timeplt,invaders,galaxian,galaga,digdug,mpatrol",
     "audit:generated": "node src/gen/audit-generated.ts",
     "deploy": "bash scripts/deploy-pages.sh --artwork",
     "deploy:noart": "bash scripts/deploy-pages.sh",

@@ -9,7 +9,10 @@ import { AudioOutput } from './audio.ts';
 import { readZip, crc32 } from './zip.ts';
 import type { Regions, BoardConfig } from './types.ts';
 import type { GeneratedAudioRoute } from './generated-machine.ts';
-import type { GeneratedDacFilterPlan } from './audio-protocol.ts';
+import type {
+  GeneratedAuxiliaryAudioDevice,
+  GeneratedDacFilterPlan,
+} from './audio-protocol.ts';
 
 export interface RomLoad {
   file: string; offset: number; size: number; crc: string;
@@ -17,7 +20,13 @@ export interface RomLoad {
   alt?: { file: string; crc: string }[];
   reloadOffsets?: number[];
 }
-export interface RomRegionSpec { region: string; size: number; loads: RomLoad[] }
+export interface RomRegionSpec {
+  region: string;
+  size: number;
+  /** MAME ROMREGION_ERASE00/ERASEFF initialization for unloaded bytes. */
+  fill?: number;
+  loads: RomLoad[];
+}
 
 export interface SoundSpec {
   /** Generic SoundCore/AudioWorklet processor kind. */
@@ -37,6 +46,8 @@ export interface SoundSpec {
   dacGain?: number;
   /** MAME discrete DAC/filter network mixed with the primary core. */
   auxiliary?: GeneratedDacFilterPlan;
+  /** Source-routed secondary stream devices mixed by the generated worklet. */
+  auxiliaryDevices?: GeneratedAuxiliaryAudioDevice[];
 }
 
 /** the ROM drop target's visual states (built by buildDom().dropZone) */
@@ -246,6 +257,7 @@ export async function runShell(cfg: ShellConfig, preloaded?: Regions): Promise<v
         routes: cfg.sound.routes,
         dacGain: cfg.sound.dacGain,
         auxiliary: cfg.sound.auxiliary,
+        auxiliaryDevices: cfg.sound.auxiliaryDevices,
         refresh: cfg.board.screen.refresh,
         debug: input.debug,
       },
@@ -324,6 +336,7 @@ export function assembleRegions(
   const missingOther: string[] = [];
   for (const spec of specs) {
     const bytes = new Uint8Array(spec.size);
+    if (spec.fill) bytes.fill(spec.fill & 0xff);
     for (const load of spec.loads) {
       // primary chip by name/swapped-name/CRC, else a clone-revision
       // alternate from the same slot (see findRomBytes)

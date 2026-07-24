@@ -41,6 +41,11 @@ export class GeneratedFrameRunner {
   private readonly onEvent?: (event: GeneratedFrameEvent) => void;
   private readonly onLine?: GeneratedFrameRunnerOptions['onLine'];
   private readonly eventsByLine = new Map<number, GeneratedFrameEvent[]>();
+  private readonly periodicEvents: {
+    event: GeneratedFrameEvent;
+    eventsPerLine: number;
+    carry: number;
+  }[] = [];
   private frames = 0;
 
   constructor(options: GeneratedFrameRunnerOptions) {
@@ -62,6 +67,14 @@ export class GeneratedFrameRunner {
       return { processor, cyclesPerLine: clock / denominator, carry: 0 };
     });
     for (const event of options.machine.execution.frameEvents) {
+      if (event.frequency) {
+        this.periodicEvents.push({
+          event,
+          eventsPerLine: event.frequency / denominator,
+          carry: 0,
+        });
+        continue;
+      }
       const lineEvents = this.eventsByLine.get(event.line) ?? [];
       lineEvents.push(event);
       this.eventsByLine.set(event.line, lineEvents);
@@ -78,6 +91,7 @@ export class GeneratedFrameRunner {
 
   reset(): void {
     for (const processor of this.processors) processor.carry = 0;
+    for (const event of this.periodicEvents) event.carry = 0;
     this.frames = 0;
   }
 
@@ -104,6 +118,13 @@ export class GeneratedFrameRunner {
 
   private dispatchLine(line: number): void {
     for (const event of this.eventsByLine.get(line) ?? []) this.onEvent?.(event);
+    for (const scheduled of this.periodicEvents) {
+      scheduled.carry += scheduled.eventsPerLine;
+      while (scheduled.carry >= 1) {
+        scheduled.carry -= 1;
+        this.onEvent?.(scheduled.event);
+      }
+    }
     if (line === this.machine.execution.screen.vbstart) this.video?.vblank();
   }
 }

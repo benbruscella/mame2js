@@ -15,3 +15,16 @@ export interface GeneratedDacFilterPlan {
   outputGain: number;
   source: { file: string; line: number; netlist: string };
 }
+
+/** A non-primary sound stream routed into the generated browser mixer. */
+export interface GeneratedAuxiliaryAudioDevice {
+  type: string;
+  deviceTag: string;
+  member?: string;
+  clock: number;
+  initialMode?: string;
+  gain: number;
+  target: string;
+  targetInput?: number;
+  writeMethods: string[];
+}

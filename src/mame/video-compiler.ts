@@ -93,16 +93,20 @@ export function compileMameVideo(
     : ast.findFunctionInHierarchy(String(machine.props.cls), 'video_start');
   if (!start) return fail(`missing video_start for ${String(machine.props.cls)}`);
 
-  const decodeEdge = graph.edges.find(edge =>
-    machineIds.has(edge.from) && edge.rel === 'DECODES');
-  const decode = decodeEdge && graph.nodes.find(node => node.id === decodeEdge.to);
-  if (!decode) return fail(`missing gfx decode in machine composition`);
-  const renderScale = graph.edges
-    .filter(edge => edge.from === decode.id && edge.rel === 'HAS_ENTRY')
+  const decodes = graph.edges
+    .filter(edge => machineIds.has(edge.from) && edge.rel === 'DECODES')
+    .map(edge => graph.nodes.find(node => node.id === edge.to))
+    .filter((node): node is KGNode => Boolean(node));
+  if (!decodes.length) return fail(`missing gfx decode in machine composition`);
+  const decodeBindings = compileDecodeBindings(graph, machineIds);
+  const renderScale = decodes
+    .flatMap(decode => graph.edges
+      .filter(edge => edge.from === decode.id && edge.rel === 'HAS_ENTRY'))
     .map(edge => graph.nodes.find(node => node.id === edge.to))
     .filter((node): node is KGNode => Boolean(node))
     .reduce((scale, entry) => Math.max(scale, Number(entry.props.xscale ?? 1)), 1);
-  const tilemaps = compileTilemaps(start, { ...constants, ...memberDefaults })
+  const numericDefaults = numericState(memberDefaults);
+  const tilemaps = compileTilemaps(start, { ...constants, ...numericDefaults })
     .filter((tilemap, index, all) =>
       all.findIndex(candidate => candidate.member === tilemap.member) === index);
   if (!tilemaps.length) return fail(`video_start emitted no tilemaps`);
@@ -119,17 +123,21 @@ export function compileMameVideo(
     ...Object.values(delegates),
   ];
   addHandlerClosure(handlers, ast, roots, constants);
-  const gfx = graph.edges
-    .filter(edge => edge.from === decode.id && edge.rel === 'HAS_ENTRY')
-    .map(edge => graph.nodes.find(node => node.id === edge.to))
-    .filter((node): node is KGNode => Boolean(node))
-    .map(entry => {
+  const gfx = decodes.flatMap(decode => {
+    const binding = decodeBindings.get(String(decode.props.name));
+    return graph.edges
+      .filter(edge => edge.from === decode.id && edge.rel === 'HAS_ENTRY')
+      .map(edge => graph.nodes.find(node => node.id === edge.to))
+      .filter((node): node is KGNode => Boolean(node))
+      .map(entry => {
       const layoutEdge = graph.edges.find(edge => edge.from === entry.id && edge.rel === 'USES_LAYOUT');
       const layout = layoutEdge && graph.nodes.find(node => node.id === layoutEdge.to);
       if (!layout) throw new Error(`${machineId}: gfx entry ${entry.id} has no layout`);
       return {
         region: String(entry.props.region),
         offset: Number(entry.props.offset),
+        ...(binding?.decodeMember ? { decodeMember: binding.decodeMember } : {}),
+        ...(binding?.paletteMember ? { paletteMember: binding.paletteMember } : {}),
         colorBase: Number(entry.props.colorBase),
         colorCount: Number(entry.props.colorCount),
         xscale: Number(entry.props.xscale ?? 1),
@@ -146,8 +154,17 @@ export function compileMameVideo(
         },
       };
     });
-  const palette = compilePalette(graph, machineIds, ast, constants);
-  if (!palette) return fail(`palette callback did not lower`);
+  });
+  const paletteMembers = [...new Set(
+    [...decodeBindings.values()].map(binding => binding.paletteMember),
+  )];
+  const palettes = paletteMembers.length > 1
+    ? compileNamedPalettes(graph, ast, source, constants, paletteMembers)
+    : [];
+  const palette = palettes.length ? undefined : compilePalette(graph, machineIds, ast, constants);
+  if (!palette && palettes.length !== paletteMembers.length) {
+    return fail(`palette callback did not lower`);
+  }
   const colorTables = compileVideoColorTables(source, constants);
   const lfsrTable = compileVideoLfsr(ast, String(machine.props.cls), constants);
   const needsClassDefaults = renderScale !== 1 ||
@@ -157,11 +174,13 @@ export function compileMameVideo(
   return {
     plan: {
       gfx,
-      palette,
+      ...(palette ? { palette } : {}),
+      ...(palettes.length ? { palettes } : {}),
       tilemaps,
       initialState: {
+        ...arrayState(memberDefaults),
         ...(needsClassDefaults ? memberDefaults : {}),
-        ...initialState(start.body),
+        ...initialState(start.body, { ...constants, ...numericDefaults }),
       },
       ...(renderScale !== 1 ? { renderScale: { x: renderScale, y: 1 } } : {}),
       ...(Object.keys(delegates).length ? { delegates } : {}),
@@ -247,6 +266,8 @@ function compileTilemaps(
       new RegExp(`${member}->set_scroll_rows\\s*\\(([^)]+)\\)`).exec(setup)?.[1],
       values,
     );
+    const scrollDx = tilemapScrollDelta(setup, member, 'x', values);
+    const scrollDy = tilemapScrollDelta(setup, member, 'y', values);
     const transparentExpression =
       new RegExp(`${member}->set_transparent_pen\\s*\\(([^)]+)\\)`).exec(setup)?.[1]
         ?? new RegExp(`${member}->set_transparent_pen\\s*\\(([^)]+)\\)`).exec(start.body)?.[1];
@@ -263,6 +284,9 @@ function compileTilemaps(
       : expressionNumber(transparentIndirectExpression, values);
     plans.push({
       member,
+      ...(/\b(m_\w+)\b/.exec(args[0] ?? '')?.[1]
+        ? { decodeMember: /\b(m_\w+)\b/.exec(args[0] ?? '')![1] }
+        : {}),
       tileWidth: expressionNumber(args[3], values),
       tileHeight: expressionNumber(args[4], values),
       columns: expressionNumber(args[5], values),
@@ -271,6 +295,8 @@ function compileTilemaps(
       tileInfo,
       ...(scrollColumns > 0 ? { scrollColumns } : {}),
       ...(scrollRows > 0 ? { scrollRows } : {}),
+      ...(scrollDx ? { scrollDx } : {}),
+      ...(scrollDy ? { scrollDy } : {}),
       ...(transparentPen !== undefined && transparentPen >= 0 ? { transparentPen } : {}),
       ...(transparentIndirect !== undefined && transparentIndirect >= 0
         ? { transparentIndirect }
@@ -280,6 +306,309 @@ function compileTilemaps(
     createRe.lastIndex = close + 1;
   }
   return plans;
+}
+
+function tilemapScrollDelta(
+  source: string,
+  member: string,
+  axis: 'x' | 'y',
+  values: Record<string, number>,
+): [number, number] | undefined {
+  const match = new RegExp(
+    `${member}->set_scrolld${axis}\\s*\\(\\s*([^,]+)\\s*,\\s*([^)]+)\\)`,
+  ).exec(source);
+  if (!match) return undefined;
+  return [
+    expressionNumber(match[1], values),
+    expressionNumber(match[2], values),
+  ];
+}
+
+function compileDecodeBindings(
+  graph: KnowledgeGraph,
+  machineIds: Set<string>,
+): Map<string, { decodeMember: string; paletteMember: string }> {
+  const deviceIds = new Set(graph.edges
+    .filter(edge => machineIds.has(edge.from) && edge.rel === 'HAS_DEVICE')
+    .map(edge => edge.to));
+  const bindings = new Map<string, { decodeMember: string; paletteMember: string }>();
+  for (const device of graph.nodes.filter(node =>
+    deviceIds.has(node.id) &&
+    node.label === 'Device' &&
+    node.props.type === 'GFXDECODE')) {
+    const raw = ((device.props.config as string[] | undefined) ?? []).join('\n');
+    const args = /GFXDECODE(?:_SCALE)?\s*\(\s*config\s*,\s*(m_\w+)\s*,\s*(m_\w+)\s*,\s*(\w+)/.exec(raw);
+    if (!args) continue;
+    bindings.set(args[3]!, {
+      decodeMember: args[1]!,
+      paletteMember: args[2]!,
+    });
+  }
+  return bindings;
+}
+
+interface PaletteNetwork {
+  min: number;
+  max: number;
+  scaler: number;
+  resistances: number[];
+  pulldown: number;
+  pullup: number;
+}
+
+function compileNamedPalettes(
+  graph: KnowledgeGraph,
+  ast: MameAstIndex,
+  source: string,
+  constants: Record<string, number>,
+  members: string[],
+): NonNullable<GeneratedVideoPlan['palettes']> {
+  const functions = ast.ast.units.flatMap(unit => unit.functions);
+  const scalars = compilePaletteScalars(source, constants);
+  return members.flatMap(member => {
+    const fn = functions.find(candidate =>
+      new RegExp(`\\b${member}->set_(?:pen|indirect)`).test(candidate.body));
+    if (!fn) return [];
+    const plan = compileNamedPalette(
+      graph,
+      source,
+      fn,
+      member,
+      { ...constants, ...scalars },
+    );
+    return plan ? [{ member, plan }] : [];
+  });
+}
+
+function compileNamedPalette(
+  graph: KnowledgeGraph,
+  source: string,
+  fn: MameFunction,
+  member: string,
+  constants: Record<string, number>,
+): GeneratedPromPalettePlan | undefined {
+  const fail = (reason: string): undefined => {
+    if (process.env.MAMEKIT_DEBUG_VIDEO === '1') {
+      console.error(`video palette ${member}: ${reason}`);
+    }
+    return undefined;
+  };
+  const regionByVariable = new Map(
+    [...fn.body.matchAll(
+      /\b(\w+)\s*=\s*memregion\(\s*"([^"]+)"\s*\)->base\(\)/g,
+    )].map(match => [match[1]!, match[2]!]),
+  );
+  const loops = numericForLoops(fn.body);
+  const colorLoop = loops.find(loop =>
+    new RegExp(`\\b${member}->set_(?:pen_color|indirect_color)`).test(loop.body));
+  if (!colorLoop) return fail('color loop missing');
+  const colorSource = /\b\w+\s*=\s*(\w+)\s*\[\s*i\s*\]/.exec(colorLoop.body)?.[1];
+  const region = colorSource && regionByVariable.get(colorSource);
+  if (!region) return fail(`color PROM region missing for ${String(colorSource)}`);
+
+  const networks = compilePaletteNetworks(source, fn.body, constants);
+  const channels: GeneratedPromPalettePlan['channels'] = [];
+  const channelRe =
+    /(?:int(?:\s+const)?|const\s+int)\s+([rgb])\s*=\s*combine_weights\(\s*(\w+)\s*,\s*([^;]+)\)\s*;/g;
+  let channel: RegExpExecArray | null;
+  while ((channel = channelRe.exec(colorLoop.body)) !== null) {
+    const network = networks.get(channel[2]!);
+    if (!network) continue;
+    const bits = [...channel[3]!.matchAll(/BIT\(\s*\w+\s*,\s*(\d+)\s*\)/g)]
+      .map(bit => Number(bit[1]));
+    if (!bits.length) continue;
+    channels.push({
+      channel: channel[1] as 'r' | 'g' | 'b',
+      bits,
+      resistances: network.resistances,
+      pulldown: network.pulldown,
+      pullup: network.pullup,
+    });
+  }
+  if (channels.length !== 3) {
+    return fail(`expected three resistor channels, got ${channels.length}`);
+  }
+
+  const count = Math.max(0, colorLoop.end - colorLoop.start);
+  const direct = new RegExp(`\\b${member}->set_pen_color`).test(colorLoop.body);
+  const banks: GeneratedPromPalettePlan['banks'] = [];
+  let lookupRegion: string | undefined;
+  if (direct) {
+    banks.push({
+      penOffset: 0,
+      colorOr: 0,
+      lookupOffset: 0,
+      lookupCount: count,
+      direct: true,
+    });
+  } else {
+    for (const loop of loops.filter(candidate =>
+      new RegExp(`\\b${member}->set_pen_indirect`).test(candidate.body))) {
+      const call = findCallArguments(loop.body, `${member}->set_pen_indirect`);
+      if (!call) continue;
+      const args = splitMameArgs(call);
+      const valueName = args[1]?.trim();
+      const sourceVariable = valueName &&
+        new RegExp(`\\b${valueName}\\s*=\\s*(\\w+)\\s*\\[\\s*([^\\]]+)\\s*\\]`)
+          .exec(loop.body);
+      const sourceRegion = sourceVariable && regionByVariable.get(sourceVariable[1]!);
+      if (!sourceRegion) continue;
+      lookupRegion = sourceRegion;
+      banks.push({
+        penOffset: expressionAt(args[0] ?? '0', loop.start),
+        colorOr: expressionNumber(
+          /(?:\||\+)\s*(-?(?:0x[\da-f]+|\d+))/i.exec(args[1] ?? '')?.[1],
+        ),
+        lookupOffset: expressionAt(sourceVariable[2] ?? 'i', loop.start),
+        lookupCount: Math.max(0, loop.end - loop.start),
+      });
+    }
+    const fixedCall = new RegExp(
+      `${member}->set_pen_indirect\\s*\\(([^;]+)\\)\\s*;`,
+      'g',
+    );
+    for (const call of fn.body.matchAll(fixedCall)) {
+      const args = splitMameArgs(call[1]!);
+      if (
+        args.length < 2 ||
+        /\bi\b/.test(args[0]!) ||
+        /\b(?:promval|color_prom)\b/.test(args[1]!)
+      ) continue;
+      banks.push({
+        penOffset: expressionNumber(args[0], constants),
+        colorOr: expressionNumber(args[1], constants),
+        lookupOffset: 0,
+        lookupCount: 1,
+        direct: true,
+      });
+    }
+  }
+  if (!banks.length) return fail('pen lookup banks missing');
+  const network = networks.values().next().value as PaletteNetwork | undefined;
+  if (!network) return fail('resistor network missing');
+  return {
+    region,
+    ...(lookupRegion && lookupRegion !== region ? { lookupRegion } : {}),
+    colorCount: count,
+    min: network.min,
+    max: network.max,
+    scaler: network.scaler,
+    channels,
+    lookupOffset: banks[0]!.lookupOffset ?? 0,
+    lookupCount: banks[0]!.lookupCount ?? 0,
+    lookupMask: 0xff,
+    banks,
+    transparentIndirect: 0,
+    source: sourceRef(fn),
+  };
+}
+
+function compilePaletteNetworks(
+  source: string,
+  body: string,
+  constants: Record<string, number>,
+): Map<string, PaletteNetwork> {
+  const arrays = paletteResistanceArrays(source);
+  const call = findCallArguments(body, 'compute_resistor_weights');
+  const result = new Map<string, PaletteNetwork>();
+  if (!call) return result;
+  const args = splitMameArgs(call);
+  const min = expressionNumber(args[0], constants);
+  const max = expressionNumber(args[1], constants);
+  const scaler = expressionNumber(args[2], constants);
+  for (let index = 3; index + 4 < args.length; index += 5) {
+    const count = expressionNumber(args[index], constants);
+    if (!count) continue;
+    const resistanceName = /^(\w+)/.exec((args[index + 1] ?? '').replace(/^&/, '').trim())?.[1];
+    const resistances = resistanceName ? arrays.get(resistanceName) : undefined;
+    if (!resistances) continue;
+    const offset = Number(/\[\s*(\d+)\s*\]/.exec(args[index + 1] ?? '')?.[1] ?? 0);
+    const name = (args[index + 2] ?? '').replace(/^&/, '').trim();
+    result.set(name, {
+      min,
+      max,
+      scaler,
+      resistances: resistances.slice(offset, offset + count),
+      pulldown: paletteResistanceValue(args[index + 3], arrays, constants),
+      pullup: paletteResistanceValue(args[index + 4], arrays, constants),
+    });
+  }
+  return result;
+}
+
+function compilePaletteScalars(
+  source: string,
+  constants: Record<string, number>,
+): Record<string, number> {
+  const arrays = paletteResistanceArrays(source);
+  const values: Record<string, number> = {};
+  const assignment = /\b(\w+)\s*=\s*compute_resistor_weights\s*\(/g;
+  let match: RegExpExecArray | null;
+  while ((match = assignment.exec(source)) !== null) {
+    const open = source.indexOf('(', match.index + match[0].length - 1);
+    const close = matchingPair(source, open, '(', ')');
+    if (close < 0) continue;
+    const args = splitMameArgs(source.slice(open + 1, close));
+    const max = expressionNumber(args[1], constants);
+    const requested = evalExpr(substituteNumbers(args[2] ?? '', constants));
+    if (requested != null && requested >= 0) {
+      values[match[1]!] = requested;
+      continue;
+    }
+    let maximum = 0;
+    for (let index = 3; index + 4 < args.length; index += 5) {
+      const count = expressionNumber(args[index], constants);
+      const resistanceName = /^(\w+)/.exec((args[index + 1] ?? '').trim())?.[1];
+      const resistances = resistanceName ? arrays.get(resistanceName)?.slice(0, count) : undefined;
+      if (!resistances?.length) continue;
+      const pulldown = paletteResistanceValue(args[index + 3], arrays, constants);
+      const pullup = paletteResistanceValue(args[index + 4], arrays, constants);
+      maximum = Math.max(maximum, resistorMaximum(resistances, pulldown, pullup, max));
+    }
+    if (maximum > 0) values[match[1]!] = max / maximum;
+  }
+  return values;
+}
+
+function paletteResistanceArrays(source: string): Map<string, number[]> {
+  return new Map(
+    [...source.matchAll(
+      /(?:static\s+)?(?:constexpr|const)\s+int\s+(\w+)\s*\[[^\]]*\]\s*=\s*\{([^}]+)\}/g,
+    )].map(match => [
+      match[1]!,
+      splitMameArgs(match[2]!).map(value => expressionNumber(value)),
+    ]),
+  );
+}
+
+function paletteResistanceValue(
+  value: string | undefined,
+  arrays: Map<string, number[]>,
+  constants: Record<string, number>,
+): number {
+  const reference = value && /^(\w+)\s*\[\s*(\d+)\s*\]$/.exec(value.trim());
+  if (reference) return arrays.get(reference[1]!)?.[Number(reference[2])] ?? 0;
+  return expressionNumber(value, constants);
+}
+
+function resistorMaximum(
+  resistances: number[],
+  pulldown: number,
+  pullup: number,
+  maximum: number,
+): number {
+  return resistances.reduce((sum, _resistance, selected) => {
+    let low = pulldown ? 1 / pulldown : 1 / 1e12;
+    let high = pullup ? 1 / pullup : 1 / 1e12;
+    resistances.forEach((resistance, index) => {
+      if (!resistance) return;
+      if (index === selected) high += 1 / resistance;
+      else low += 1 / resistance;
+    });
+    const r0 = 1 / low;
+    const r1 = 1 / high;
+    return sum + Math.min(maximum, Math.max(0, maximum * r0 / (r1 + r0)));
+  }, 0);
 }
 
 function compilePalette(
@@ -732,8 +1061,8 @@ function sourceNumericConstants(source: string): Record<string, number> {
 function sourceMemberDefaults(
   source: string,
   constants: Record<string, number>,
-): Record<string, number> {
-  const defaults: Record<string, number> = {};
+): Record<string, number | number[]> {
+  const defaults: Record<string, number | number[]> = {};
   const mameConstants = {
     INPUT_LINE_NMI: -1,
     INPUT_LINE_RESET: -2,
@@ -745,12 +1074,17 @@ function sourceMemberDefaults(
     const expression = substituteNumbers(match[2]!, {
       ...mameConstants,
       ...constants,
-      ...defaults,
+      ...numericState(defaults),
     })
       .replace(/\bfalse\b/g, '0')
       .replace(/\btrue\b/g, '1');
     const value = evalExpr(expression);
     if (value != null && Number.isFinite(value)) defaults[match[1]!] = value;
+  }
+  for (const match of source.matchAll(
+    /\b(?:bool|int|u?int(?:8|16|32)_t|u8|u16|u32)\s+(m_\w+)\s*\[\s*(\d+)\s*\]\s*\{\s*\}\s*;/g,
+  )) {
+    defaults[match[1]!] = new Array(Number(match[2])).fill(0);
   }
   return defaults;
 }
@@ -851,12 +1185,37 @@ function packRgb(red: number, green: number, blue: number): number {
   return (0xff000000 | (blue << 16) | (green << 8) | red) >>> 0;
 }
 
-function initialState(body: string): Record<string, number> {
+function initialState(
+  body: string,
+  values: Record<string, number> = {},
+): Record<string, number> {
   const state: Record<string, number> = {};
-  for (const match of body.matchAll(/\b(m_\w+)\s*=\s*(-?(?:0x[\da-f]+|\d+))\s*;/gi)) {
-    state[match[1]!] = expressionNumber(match[2]);
+  for (const match of body.matchAll(/\b(m_\w+)\s*=\s*([^;]+)\s*;/g)) {
+    const expression = substituteNumbers(match[2]!, { ...values, ...state })
+      .replace(/\bfalse\b/g, '0')
+      .replace(/\btrue\b/g, '1');
+    const value = evalExpr(expression);
+    if (value != null && Number.isFinite(value)) state[match[1]!] = value;
   }
   return state;
+}
+
+function numericState(
+  values: Record<string, number | number[]>,
+): Record<string, number> {
+  return Object.fromEntries(
+    Object.entries(values).filter((entry): entry is [string, number] =>
+      typeof entry[1] === 'number'),
+  );
+}
+
+function arrayState(
+  values: Record<string, number | number[]>,
+): Record<string, number[]> {
+  return Object.fromEntries(
+    Object.entries(values).filter((entry): entry is [string, number[]] =>
+      Array.isArray(entry[1])),
+  );
 }
 
 function calledSourceMethods(body: string): string[] {

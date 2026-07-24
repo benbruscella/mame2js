@@ -25,7 +25,7 @@ export const timeplt: GameTestContract = {
     },
     checkpoints: {
       '1': {
-        video: '1b1664f7',
+        video: '43d7f729',
         state: '0b350316',
       },
       '60': {

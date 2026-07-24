@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import * as ts from 'typescript';
 import {
   compileAy8910,
+  compileMsm5205,
   compileNamco54Discrete,
   compileNamcoWsg,
   generatedAy8910WorkletSource,
@@ -187,7 +188,19 @@ assert.deepEqual(ayPlan.readMasks.slice(0, 8), [
 assert.equal(ayPlan.volumeTable.length, 16);
 assert.deepEqual(ayPlan.filterTypes, { lowpass3r: 0, lowpass: 2, highpass: 3, ac: 4 });
 
-const aySource = generatedAy8910WorkletSource(ayPlan);
+const msmPlan = compileMsm5205(mameSrc, {
+  ...definition,
+  type: 'MSM5205',
+  className: 'msm5205_device',
+  sourceFile: 'src/devices/sound/msm5205.cpp',
+});
+assert.deepEqual(msmPlan.indexShift, [-1, -1, -1, -1, 2, 4, 6, 8]);
+assert.equal(msmPlan.diffLookup.length, 49 * 16);
+assert.equal(msmPlan.modes.S96_4B, 4);
+assert.equal(msmPlan.maximumSignal, 2047);
+assert.equal(msmPlan.minimumSignal, -2048);
+
+const aySource = generatedAy8910WorkletSource(ayPlan, msmPlan);
 const ayJavaScript = ts.transpileModule(aySource, {
   compilerOptions: {
     target: ts.ScriptTarget.ES2022,
@@ -209,7 +222,17 @@ const ayModule = await import(
     routes?: { chip: number; channel: number; gain: number; target: string; filter?: {
       index: number; bank: number; channel: number;
     } }[],
-  ) => { write(offset: number, data: number): void; sample(): number };
+    chipGains?: number[],
+    auxiliaryDevices?: {
+      type: string;
+      deviceTag: string;
+      clock: number;
+      initialMode?: string;
+      gain: number;
+      target: string;
+      writeMethods: string[];
+    }[],
+  ) => { write(offset: number, data: number, method?: string): void; sample(): number };
   GeneratedAy8910FrameRenderer: new (
     mixer: { write(offset: number, data: number): void; sample(): number },
     outputRate: number,
@@ -222,6 +245,29 @@ ay.write(0, 1);
 ay.write(7, 0x3e);
 ay.write(8, 0x0f);
 assert.ok(Array.from({ length: 64 }, () => ay.sample()).some(sample => sample !== 0));
+
+const composite = new ayModule.GeneratedAy8910Mixer(
+  894_886.25,
+  2,
+  48_000,
+  [
+    { chip: 0, channel: -1, gain: 1, target: 'filtermix' },
+    { chip: 1, channel: -1, gain: 1, target: 'filtermix' },
+  ],
+  [],
+  [{
+    type: 'MSM5205',
+    deviceTag: 'msm1',
+    clock: 384_000,
+    initialMode: 'S96_4B',
+    gain: 1,
+    target: 'filtermix',
+    writeMethods: ['data_w', 'reset_w', 'playmode_w'],
+  }],
+);
+composite.write(0, 7, 'msm1.data_w');
+for (let index = 0; index < 16; index++) composite.write(0, 1, 'msm1.vck');
+assert.notEqual(composite.sample(), 0, 'routed MSM5205 stream must reach the AY mixer');
 
 const unfiltered = new ayModule.GeneratedAy8910Mixer(1_789_772, 1, 48_000);
 const filtered = new ayModule.GeneratedAy8910Mixer(1_789_772, 1, 48_000, [{

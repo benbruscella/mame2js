@@ -121,6 +121,7 @@ class IrBoard implements Board {
 
     const calls: NonNullable<GeneratedHandlerBindings['calls']> = {};
     this.bindings = { members: this.state, inputs, calls };
+    bindGeneratedDriverState(this.state, calls);
     for (const input of machine.execution.inputMembers ?? []) {
       const ports = input.tags.map(tag => ({ read: () => inputs.read(tag) }));
       this.state[input.member] = ports.length === 1 ? ports[0] : ports;
@@ -182,6 +183,18 @@ class IrBoard implements Board {
         in: bus.in,
         out: bus.out,
         signal: (signal, state) => {
+          const callback = machine.callbacks.find(candidate =>
+            candidate.ownerTag === specification.tag &&
+            candidate.signal === signal);
+          const value = callback
+            ? executeGeneratedCallbackHandler(
+                machine,
+                callback,
+                this.bindings,
+                { state, data: state },
+              )
+            : undefined;
+          if (value !== undefined) return value;
           dispatchGeneratedCallbacks(
             machine,
             specification.tag,
@@ -190,6 +203,7 @@ class IrBoard implements Board {
             this.bindings,
             this.callbackEndpoints(sinks),
           );
+          return 0;
         },
       });
       this.cpus.set(specification.tag, cpu);
@@ -317,6 +331,15 @@ class IrBoard implements Board {
         },
       })), ...hostedProcessors],
       onEvent: event => {
+        if (machine.sound?.auxiliaryDevices?.some(device =>
+          device.deviceTag === event.ownerTag)) {
+          sinks.soundWrite(
+            0,
+            event.state,
+            this.soundFraction(),
+            `${event.ownerTag}.vck`,
+          );
+        }
         dispatchGeneratedCallback(
           machine,
           event.callbackId,
@@ -568,15 +591,30 @@ class IrBoard implements Board {
       const addresses = new Map(tags.map(tag => [tag, 0]));
       const registers = new Map(tags.map(tag => [tag, new Uint8Array(16)]));
       tags.forEach((tag, chip) => {
-        registry.write[`${tag}.address_w`] = (_address, _offset, data) => {
+        const addressWrite = (data: number): void => {
           addresses.set(tag, data & 0x0f);
         };
-        registry.write[`${tag}.data_w`] = (_address, _offset, data) => {
+        const dataWrite = (data: number): void => {
           const register = addresses.get(tag) ?? 0;
           registers.get(tag)![register] = data;
           sinks.soundWrite(chip * 16 + register, data, this.soundFraction());
+          const signal = register === 14
+            ? 'port_a_write_callback'
+            : register === 15
+              ? 'port_b_write_callback'
+              : undefined;
+          if (signal) {
+            dispatchGeneratedCallbacks(
+              machine,
+              tag,
+              signal,
+              data,
+              this.bindings,
+              this.callbackEndpoints(sinks),
+            );
+          }
         };
-        registry.read[`${tag}.data_r`] = () => {
+        const dataRead = (): number => {
           const register = addresses.get(tag) ?? 0;
           const callback = machine.callbacks.find(candidate =>
             candidate.ownerTag === tag &&
@@ -600,6 +638,15 @@ class IrBoard implements Board {
           }
           return registers.get(tag)![register] ?? 0xff;
         };
+        registry.write[`${tag}.address_w`] = (_address, _offset, data) => addressWrite(data);
+        registry.write[`${tag}.data_w`] = (_address, _offset, data) => dataWrite(data);
+        registry.read[`${tag}.data_r`] = dataRead;
+        const member = machine.devices?.find(device => device.tag === tag)?.member;
+        for (const alias of [tag, `m_${tag}`, member].filter(Boolean) as string[]) {
+          this.bindings.calls![`${alias}.address_w`] = addressWrite;
+          this.bindings.calls![`${alias}.data_w`] = dataWrite;
+          this.bindings.calls![`${alias}.data_r`] = dataRead;
+        }
       });
       const filterRows: unknown[][] = [];
       for (const route of sound.routes ?? []) {
@@ -620,6 +667,38 @@ class IrBoard implements Board {
         };
       }
       if (filterRows.length) this.state.m_filter = filterRows;
+      for (const auxiliary of sound.auxiliaryDevices ?? []) {
+        const aliases = [
+          auxiliary.deviceTag,
+          `m_${auxiliary.deviceTag}`,
+          auxiliary.member,
+        ].filter(Boolean) as string[];
+        for (const method of auxiliary.writeMethods) {
+          const directKey = `${auxiliary.deviceTag}.${method}`;
+          registry.write[directKey] = (_address, offset, data) => {
+            sinks.soundWrite(
+              offset,
+              data,
+              this.soundFraction(),
+              `${auxiliary.deviceTag}.${method}`,
+            );
+          };
+          for (const alias of aliases) {
+            const key = `${alias}.${method}`;
+            const original = this.bindings.calls![key];
+            this.bindings.calls![key] = (...args: number[]) => {
+              const result = original?.(...args);
+              sinks.soundWrite(
+                0,
+                args.at(-1) ?? 0,
+                this.soundFraction(),
+                `${auxiliary.deviceTag}.${method}`,
+              );
+              return result;
+            };
+          }
+        }
+      }
       return;
     }
     for (const method of sound.writeMethods) {
@@ -643,6 +722,25 @@ class IrBoard implements Board {
       endpoints[`port.${port}`] = () => this.bindings.inputs?.read(port) ?? 0xff;
     }
     for (const callback of this.machine.callbacks) {
+      const driverMethod = callback.targetMethod
+        ? this.bindings.calls?.[callback.targetMethod]
+        : undefined;
+      if (!callback.targetTag && callback.targetClass && driverMethod) {
+        endpoints[`${callback.targetClass}.${callback.targetMethod}`] = state => {
+          driverMethod(state);
+        };
+      }
+      if (
+        callback.signal === 'set_vblank_int' &&
+        callback.targetTag &&
+        /^irq\d+_line_hold$/.test(callback.targetMethod ?? '')
+      ) {
+        const cpu = this.cpus.get(callback.ownerTag);
+        if (cpu) {
+          endpoints[`${callback.targetTag}.${callback.targetMethod}`] = state =>
+            cpu.setIrqLine(state !== 0, 0xff, state !== 0);
+        }
+      }
       if (!callback.targetTag) continue;
       const target = callback.inputLine
         ? `${callback.targetTag}.${callback.inputLine}`
@@ -688,6 +786,25 @@ class IrBoard implements Board {
     }
     return endpoints;
   }
+}
+
+export function bindGeneratedDriverState(
+  state: Record<string, unknown>,
+  calls: NonNullable<GeneratedHandlerBindings['calls']>,
+): void {
+  const set = (axis: 'x' | 'y', value: number): void => {
+    state[`__flip_screen_${axis}`] = value ? 1 : 0;
+    state.__flip_screen = Number(state.__flip_screen_x || state.__flip_screen_y);
+  };
+  calls.flip_screen = () => Number(state.__flip_screen ?? 0);
+  calls.flip_screen_x = () => Number(state.__flip_screen_x ?? 0);
+  calls.flip_screen_y = () => Number(state.__flip_screen_y ?? 0);
+  calls.flip_screen_set = value => {
+    set('x', value);
+    set('y', value);
+  };
+  calls.flip_screen_x_set = value => set('x', value);
+  calls.flip_screen_y_set = value => set('y', value);
 }
 
 function trailingZeroBits(value: number): number {

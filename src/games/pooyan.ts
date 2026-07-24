@@ -25,7 +25,7 @@ export const pooyan: GameTestContract = {
     },
     checkpoints: {
       '1': {
-        video: 'e6094d6f',
+        video: '74589235',
         state: '282d5211',
       },
       '60': {

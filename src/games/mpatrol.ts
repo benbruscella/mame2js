@@ -1,0 +1,68 @@
+import type { GameTestContract } from './types.ts';
+
+export const mpatrol: GameTestContract = {
+  game: 'mpatrol',
+  category: 'arcade',
+  driver: 'src/mame/irem/m52.cpp',
+  machine: { className: 'm52_state', name: 'm52' },
+  romEnvironment: 'MAMEKIT_MPATROL_ROM',
+  screen: { width: 240, height: 252 },
+  soundKind: 'ay8910',
+  frames: 1800,
+  minimumFps: 45,
+  checkpoints: [1, 120, 300, 600, 900, 1200, 1500, 1800],
+  optionalRomFiles: ['mp_7621-5.7h'],
+  actions: [
+    { atFrame: 600, code: 'Digit5', heldFrames: 10, releasedFrames: 20 },
+    { atFrame: 630, code: 'Digit1', heldFrames: 10, releasedFrames: 20 },
+    { atFrame: 780, code: 'ArrowRight', heldFrames: 60, releasedFrames: 20 },
+    { atFrame: 900, code: 'KeyZ', heldFrames: 20, releasedFrames: 20 },
+    { atFrame: 1020, code: 'Space', heldFrames: 20, releasedFrames: 20 },
+    { atFrame: 1140, code: 'ArrowLeft', heldFrames: 40, releasedFrames: 20 },
+  ],
+  audioRequirements: [
+    {
+      method: 'msm1.data_w',
+      fromFrame: 120,
+      minimumNonzeroWrites: 100,
+    },
+    {
+      method: 'msm1.vck',
+      fromFrame: 120,
+      minimumNonzeroWrites: 100,
+    },
+  ],
+  golden: {
+    regions: {
+      bg_pal: '6a57eff2',
+      bg0: '9fbb1c40',
+      bg1: 'cfe4476e',
+      bg2: '1eab9376',
+      'irem_audio:iremsound': '901ecdbf',
+      maincpu: '04bda62b',
+      sp: '27464bd3',
+      spr_clut: '7ae4cd97',
+      spr_pal: '26979b13',
+      tx: 'b4bf3ba1',
+      tx_pal: '07f99284',
+      unkprom: 'b2aa7578',
+    },
+    checkpoints: {
+      '1': { video: 'ea2d59d4', state: '79f6cfe3' },
+      '120': { video: 'cf3b1caf', state: '873bec35' },
+      '300': { video: '474b3725', state: '64fa69cb' },
+      '600': { video: 'be778d9c', state: '08336ed1' },
+      '900': { video: '414e33d2', state: '1f0c5443' },
+      '1200': { video: '58400d04', state: '636e1ce7' },
+      '1500': { video: '7b56d6fe', state: '40d6eecd' },
+      '1800': { video: '9c684bca', state: '10c3d19c' },
+    },
+    audio: {
+      writes: 632916,
+      nonzeroWrites: 632872,
+      writeHash: '5934ede4',
+      pcmHash: '5f38a169',
+      rms: 0.054946,
+    },
+  },
+};

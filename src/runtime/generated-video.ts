@@ -106,11 +106,28 @@ export class GeneratedVideoRenderer implements VideoRenderer {
     };
     const target = this.penBuffer ?? frame;
     const bitmap = {
-      fill: (color: number) => {
+      fill: (color: number, rectangle?: GeneratedRectangle) => {
         const packed = color >>> 0;
-        for (let y = minY; y <= maxY; y++) {
-          const start = (y - yOffset) * this.width;
-          target.fill(packed, start, start + this.width);
+        const firstX = rectangle
+          ? Math.ceil((rectangle.min_x - xOffset * xScale) / xScale)
+          : 0;
+        const lastX = rectangle
+          ? Math.floor((rectangle.max_x - xOffset * xScale) / xScale)
+          : this.width - 1;
+        const firstY = rectangle
+          ? Math.ceil((rectangle.min_y - yOffset * yScale) / yScale)
+          : minY - yOffset;
+        const lastY = rectangle
+          ? Math.floor((rectangle.max_y - yOffset * yScale) / yScale)
+          : maxY - yOffset;
+        const clippedFirstX = Math.max(0, firstX);
+        const clippedLastX = Math.min(this.width - 1, lastX);
+        const clippedFirstY = Math.max(minY - yOffset, 0, firstY);
+        const clippedLastY = Math.min(maxY - yOffset, this.height - 1, lastY);
+        if (clippedFirstX > clippedLastX || clippedFirstY > clippedLastY) return;
+        for (let y = clippedFirstY; y <= clippedLastY; y++) {
+          const start = y * this.width + clippedFirstX;
+          target.fill(packed, start, y * this.width + clippedLastX + 1);
         }
       },
       'pix=': (y: number, x: number, color: number) => {
@@ -149,7 +166,7 @@ export class GeneratedVideoRenderer implements VideoRenderer {
 }
 
 interface BitmapTarget {
-  fill(color: number): void;
+  fill(color: number, rectangle?: GeneratedRectangle): void;
   'pix='(y: number, x: number, color: number): void;
 }
 
@@ -213,6 +230,10 @@ class GeneratedPalette {
   constructor(plan: GeneratedPromPalettePlan, regions: Regions) {
     const prom = regions[plan.region];
     if (!prom) throw new Error(`generated palette: missing ROM region "${plan.region}"`);
+    const lookupProm = plan.lookupRegion ? regions[plan.lookupRegion] : prom;
+    if (!lookupProm) {
+      throw new Error(`generated palette: missing lookup ROM region "${plan.lookupRegion}"`);
+    }
     const weights = computeWeights(plan);
     const coreCount = Math.max(
       plan.colorCount,
@@ -264,7 +285,7 @@ class GeneratedPalette {
       for (let index = 0; index < lookupCount; index++) {
         const indirect = bank.direct
           ? bank.colorOr + index * (bank.colorStride ?? 1)
-          : bank.colorOr | ((prom[lookupOffset + index] ?? 0) & plan.lookupMask);
+          : bank.colorOr | ((lookupProm[lookupOffset + index] ?? 0) & plan.lookupMask);
         const pen = bank.penOffset + index * (bank.penStride ?? 1);
         this.indirect[pen] = indirect;
         this.colors[pen] = core[indirect] ?? 0xff000000;
@@ -288,6 +309,10 @@ class GeneratedPalette {
       if (this.colors[pen] === 0xff000000) return pen;
     }
     return 0;
+  }
+
+  pens(): Uint32Array {
+    return this.colors;
   }
 }
 
@@ -342,6 +367,10 @@ class GeneratedGfxElement {
 
   indirectMask(color: number, transparent: number): number {
     return this.palette.transpen_mask(this, color, transparent);
+  }
+
+  colorbase(): number {
+    return this.entry.colorBase;
   }
 
   draw(
@@ -512,12 +541,24 @@ class GeneratedTilemap {
         if (!gfx) continue;
         const tileFlipX = Boolean(tile.flags & 1) !== flipX;
         const tileFlipY = Boolean(tile.flags & 2) !== flipY;
-        const xScroll = this.scrollX[modulo(outputRow, this.scrollX.length)] ?? 0;
-        const yScroll = this.scrollY[modulo(outputColumn, this.scrollY.length)] ?? 0;
+        const scrollRow = generatedScrollBand(
+          outputRow,
+          this.plan.rows,
+          this.scrollX.length,
+        );
+        const scrollColumn = generatedScrollBand(
+          outputColumn,
+          this.plan.columns,
+          this.scrollY.length,
+        );
+        const xScroll = this.scrollX[scrollRow] ?? 0;
+        const yScroll = this.scrollY[scrollColumn] ?? 0;
         const mapWidth = this.plan.columns * this.plan.tileWidth;
         const mapHeight = this.plan.rows * this.plan.tileHeight;
-        const x = outputColumn * this.plan.tileWidth - xScroll;
-        const y = outputRow * this.plan.tileHeight - yScroll;
+        const xDelta = this.plan.scrollDx?.[flipX ? 1 : 0] ?? 0;
+        const yDelta = this.plan.scrollDy?.[flipY ? 1 : 0] ?? 0;
+        const x = outputColumn * this.plan.tileWidth - xScroll + xDelta;
+        const y = outputRow * this.plan.tileHeight - yScroll + yDelta;
         let transparentMask = 0;
         if (!(_flags & 0x80)) {
           if (this.plan.transparentIndirect !== undefined) {
@@ -565,6 +606,16 @@ export function generatedTileMemoryIndex(mapped: unknown): number {
   return index;
 }
 
+/** MAME scroll rows/columns divide a tilemap into contiguous equal bands. */
+export function generatedScrollBand(
+  tile: number,
+  tileCount: number,
+  bands: number,
+): number {
+  if (tileCount <= 0 || bands <= 1) return 0;
+  return Math.min(bands - 1, Math.floor(tile * bands / tileCount));
+}
+
 /**
  * Hardware-neutral MAME video services. All layouts, palette wiring,
  * tile callbacks, sprite loops and initial state come from generated IR.
@@ -576,6 +627,8 @@ export class GeneratedMameVideoPrimitives implements GeneratedVideoPrimitives, R
   private readonly state: Record<string, unknown>;
   private readonly gfx: GeneratedGfxElement[];
   private readonly palette?: GeneratedPalette;
+  private readonly palettes = new Map<string, GeneratedPalette>();
+  private readonly gfxByDecode = new Map<string, GeneratedGfxElement[]>();
   private readonly bindings: GeneratedHandlerBindings;
 
   constructor(
@@ -589,7 +642,9 @@ export class GeneratedMameVideoPrimitives implements GeneratedVideoPrimitives, R
     this.width = machine.execution.screen.width;
     this.height = machine.execution.screen.height;
     for (const [member, value] of Object.entries(machine.video?.initialState ?? {})) {
-      if (!Object.hasOwn(state, member)) state[member] = value;
+      if (!Object.hasOwn(state, member)) {
+        state[member] = Array.isArray(value) ? [...value] : value;
+      }
     }
     for (const [member, values] of Object.entries(machine.video?.colorTables ?? {})) {
       state[member] = Uint32Array.from(values, value => value >>> 0);
@@ -607,19 +662,37 @@ export class GeneratedMameVideoPrimitives implements GeneratedVideoPrimitives, R
       }
       state[lfsr.member] = values;
     }
-    this.palette = machine.video?.palette
-      ? new GeneratedPalette(machine.video.palette, regions)
-      : undefined;
+    if (machine.video?.palette) {
+      this.palettes.set('m_palette', new GeneratedPalette(machine.video.palette, regions));
+    }
+    for (const palette of machine.video?.palettes ?? []) {
+      this.palettes.set(palette.member, new GeneratedPalette(palette.plan, regions));
+    }
+    this.palette = this.palettes.get('m_palette') ?? this.palettes.values().next().value;
     const indexed = isIndexedScreen(machine);
     this.gfx = (machine.video?.gfx ?? []).map(entry => {
       const region = regions[entry.region];
       if (!region) throw new Error(`${machine.game}: missing gfx region "${entry.region}"`);
-      return new GeneratedGfxElement(
+      const palette = entry.paletteMember
+        ? this.palettes.get(entry.paletteMember)
+        : this.palette;
+      if (!palette) {
+        throw new Error(
+          `${machine.game}: gfx region "${entry.region}" has no generated palette`,
+        );
+      }
+      const gfx = new GeneratedGfxElement(
         entry,
         decodeGfx(entry.layout, region, entry.offset),
-        this.palette!,
+        palette,
         indexed,
       );
+      if (entry.decodeMember) {
+        const group = this.gfxByDecode.get(entry.decodeMember) ?? [];
+        group.push(gfx);
+        this.gfxByDecode.set(entry.decodeMember, group);
+      }
+      return gfx;
     });
     const referenceCalls: NonNullable<GeneratedHandlerBindings['referenceCalls']> = {
       ...bindings.referenceCalls,
@@ -633,7 +706,10 @@ export class GeneratedMameVideoPrimitives implements GeneratedVideoPrimitives, R
         };
       },
       rectangle: (...args) => new GeneratedRectangle(
-        Number(args[0]), Number(args[1]), Number(args[2]), Number(args[3]),
+        Number(args[0] ?? 0),
+        Number(args[1] ?? 0),
+        Number(args[2] ?? 0),
+        Number(args[3] ?? 0),
       ),
     };
     if (lfsr?.rowRenderer) {
@@ -702,12 +778,20 @@ export class GeneratedMameVideoPrimitives implements GeneratedVideoPrimitives, R
       state.m_gfxdecode = { gfx: (index: number) => this.gfx[index] };
       state.m_palette = this.palette;
     }
+    for (const [member, palette] of this.palettes) {
+      state[member] = palette;
+    }
+    for (const [member, gfx] of this.gfxByDecode) {
+      state[member] = { gfx: (index: number) => gfx[index] };
+    }
     for (const plan of machine.video?.tilemaps ?? []) {
       state[plan.member] = new GeneratedTilemap(
         plan,
         machine,
         () => this.bindings,
-        this.gfx,
+        plan.decodeMember
+          ? this.gfxByDecode.get(plan.decodeMember) ?? []
+          : this.gfx,
       );
     }
   }

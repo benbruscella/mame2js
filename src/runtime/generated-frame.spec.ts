@@ -93,4 +93,32 @@ runner.reset();
 assert.equal(runner.frameCount, 0);
 assert.deepEqual(runner.currentCarry, [0]);
 
-console.log('generated-frame.spec: 10 passed');
+const periodicMachine: GeneratedMachine = {
+  ...machine,
+  execution: {
+    ...machine.execution,
+    frameEvents: [{
+      callbackId: 'callback:periodic',
+      ownerTag: 'sound',
+      signal: 'vck_callback',
+      line: 0,
+      state: 1,
+      frequency: 25,
+    }],
+  },
+};
+let periodicCallbacks = 0;
+const periodicRunner = new GeneratedFrameRunner({
+  machine: periodicMachine,
+  processors: [{ tag: 'maincpu', run: budget => budget }],
+  onEvent: () => { periodicCallbacks++; },
+});
+periodicRunner.frame(new Uint32Array(1));
+assert.equal(periodicCallbacks, 2);
+periodicRunner.frame(new Uint32Array(1));
+assert.equal(periodicCallbacks, 5);
+periodicRunner.reset();
+periodicRunner.frame(new Uint32Array(1));
+assert.equal(periodicCallbacks, 7);
+
+console.log('generated-frame.spec: 13 passed');

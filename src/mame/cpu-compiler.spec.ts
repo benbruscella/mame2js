@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { compileMameI8080, compileMameZ80 } from './cpu-compiler.ts';
+import { compileMameI8080, compileMameM6803, compileMameZ80 } from './cpu-compiler.ts';
 import { generatedCpuExecutableSource } from './cpu-codegen.ts';
 import {
   clearGeneratedCpus,
@@ -124,4 +124,42 @@ const multiDecl = createCpu('MULTI_DECL_TEST', {
 });
 assert.equal(multiDecl.invoke('sum_bits'), 5);
 
-console.log('cpu-compiler.spec: 18 passed');
+const m6803Definition = compileMameM6803(process.env.MAME_SRC ?? '../mame');
+assert.ok(generatedCpuExecutableSource(m6803Definition).length > 100_000);
+assert.equal(m6803Definition.summary.opcodes, 256);
+assert.equal(m6803Definition.summary.compiledOpcodes, 256);
+assert.equal(m6803Definition.summary.diagnostics, 0);
+assert.deepEqual(m6803Definition.internal?.ram, [{ start: 0x80, end: 0xff }]);
+assert.deepEqual(
+  m6803Definition.internal?.ports.map(port => port.dataAddress),
+  [0x02, 0x03],
+);
+assert.equal(
+  m6803Definition.sourceFiles.includes('src/devices/cpu/m6800/6800ops.hxx'),
+  true,
+);
+
+clearGeneratedCpus();
+registerGeneratedCpu(m6803Definition);
+const m6803Memory = new Uint8Array(0x10000);
+m6803Memory.set([0x86, 0x5a, 0x97, 0x02, 0x01], 0x0200);
+m6803Memory[0xfffe] = 0x02;
+m6803Memory[0xffff] = 0x00;
+const m6803Signals: Array<[string, number]> = [];
+const m6803 = createCpu('M6803', {
+  read: address => m6803Memory[address]!,
+  write: (address, data) => { m6803Memory[address] = data; },
+  in: () => 0xff,
+  out: () => {},
+  signal: (name, value) => {
+    m6803Signals.push([name, value ?? 0]);
+    return 0;
+  },
+});
+m6803.reset();
+assert.equal(m6803.step(), 2);
+assert.equal(m6803.get('m_d.b.h'), 0x5a);
+assert.equal(m6803.step(), 3);
+assert.deepEqual(m6803Signals.at(-1), ['out_p1_cb', 0x5a]);
+
+console.log('cpu-compiler.spec: 30 passed');

@@ -11,7 +11,11 @@ import { parseSoftwareList, buildCatalog } from '../kg/softlist.ts';
 import {
   buildRuntimeReport, runtimeReportMarkdown, type RuntimeConfigShape,
 } from './runtime-report.ts';
-import { emitGeneratedMachine, lowerAudioRoutes } from './emit-machine.ts';
+import {
+  emitGeneratedMachine,
+  lowerAudioRoutes,
+  lowerAuxiliaryAudioDevices,
+} from './emit-machine.ts';
 import type { BoardConfig } from '../runtime/types.ts';
 import { compileMameVideo } from '../mame/video-compiler.ts';
 import { compileNamco54Discrete } from '../mame/audio-compiler.ts';
@@ -293,6 +297,15 @@ export async function generate(graph: KnowledgeGraph, opts: GenerateOptions): Pr
     graph,
     ayChips.map(device => ({ id: device.id, tag: String(device.props.tag) })),
   );
+  const auxiliaryAudioDevices = lowerAuxiliaryAudioDevices(
+    graph,
+    devices.map(device => ({
+      id: device.id,
+      tag: String(device.props.tag),
+      type: String(device.props.type),
+      ...(typeof device.props.clock === 'number' ? { clock: device.props.clock } : {}),
+    })),
+  );
   const ymChips = devices.filter(d => d.props.type === 'YM2203');
   const discreteDevice = devices.some(device => device.props.type === 'DISCRETE')
     ? devices.find(device => {
@@ -321,23 +334,26 @@ export async function generate(graph: KnowledgeGraph, opts: GenerateOptions): Pr
     ? { kind: 'nes', clock: cpus[0].clock }
     : devices.some(d => d.props.type === 'NAMCO_WSG' || d.props.type === 'NAMCO')
     ? { kind: 'wsg', clock: Number(byTag.get('namco')?.props.clock ?? 96000), waveRegion: 'namco' }
-    : discreteDevice
-      ? {
-          kind: 'discrete',
-          clock: cpus[0].clock,
-          worklet: String(discreteDevice.props.type).toLowerCase().replace(/_/g, '-'),
-        }
-        : ymChips.length
-          ? { kind: 'ym2203', clock: Number(ymChips[0].props.clock), chips: ymChips.length }
-          : ayChips.length
-            ? {
-                kind: 'ay8910',
-                clock: Number(ayChips[0].props.clock),
-                chips: ayChips.length,
-                ...(ayRoutes.length ? { routes: ayRoutes } : {}),
-                ...AY_MIX[soundFamily],
-              }
-            : { kind: 'none' };
+    : ymChips.length
+      ? { kind: 'ym2203', clock: Number(ymChips[0].props.clock), chips: ymChips.length }
+      : ayChips.length
+        ? {
+            kind: 'ay8910',
+            clock: Number(ayChips[0].props.clock),
+            chips: ayChips.length,
+            ...(ayRoutes.length ? { routes: ayRoutes } : {}),
+            ...(auxiliaryAudioDevices.length
+              ? { auxiliaryDevices: auxiliaryAudioDevices }
+              : {}),
+            ...AY_MIX[soundFamily],
+          }
+        : discreteDevice
+          ? {
+              kind: 'discrete',
+              clock: cpus[0].clock,
+              worklet: String(discreteDevice.props.type).toLowerCase().replace(/_/g, '-'),
+            }
+          : { kind: 'none' };
   const discreteNetlist = devices
     .filter(device => device.props.type === 'DISCRETE')
     .flatMap(device => Array.isArray(device.props.config) ? device.props.config : [])
@@ -383,6 +399,7 @@ export async function generate(graph: KnowledgeGraph, opts: GenerateOptions): Pr
   const roms = g.out(romset.id, 'HAS_REGION').map(({ node: region }) => ({
     region: String(region.props.tag),
     size: Number(region.props.size),
+    ...(String(region.props.flags).includes('ROMREGION_ERASEFF') ? { fill: 0xff } : {}),
     loads: g.out(region.id, 'LOADS').map(({ node: rom }) => {
       const crc = String(rom.props.crc);
       const alts = (altSlots.get(`${region.props.tag}/${rom.props.offset}/${rom.props.size}`) ?? [])

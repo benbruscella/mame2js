@@ -40,7 +40,7 @@ export interface HardwareGenerationEntry {
   executable?: boolean;
   /** internal part satisfied by these executable host devices */
   hostedBy?: string[];
-  executableKind?: 'cpu' | 'device' | 'audio';
+  executableKind?: 'cpu' | 'device' | 'audio' | 'composition';
   executableArtifact?: string;
   definition?: {
     sourceFile: string;

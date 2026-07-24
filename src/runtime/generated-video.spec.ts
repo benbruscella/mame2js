@@ -1,13 +1,25 @@
+import assert from 'node:assert/strict';
 import { compileMameHandler } from '../mame/handler-ir.ts';
 import { executeGeneratedProgram } from './generated-handler.ts';
 import type { GeneratedMachine } from './generated-machine.ts';
 import {
   createGeneratedTileInfoTarget,
+  generatedScrollBand,
   generatedTileMemoryIndex,
   GeneratedMameVideoPrimitives,
   GeneratedVideoRenderer,
   type GeneratedVideoPrimitives,
 } from './generated-video.ts';
+
+assert.deepEqual(
+  Array.from({ length: 32 }, (_, row) => generatedScrollBand(row, 32, 4)),
+  [
+    0, 0, 0, 0, 0, 0, 0, 0,
+    1, 1, 1, 1, 1, 1, 1, 1,
+    2, 2, 2, 2, 2, 2, 2, 2,
+    3, 3, 3, 3, 3, 3, 3, 3,
+  ],
+);
 
 const calls: string[] = [];
 const primitives: GeneratedVideoPrimitives = {
@@ -23,10 +35,19 @@ const primitives: GeneratedVideoPrimitives = {
       draw_sprites: () => calls.push('sprites'),
       'm_fg_tilemap.draw': () => calls.push('foreground'),
     },
+    referenceCalls: {
+      rectangle: () => ({ min_x: 0, max_x: 0, min_y: 0, max_y: 0 }),
+    },
   }),
 };
 const body = `
   bitmap.fill(0xff010203, cliprect);
+  rectangle band;
+  band.min_x = 2;
+  band.max_x = 2;
+  band.min_y = 3;
+  band.max_y = 3;
+  bitmap.fill(0xff070809, band);
   bitmap.pix(2, 1) = 0xff040506;
   m_bg_tilemap->draw(screen, bitmap, cliprect, 0, 0);
   draw_sprites(bitmap, cliprect);
@@ -77,7 +98,12 @@ renderer.render(frame);
 if (calls.join(',') !== 'vblank,background,sprites,foreground') {
   throw new Error(`generated composition order mismatch: ${calls.join(',')}`);
 }
-if (frame[0] !== 0xff040506 || !frame.slice(1).every(pixel => pixel === 0xff010203)) {
+if (
+  frame[0] !== 0xff040506 ||
+  frame[1] !== 0xff010203 ||
+  frame[2] !== 0xff010203 ||
+  frame[3] !== 0xff070809
+) {
   throw new Error(`generated visible-area translation is wrong: ${[...frame]}`);
 }
 const cachedTile = { gfx: 0, code: 0, color: 0, flags: 0, category: 0 };

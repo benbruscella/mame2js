@@ -147,4 +147,28 @@ const rcDivision = compileMameHandler('return 1 / (RES_K(47) * CAP_U(1));');
 assert.deepEqual(rcDivision.diagnostics, []);
 assert.ok(Math.abs((executeGeneratedHandler(rcDivision, {}) as number) - 21.2765957) < 1e-4);
 
-console.log('handler-ir.spec: 27 passed');
+const commaAssignments = compileMameHandler(
+  'clip.min_y = 0, clip.max_y = 127;',
+);
+assert.deepEqual(commaAssignments.diagnostics, []);
+assert.equal(commaAssignments.operations.length, 2);
+
+const defaultRectangle = compileMameHandler('rectangle clip; clip.min_y = 4;');
+assert.deepEqual(defaultRectangle.diagnostics, []);
+assert.equal(defaultRectangle.operations[0]?.op, 'declare');
+
+const inactiveIfdef = compileMameHandler(normalizeMameExecutionSource(`
+#ifdef UNUSED_RENDER_PATH
+  split_render();
+#else
+  clip = cliprect;
+#endif
+`));
+assert.deepEqual(inactiveIfdef.diagnostics, []);
+assert.equal(inactiveIfdef.operations.length, 1);
+
+const constexprLocal = compileMameHandler('constexpr uint8_t HEIGHT = 128;');
+assert.deepEqual(constexprLocal.diagnostics, []);
+assert.equal(constexprLocal.operations[0]?.op, 'declare');
+
+console.log('handler-ir.spec: 31 passed');

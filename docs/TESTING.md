@@ -79,6 +79,8 @@ each supported game it checks:
 - exact framebuffer hashes at each token's checkpoints;
 - exact CPU/device state hashes at the same checkpoints;
 - generated audio register write count and trace hash;
+- required named-device activity for composite paths, including source clock
+  events where decoding depends on them;
 - generated PCM hash and RMS level;
 - visible frame progression and non-silent output;
 - measured full-contract throughput above the token's minimum fps.
@@ -180,6 +182,7 @@ roms/arcade/invaders.zip
 roms/arcade/galaxian.zip
 roms/arcade/galaga.zip
 roms/arcade/digdug.zip
+roms/arcade/mpatrol.zip
 ```
 
 Override them without moving files:
@@ -192,6 +195,7 @@ MAMEKIT_INVADERS_ROM=/path/invaders.zip \
 MAMEKIT_GALAXIAN_ROM=/path/galaxian.zip \
 MAMEKIT_GALAGA_ROM=/path/galaga.zip \
 MAMEKIT_DIGDUG_ROM=/path/digdug.zip \
+MAMEKIT_MPATROL_ROM=/path/mpatrol.zip \
 npm run test:games
 ```
 

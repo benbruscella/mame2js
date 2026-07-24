@@ -557,7 +557,13 @@ export interface DeviceDef {
   /** VIDEO_UPDATE_* flags passed to screen_device::set_video_attributes. */
   screenVideoAttributes?: string[];
   /** Sound output routes declared with add_route(output, target, gain). */
-  audioRoutes?: { output: string; target: string; gain: number; raw: string }[];
+  audioRoutes?: {
+    output: string;
+    target: string;
+    gain: number;
+    input?: number;
+    raw: string;
+  }[];
   /** slot devices: NES_CONTROL_PORT(config, m_ctrl1, nes_control_port1_devices, "joypad") */
   slotOptions?: string;
   slotDefault?: string;
@@ -708,13 +714,16 @@ export function parseMachineConfigs(
           } else if (method === 'add_route') {
             const open = s.indexOf('(', s.indexOf(method));
             const close = matchParen(s, open);
-            const [output = '', target = '', gain = ''] = splitArgs(s.slice(open + 1, close));
+            const [output = '', target = '', gain = '', input = ''] =
+              splitArgs(s.slice(open + 1, close));
             const parsedGain = evalExpr(gain, consts);
+            const parsedInput = input ? evalExpr(input, consts) : null;
             if (target.trim().startsWith('"') && parsedGain !== null) {
               (dev.audioRoutes ??= []).push({
                 output: output.trim(),
                 target: unquote(target),
                 gain: parsedGain,
+                ...(parsedInput !== null ? { input: parsedInput } : {}),
                 raw: s,
               });
             }
@@ -944,11 +953,25 @@ export interface GfxLayoutDef {
 
 export function parseGfxLayouts(src: string): GfxLayoutDef[] {
   const out: GfxLayoutDef[] = [];
-  const re = /static\s+const\s+gfx_layout\s+(\w+)\s*=\s*\{([\s\S]*?)\};/g;
+  const extendedOffsets = new Map<string, (number | string)[]>();
+  const offsetArrayRe =
+    /static\s+const\s+(?:u?int32_t|uint32_t)\s+(\w+)\s*\[[^\]]+\]\s*=\s*\{([\s\S]*?)\};/g;
+  for (const array of src.matchAll(offsetArrayRe)) {
+    extendedOffsets.set(array[1]!, parseOffsetList(`{${array[2]}}`));
+  }
+  const re = /(?:static\s+)?const\s+gfx_layout\s+(\w+)\s*=\s*\{([\s\S]*?)\};/g;
   let m: RegExpExecArray | null;
   while ((m = re.exec(src)) !== null) {
     const fields = splitArgs(m[2]);
     if (fields.length < 8) continue;
+    const xOffsets = parseOffsetList(fields[5]);
+    const yOffsets = parseOffsetList(fields[6]);
+    const extendedX = xOffsets.length === 1 && xOffsets[0] === 'EXTENDED_XOFFS'
+      ? extendedOffsets.get(fields[8]?.trim())
+      : undefined;
+    const extendedY = yOffsets.length === 1 && yOffsets[0] === 'EXTENDED_YOFFS'
+      ? extendedOffsets.get(fields[9]?.trim())
+      : undefined;
     out.push({
       name: m[1],
       width: evalExpr(fields[0]) ?? 0,
@@ -956,8 +979,8 @@ export function parseGfxLayouts(src: string): GfxLayoutDef[] {
       total: evalExpr(fields[2]) ?? fields[2].trim(),
       planes: evalExpr(fields[3]) ?? 0,
       planeOffsets: parseOffsetList(fields[4]),
-      xOffsets: parseOffsetList(fields[5]),
-      yOffsets: parseOffsetList(fields[6]),
+      xOffsets: extendedX ?? xOffsets,
+      yOffsets: extendedY ?? yOffsets,
       charIncrement: evalExpr(fields[7]) ?? 0,
     });
   }

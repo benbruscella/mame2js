@@ -15,6 +15,7 @@ import type {
   GeneratedVideoPlan,
 } from '../runtime/generated-machine.ts';
 import type { BoardConfig } from '../runtime/types.ts';
+import type { GeneratedAuxiliaryAudioDevice } from '../runtime/audio-protocol.ts';
 import { compileMameHandler } from '../mame/handler-ir.ts';
 import { normalizeMameExecutionSource } from '../mame/cpu-compiler.ts';
 
@@ -100,6 +101,7 @@ export function lowerGeneratedMachine(
       ...(nestedHostTags.has(node.id) ? { hostTag: nestedHostTags.get(node.id) } : {}),
       ...(deviceMember(node.props) ? { member: deviceMember(node.props) } : {}),
       ...(typeof node.props.clock === 'number' ? { clock: node.props.clock } : {}),
+      ...(deviceCallbackHz(node.props) ? { callbackHz: deviceCallbackHz(node.props) } : {}),
       ...(Array.isArray(node.props.configCalls) ? {
         configuration: node.props.configCalls.flatMap(value => {
           const match = /^(\w+)\((.*)\)$/.exec(String(value));
@@ -210,6 +212,7 @@ export function lowerGeneratedMachine(
     } : {}),
     frameEvents: lowerFrameEvents(
       callbacks,
+      devices,
       board.screen.refresh,
       board.screen.vtotal,
       board.screen.vbstart,
@@ -235,6 +238,7 @@ export function lowerGeneratedMachine(
         (device.type.endsWith('_AUDIO') || device.type.endsWith('_SOUND')) &&
         mappedWriteKeys.some(key => key.startsWith(`${device.tag}.`)));
   const audioRoutes = lowerAudioRoutes(graph, ayDevices);
+  const auxiliaryDevices = lowerAuxiliaryAudioDevices(graph, devices);
   const sound = soundDevice
     ? {
         kind: 'wsg',
@@ -259,6 +263,7 @@ export function lowerGeneratedMachine(
           enableMethods: [],
           controlOffset: -1,
           ...(audioRoutes.length ? { routes: audioRoutes } : {}),
+          ...(auxiliaryDevices.length ? { auxiliaryDevices } : {}),
         }
     : generatedSoundboard
       ? (() => {
@@ -299,14 +304,21 @@ export function lowerAudioRoutes(
   const filters = new Map<string, number>();
   const routes: GeneratedAudioRoute[] = [];
   devices.forEach((device, chip) => {
+    const sourceDevice = byId.get(device.id);
+    const config = Array.isArray(sourceDevice?.props.config)
+      ? sourceDevice.props.config.map(String).join('\n')
+      : '';
+    const singleOutput = config.includes('AY8910_SINGLE_OUTPUT');
     for (const edge of graph.edges.filter(candidate =>
       candidate.from === device.id && candidate.rel === 'HAS_AUDIO_ROUTE')) {
       const node = byId.get(edge.to);
       if (!node) continue;
-      const channel = Number(node.props.output);
+      const rawChannel = Number(node.props.output);
+      const channel = singleOutput && rawChannel === 0 ? -1 : rawChannel;
       const gain = Number(node.props.gain);
       const target = String(node.props.target);
-      if (!Number.isInteger(channel) || channel < 0 || !Number.isFinite(gain)) continue;
+      const targetInput = Number(node.props.input);
+      if (!Number.isInteger(channel) || channel < -1 || !Number.isFinite(gain)) continue;
       const match = /^filter\.(\d+)\.(\d+)$/.exec(target);
       let filter: GeneratedAudioRoute['filter'];
       if (match) {
@@ -321,10 +333,67 @@ export function lowerAudioRoutes(
           channel: Number(match[2]),
         };
       }
-      routes.push({ chip, channel, gain, target, ...(filter ? { filter } : {}) });
+      routes.push({
+        chip,
+        channel,
+        gain,
+        target,
+        ...(Number.isInteger(targetInput) ? { targetInput } : {}),
+        ...(filter ? { filter } : {}),
+      });
     }
   });
   return routes;
+}
+
+const AUXILIARY_AUDIO_METHODS: Record<string, string[]> = {
+  MSM5205: ['data_w', 'reset_w', 'playmode_w', 's1_w', 's2_w', 'vclk_w'],
+};
+
+/**
+ * Lower routed secondary sound devices independently of the game using them.
+ * The method surface belongs to the generated hardware compiler capability;
+ * tags, clocks, modes and routes remain facts from the machine graph.
+ */
+export function lowerAuxiliaryAudioDevices(
+  graph: KnowledgeGraph,
+  devices: {
+    id: string;
+    tag: string;
+    type: string;
+    member?: string;
+    clock?: number;
+  }[],
+): GeneratedAuxiliaryAudioDevice[] {
+  const byId = new Map(graph.nodes.map(node => [node.id, node]));
+  return devices.flatMap(device => {
+    const writeMethods = AUXILIARY_AUDIO_METHODS[device.type];
+    if (!writeMethods || !Number.isFinite(device.clock)) return [];
+    const routeEdge = graph.edges.find(edge =>
+      edge.from === device.id && edge.rel === 'HAS_AUDIO_ROUTE');
+    const route = routeEdge ? byId.get(routeEdge.to) : undefined;
+    if (!route) return [];
+    const gain = Number(route.props.gain);
+    if (!Number.isFinite(gain)) return [];
+    const sourceDevice = byId.get(device.id);
+    const config = Array.isArray(sourceDevice?.props.config)
+      ? sourceDevice.props.config.map(String).join('\n')
+      : '';
+    const initialMode =
+      /set_prescaler_selector\([^)]*::(\w+)\)/.exec(config)?.[1];
+    const targetInput = Number(route.props.input);
+    return [{
+      type: device.type,
+      deviceTag: device.tag,
+      ...(device.member ? { member: device.member } : {}),
+      clock: device.clock!,
+      ...(initialMode ? { initialMode } : {}),
+      gain,
+      target: String(route.props.target),
+      ...(Number.isInteger(targetInput) ? { targetInput } : {}),
+      writeMethods,
+    }];
+  });
 }
 
 function deviceMember(props: Record<string, unknown>): string | undefined {
@@ -422,6 +491,7 @@ function visitOperations(
 
 function lowerFrameEvents(
   callbacks: GeneratedCallback[],
+  devices: GeneratedDevice[],
   refreshHz: number,
   vtotal: number,
   vbstart: number,
@@ -429,6 +499,21 @@ function lowerFrameEvents(
 ): GeneratedExecutionPlan['frameEvents'] {
   const events: GeneratedExecutionPlan['frameEvents'] = [];
   for (const callback of callbacks) {
+    if (callback.signal === 'vck_callback') {
+      const frequency = devices.find(device => device.tag === callback.ownerTag)?.callbackHz;
+      if (frequency) {
+        events.push({
+          callbackId: callback.id,
+          ownerTag: callback.ownerTag,
+          signal: callback.signal,
+          line: 0,
+          state: 1,
+          frequency,
+          ...(callback.source ? { source: callback.source } : {}),
+        });
+      }
+      continue;
+    }
     if (callback.signal === 'screen_vblank' || callback.signal === 'set_vblank_int') {
       events.push({
         callbackId: callback.id,
@@ -481,6 +566,13 @@ function lowerFrameEvents(
     }
   }
   return events.sort((a, b) => a.line - b.line || a.callbackId.localeCompare(b.callbackId));
+}
+
+function deviceCallbackHz(props: Record<string, unknown>): number | undefined {
+  if (props.type !== 'MSM5205' || typeof props.clock !== 'number') return undefined;
+  const config = Array.isArray(props.config) ? props.config.map(String).join('\n') : '';
+  const divisor = /set_prescaler_selector\([^)]*::S(\d+)_/.exec(config)?.[1];
+  return divisor ? props.clock / Number(divisor) : undefined;
 }
 
 export function generatedBoardSource(machine: GeneratedMachine): string {

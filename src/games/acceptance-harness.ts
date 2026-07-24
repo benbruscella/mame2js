@@ -29,7 +29,7 @@ interface AudioProbe {
 }
 
 interface AyMixer {
-  write(offset: number, data: number): void;
+  write(offset: number, data: number, method?: string): void;
   sample(): number;
 }
 
@@ -79,7 +79,10 @@ export async function runGameAcceptance(
   const critical = new Set(config.board.cpus.map(cpu => cpu.region));
   const romCheck = checkRomSet(config.roms, files, critical);
   assert.deepEqual(romCheck.missingCritical, []);
-  assert.deepEqual(romCheck.missingOther, []);
+  assert.deepEqual(
+    romCheck.missingOther.filter(file => !contract.optionalRomFiles?.includes(file)),
+    [],
+  );
   assert.deepEqual(romCheck.crcMismatch, []);
   const regions = assembleRegions(config.roms, files, () => {}, critical);
   for (const patch of config.romPatches ?? []) {
@@ -270,6 +273,7 @@ async function createAudioProbe(
         outputRate: number,
         routes?: NonNullable<ShellConfig['sound']['routes']>,
         chipGains?: number[],
+        auxiliaryDevices?: NonNullable<ShellConfig['sound']['auxiliaryDevices']>,
       ) => AyMixer;
       GeneratedAy8910FrameRenderer: new (
         mixer: AyMixer,
@@ -284,6 +288,7 @@ async function createAudioProbe(
       outputRate,
       config.sound.routes,
       config.sound.chipGains,
+      config.sound.auxiliaryDevices,
     );
     const renderer = new generated.GeneratedAy8910FrameRenderer(
       mixer,

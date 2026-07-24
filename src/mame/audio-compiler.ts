@@ -148,6 +148,87 @@ export interface GeneratedAy8910Plan {
   source: { file: string; line: number };
 }
 
+export interface GeneratedMsm5205Plan {
+  schemaVersion: 1;
+  type: 'MSM5205';
+  className: string;
+  indexShift: number[];
+  diffLookup: number[];
+  modes: Record<string, number>;
+  maximumStep: number;
+  minimumSignal: number;
+  maximumSignal: number;
+  sampleScale: number;
+  dacBits: number;
+  sourceFiles: string[];
+  source: { file: string; line: number };
+}
+
+/**
+ * Compile the MSM5205 ADPCM tables and limits from MAME. The emitted worklet
+ * consumes this data; no separately maintained decoder table lives in src.
+ */
+export function compileMsm5205(
+  mameSrc: string,
+  definition: MameHardwareDefinition,
+): GeneratedMsm5205Plan {
+  const cppFile = definition.sourceFile;
+  const headerFile = relative(
+    mameSrc,
+    join(dirname(join(mameSrc, cppFile)), `${basename(cppFile, extname(cppFile))}.h`),
+  );
+  const cpp = readFileSync(join(mameSrc, cppFile), 'utf8');
+  const header = readFileSync(join(mameSrc, headerFile), 'utf8');
+  const shifts = /index_shift\s*\[\s*8\s*\]\s*=\s*\{([^}]+)\}/.exec(cpp);
+  const stepLoop = /for\s*\(\s*int step\s*=\s*0\s*;\s*step\s*<=\s*(\d+)/.exec(cpp);
+  const stepFormula =
+    /floor\s*\(\s*16\.0\s*\*\s*pow\s*\(\s*11\.0\s*\/\s*10\.0/.test(cpp);
+  const signalLimits =
+    /if\s*\(\s*new_signal\s*>\s*(\d+)\s*\)[\s\S]*?new_signal\s*=\s*\1[\s\S]*?new_signal\s*<\s*-(\d+)/.exec(cpp);
+  const sampleScale =
+    /sample_scale\s*=\s*1\.0\s*\/\s*double\s*\(\s*1\s*<<\s*(\d+)\s*\)/.exec(cpp);
+  const dacBits = /MSM5205,\s*tag,\s*owner,\s*clock,\s*(\d+)\s*\)/.exec(cpp);
+  if (!shifts || !stepLoop || !stepFormula || !signalLimits || !sampleScale || !dacBits) {
+    throw new Error('MSM5205: MAME source shape is not executable by the audio compiler');
+  }
+  const indexShift = splitMameArgs(shifts[1]!).map(Number);
+  const maximumStep = Number(stepLoop[1]);
+  const modes = Object.fromEntries(
+    [...header.matchAll(/static constexpr int\s+(\w+)\s*=\s*([^;]+);/g)]
+      .map(match => [match[1]!, evalExpr(match[2]!)])
+      .filter((entry): entry is [string, number] => entry[1] !== null),
+  );
+  const diffLookup = Array.from({ length: (maximumStep + 1) * 16 }, (_, index) => {
+    const step = Math.floor(index / 16);
+    const nibble = index & 15;
+    const stepValue = Math.floor(16 * Math.pow(11 / 10, step));
+    const magnitude =
+      stepValue / 8 +
+      ((nibble & 4) ? stepValue : 0) +
+      ((nibble & 2) ? stepValue / 2 : 0) +
+      ((nibble & 1) ? stepValue / 4 : 0);
+    return Math.trunc((nibble & 8 ? -1 : 1) * magnitude);
+  });
+  return {
+    schemaVersion: 1,
+    type: 'MSM5205',
+    className: definition.className,
+    indexShift,
+    diffLookup,
+    modes,
+    maximumStep,
+    minimumSignal: -Number(signalLimits[2]),
+    maximumSignal: Number(signalLimits[1]),
+    sampleScale: 1 / (1 << Number(sampleScale[1])),
+    dacBits: Number(dacBits[1]),
+    sourceFiles: [cppFile, headerFile],
+    source: {
+      file: cppFile,
+      line: cpp.slice(0, cpp.indexOf('void msm5205_device::update_adpcm')).split('\n').length,
+    },
+  };
+}
+
 export interface GeneratedDiscreteAudioControl {
   port: number;
   mask: number;
@@ -1213,12 +1294,16 @@ registerProcessor(plan.processorName, GeneratedDiscreteAudioProcessor);
 `;
 }
 
-export function generatedAy8910WorkletSource(plan: GeneratedAy8910Plan): string {
+export function generatedAy8910WorkletSource(
+  plan: GeneratedAy8910Plan,
+  msm5205?: GeneratedMsm5205Plan,
+): string {
   return `// GENERATED from ${plan.source.file}:${plan.source.line} and ${plan.sourceFiles[1]}; do not edit.
 // Register masks, resistor DAC curve, clock divider, envelope parameters and
 // LFSR taps are extracted from MAME's AY implementation. RC behavior is
 // sourced from flt_rc and route/filter controls arrive from generated machine IR.
 const plan = ${JSON.stringify(plan, null, 2)};
+const msmPlan = ${JSON.stringify(msm5205 ?? null, null, 2)};
 const FILTER_CONTROL_BASE = ${AY_FILTER_CONTROL_BASE};
 const FILTER_CONTROL_STRIDE = ${AY_FILTER_CONTROL_STRIDE};
 
@@ -1228,6 +1313,17 @@ export interface GeneratedAyRoute {
   gain: number;
   target: string;
   filter?: { index: number; bank: number; channel: number };
+}
+
+export interface GeneratedAuxiliaryAudioDevice {
+  type: string;
+  deviceTag: string;
+  clock: number;
+  initialMode?: string;
+  gain: number;
+  target: string;
+  targetInput?: number;
+  writeMethods: string[];
 }
 
 interface GeneratedFilterState {
@@ -1345,6 +1441,75 @@ export class GeneratedAy8910Core {
   }
 }
 
+export class GeneratedMsm5205Core {
+  private data = 0;
+  private reset = false;
+  private bitwidth = 4;
+  private modeValue = 4;
+  private signal = 0;
+  private step = 0;
+
+  constructor(initialMode?: string) {
+    if (!msmPlan) throw new Error('MSM5205 plan is not present in this generated worklet');
+    const mode = initialMode
+      ? (msmPlan.modes as Record<string, number>)[initialMode]
+      : undefined;
+    if (mode !== undefined) this.playmode(mode);
+  }
+
+  write(method: string, data: number): void {
+    if (method === 'data_w') {
+      this.data = this.bitwidth === 4 ? data & 0x0f : (data & 0x07) << 1;
+    } else if (method === 'reset_w') {
+      this.reset = data !== 0;
+    } else if (method === 'playmode_w') {
+      this.playmode(data);
+    } else if (method === 's1_w') {
+      this.playmode((this.mode() & ~1) | (data ? 1 : 0));
+    } else if (method === 's2_w') {
+      this.playmode((this.mode() & ~2) | (data ? 2 : 0));
+    } else if (method === 'vck' && data) {
+      this.clock();
+    }
+  }
+
+  sample(): number {
+    if (!msmPlan) return 0;
+    const mask = msmPlan.dacBits >= 12 ? 0 : (1 << (12 - msmPlan.dacBits)) - 1;
+    return (this.signal & ~mask) * msmPlan.sampleScale;
+  }
+
+  private mode(): number {
+    return this.modeValue;
+  }
+
+  private playmode(data: number): void {
+    this.modeValue = data & 7;
+    this.bitwidth = data & 4 ? 4 : 3;
+  }
+
+  private clock(): void {
+    if (!msmPlan) return;
+    if (this.reset) {
+      this.signal = 0;
+      this.step = 0;
+      return;
+    }
+    const value = this.data & 15;
+    this.signal = Math.max(
+      msmPlan.minimumSignal,
+      Math.min(
+        msmPlan.maximumSignal,
+        this.signal + msmPlan.diffLookup[this.step * 16 + value],
+      ),
+    );
+    this.step = Math.max(
+      0,
+      Math.min(msmPlan.maximumStep, this.step + msmPlan.indexShift[value & 7]),
+    );
+  }
+}
+
 export class GeneratedAy8910Mixer {
   private readonly cores: GeneratedAy8910Core[];
   private readonly phases: number[];
@@ -1352,6 +1517,12 @@ export class GeneratedAy8910Mixer {
   private readonly routes: GeneratedAyRoute[];
   private readonly filters: GeneratedFilterState[];
   private readonly gainTotal: number;
+  private readonly auxiliary: {
+    deviceTag: string;
+    gain: number;
+    core: GeneratedMsm5205Core;
+  }[];
+  private readonly auxiliaryGainTotal: number;
   private readonly outputRate: number;
   private muted = false;
 
@@ -1361,6 +1532,7 @@ export class GeneratedAy8910Mixer {
     outputRate: number,
     routes: GeneratedAyRoute[] = [],
     chipGains: number[] = [],
+    auxiliaryDevices: GeneratedAuxiliaryAudioDevice[] = [],
   ) {
     this.outputRate = outputRate;
     const count = Math.max(1, chips);
@@ -1390,9 +1562,27 @@ export class GeneratedAy8910Mixer {
       memory: 0,
     }));
     this.gainTotal = this.routes.reduce((sum, route) => sum + route.gain, 0) || 1;
+    this.auxiliary = auxiliaryDevices.flatMap(device =>
+      device.type === 'MSM5205' && msmPlan
+        ? [{
+            deviceTag: device.deviceTag,
+            gain: device.gain,
+            core: new GeneratedMsm5205Core(device.initialMode),
+          }]
+        : []);
+    this.auxiliaryGainTotal = this.auxiliary.reduce(
+      (sum, device) => sum + device.gain,
+      0,
+    );
   }
 
-  write(offset: number, data: number): void {
+  write(offset: number, data: number, method?: string): void {
+    const auxiliaryWrite = /^([^.]+)\\.(\\w+)$/.exec(method ?? '');
+    if (auxiliaryWrite) {
+      this.auxiliary.find(device =>
+        device.deviceTag === auxiliaryWrite[1])?.core.write(auxiliaryWrite[2]!, data);
+      return;
+    }
     if (offset < 0) {
       this.muted = data !== 0;
       return;
@@ -1425,11 +1615,18 @@ export class GeneratedAy8910Mixer {
     }
     let mixed = 0;
     for (const route of this.routes) {
-      let value = this.channelSamples[route.chip]?.[route.channel] ?? 0;
+      const samples = this.channelSamples[route.chip];
+      let value = route.channel === -1
+        ? (samples?.reduce((sum, sample) => sum + sample, 0) ?? 0) / plan.channels
+        : samples?.[route.channel] ?? 0;
       if (route.filter) value = this.filter(value, this.filters[route.filter.index]);
       mixed += value * route.gain;
     }
-    return Math.max(-1, Math.min(1, mixed / this.gainTotal));
+    for (const device of this.auxiliary) mixed += device.core.sample() * device.gain;
+    return Math.max(
+      -1,
+      Math.min(1, mixed / (this.gainTotal + this.auxiliaryGainTotal)),
+    );
   }
 
   private recalculate(filter: GeneratedFilterState): void {
@@ -1462,6 +1659,7 @@ export interface GeneratedAyWrite {
   offset: number;
   data: number;
   frac?: number;
+  method?: string;
 }
 
 /**
@@ -1496,7 +1694,7 @@ export class GeneratedAy8910FrameRenderer {
         Math.max(0, Math.min(1, write.frac ?? 0)) * count,
       );
       while (sampleIndex < writeSample) output[sampleIndex++] = this.mixer.sample();
-      this.mixer.write(write.offset, write.data);
+      this.mixer.write(write.offset, write.data, write.method);
     }
     while (sampleIndex < count) output[sampleIndex++] = this.mixer.sample();
     return output;
@@ -1529,6 +1727,7 @@ class GeneratedAy8910Processor extends AudioWorkletProcessor {
         chips?: number;
         chipGains?: number[];
         routes?: GeneratedAyRoute[];
+        auxiliaryDevices?: GeneratedAuxiliaryAudioDevice[];
         refresh?: number;
         offset?: number;
         data?: number;
@@ -1542,6 +1741,7 @@ class GeneratedAy8910Processor extends AudioWorkletProcessor {
           sampleRate,
           message.routes,
           message.chipGains,
+          message.auxiliaryDevices,
         );
         this.renderer = new GeneratedAy8910FrameRenderer(
           this.mixer,
@@ -1549,7 +1749,7 @@ class GeneratedAy8910Processor extends AudioWorkletProcessor {
           message.refresh ?? 60,
         );
       } else if (message.type === 'write') {
-        this.mixer?.write(message.offset ?? 0, message.data ?? 0);
+        this.mixer?.write(message.offset ?? 0, message.data ?? 0, message.method);
       } else if (message.type === 'batch') {
         if (this.renderer) {
           this.frames.push(this.renderer.render(message.writes ?? []));

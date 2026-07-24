@@ -1,4 +1,5 @@
 import type { RangeSpec } from './bus.ts';
+import type { GeneratedAuxiliaryAudioDevice } from './audio-protocol.ts';
 
 export interface GeneratedSourceRef {
   file: string;
@@ -32,6 +33,8 @@ export interface GeneratedDevice {
   hostTag?: string;
   member?: string;
   clock?: number;
+  /** Source-derived rate for device clock callbacks such as MSM5205 VCK. */
+  callbackHz?: number;
   configuration?: { method: string; args: number[] }[];
   source?: GeneratedSourceRef;
 }
@@ -159,6 +162,8 @@ export interface GeneratedFrameEvent {
   signal: string;
   line: number;
   state: number;
+  /** Periodic callbacks accumulate at this exact rate across scanlines. */
+  frequency?: number;
   source?: GeneratedSourceRef;
 }
 
@@ -188,6 +193,10 @@ export interface GeneratedGfxLayout {
 export interface GeneratedGfxEntry {
   region: string;
   offset: number;
+  /** MAME gfxdecode device member owning this entry. */
+  decodeMember?: string;
+  /** MAME palette device member used by this decode entry. */
+  paletteMember?: string;
   colorBase: number;
   colorCount: number;
   xscale: number;
@@ -197,6 +206,8 @@ export interface GeneratedGfxEntry {
 
 export interface GeneratedPromPalettePlan {
   region: string;
+  /** Lookup PROM when it is separate from the RGB PROM. */
+  lookupRegion?: string;
   colorCount: number;
   min: number;
   max: number;
@@ -252,6 +263,8 @@ export interface GeneratedPromPalettePlan {
 
 export interface GeneratedTilemapPlan {
   member: string;
+  /** MAME gfxdecode member passed to tilemap::create. */
+  decodeMember?: string;
   tileWidth: number;
   tileHeight: number;
   columns: number;
@@ -260,6 +273,9 @@ export interface GeneratedTilemapPlan {
   tileInfo: string;
   scrollColumns?: number;
   scrollRows?: number;
+  /** MAME tilemap origin offsets for normal and flipped rendering. */
+  scrollDx?: [number, number];
+  scrollDy?: [number, number];
   transparentPen?: number;
   transparentIndirect?: number;
   source?: GeneratedSourceRef;
@@ -280,8 +296,12 @@ export interface GeneratedBitmapPlan {
 export interface GeneratedVideoPlan {
   gfx: GeneratedGfxEntry[];
   palette?: GeneratedPromPalettePlan;
+  palettes?: {
+    member: string;
+    plan: GeneratedPromPalettePlan;
+  }[];
   tilemaps: GeneratedTilemapPlan[];
-  initialState: Record<string, number>;
+  initialState: Record<string, number | number[]>;
   /** MAME may render at a hardware sub-pixel scale (Galaxian uses 3x horizontally). */
   renderScale?: { x: number; y: number };
   /** Driver-init delegate member -> selected MAME method. */
@@ -318,6 +338,7 @@ export interface GeneratedSoundBinding {
   enableMethods: string[];
   controlOffset: number;
   routes?: GeneratedAudioRoute[];
+  auxiliaryDevices?: GeneratedAuxiliaryAudioDevice[];
 }
 
 export interface GeneratedAudioRoute {
@@ -325,6 +346,7 @@ export interface GeneratedAudioRoute {
   channel: number;
   gain: number;
   target: string;
+  targetInput?: number;
   filter?: { index: number; bank: number; channel: number };
 }
 

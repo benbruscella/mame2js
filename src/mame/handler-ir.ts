@@ -12,7 +12,7 @@ interface Token {
 }
 
 const TYPE_WORDS = new Set([
-  'auto', 'bool', 'char', 'const', 'double', 'int', 'offs_t', 'pen_t',
+  'auto', 'bool', 'char', 'const', 'constexpr', 'double', 'int', 'offs_t', 'pen_t',
   'rectangle', 'tilemap_memory_index',
   's8', 's16', 's32', 'u8', 'u16', 'u32',
   'int8_t', 'int16_t', 'int32_t', 'uint8_t', 'uint16_t', 'uint32_t', 'unsigned',
@@ -108,16 +108,30 @@ class HandlerParser {
       return undefined;
     }
     if (expression.kind === 'assignment') {
-      if (!this.consume(';')) {
-        this.unsupportedStatement(`invalid assignment at byte ${start.offset}`);
-        return undefined;
-      }
-      return {
+      const assignments: GeneratedHandlerOperation[] = [{
         op: 'assign',
         target: expression.target,
         operator: expression.operator,
         value: expression.value,
-      };
+      }];
+      while (this.consume(',')) {
+        const next = this.parseExpression();
+        if (!next || next.kind !== 'assignment') {
+          this.unsupportedStatement(`invalid comma assignment at byte ${start.offset}`);
+          return assignments;
+        }
+        assignments.push({
+          op: 'assign',
+          target: next.target,
+          operator: next.operator,
+          value: next.value,
+        });
+      }
+      if (!this.consume(';')) {
+        this.unsupportedStatement(`invalid assignment at byte ${start.offset}`);
+        return undefined;
+      }
+      return assignments.length === 1 ? assignments[0] : assignments;
     }
     if (ASSIGNMENT_OPERATORS.has(this.peek().text)) {
       const operator = this.take().text;
@@ -346,7 +360,7 @@ class HandlerParser {
     while (this.consume('const')) {
       // MAME commonly places const after a pointer declarator.
     }
-    const valueType = typeWords.find(word => word !== 'const');
+    const valueType = typeWords.find(word => word !== 'const' && word !== 'constexpr');
     const declarations: GeneratedHandlerOperation[] = [];
     while (!this.at('eof')) {
       const name = this.peek();
@@ -367,6 +381,12 @@ class HandlerParser {
           kind: 'call',
           callee: { kind: 'identifier', name: valueType ?? typeWords[0] ?? '' },
           args,
+        };
+      } else if (valueType === 'rectangle') {
+        value = {
+          kind: 'call',
+          callee: { kind: 'identifier', name: 'rectangle' },
+          args: [],
         };
       }
       declarations.push({

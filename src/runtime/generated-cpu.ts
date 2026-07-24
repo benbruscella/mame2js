@@ -11,7 +11,7 @@ export interface CpuBus {
   write(address: number, data: number): void;
   in(port: number): number;
   out(port: number, data: number): void;
-  signal?(name: string, state: number): void;
+  signal?(name: string, state: number): number | void;
 }
 
 interface CpuAlias {
@@ -54,6 +54,16 @@ export interface GeneratedCpuDefinition {
   service: GeneratedHandlerProgram;
   fetch: GeneratedHandlerProgram;
   opcodes: CpuOpcode[];
+  internal?: {
+    ram: { start: number; end: number }[];
+    ports: {
+      dataAddress: number;
+      directionAddress: number;
+      inputSignal: string;
+      outputSignal: string;
+      outputMask: number;
+    }[];
+  };
   summary: {
     diagnostics: number;
   };
@@ -117,10 +127,15 @@ class IrCpu implements Cpu {
   private readonly bindings: GeneratedHandlerBindings;
   private irqData: number | (() => number) = 0xff;
   private irqHold = false;
+  private readonly internalRam = new Map<number, number>();
+  private readonly portData: number[];
+  private readonly portDirection: number[];
 
   constructor(definition: GeneratedCpuDefinition, bus: CpuBus) {
     this.definition = definition;
     this.bus = bus;
+    this.portData = new Array(definition.internal?.ports.length ?? 0).fill(0);
+    this.portDirection = new Array(definition.internal?.ports.length ?? 0).fill(0);
     this.opcodes = new Map(definition.opcodes.map(opcode => [opcode.key, opcode]));
     this.methods = new Map(definition.methods.map(method => [method.name, method]));
     for (const member of definition.members) {
@@ -266,6 +281,12 @@ class IrCpu implements Cpu {
       },
       'm_opcodes.read_byte': address => this.bus.read(address & 0xffff) & 0xff,
       'm_args.read_byte': address => this.bus.read(address & 0xffff) & 0xff,
+      'm_program.read_byte': address => this.readMemory(address),
+      'm_cprogram.read_byte': address => this.readMemory(address),
+      'm_copcodes.read_byte': address => this.readMemory(address),
+      'm_program.write_byte': (address, value) => {
+        this.writeMemory(address, value);
+      },
       'm_io.read_interruptible': port => this.bus.in(port & 0xffff) & 0xff,
       'm_io.write_interruptible': (port, value) => {
         this.bus.out(port & 0xffff, value & 0xff);
@@ -285,6 +306,62 @@ class IrCpu implements Cpu {
       logerror: () => 0,
       tag: () => 0,
     };
+  }
+
+  private readMemory(address: number): number {
+    const location = address & 0xffff;
+    const ports = this.definition.internal?.ports ?? [];
+    for (let index = 0; index < ports.length; index++) {
+      const port = ports[index]!;
+      if (location === port.directionAddress) return 0xff;
+      if (location !== port.dataAddress) continue;
+      const direction = this.portDirection[index]!;
+      const input = Number(this.bus.signal?.(port.inputSignal, 0) ?? 0xff) & 0xff;
+      return direction === 0xff
+        ? this.portData[index]!
+        : (input & ~direction) | (this.portData[index]! & direction);
+    }
+    if (this.isInternalRam(location)) return this.internalRam.get(location) ?? 0;
+    return this.bus.read(location) & 0xff;
+  }
+
+  private writeMemory(address: number, value: number): void {
+    const location = address & 0xffff;
+    const data = value & 0xff;
+    const ports = this.definition.internal?.ports ?? [];
+    for (let index = 0; index < ports.length; index++) {
+      const port = ports[index]!;
+      if (location === port.directionAddress) {
+        this.portDirection[index] = data;
+        this.emitPort(index);
+        return;
+      }
+      if (location === port.dataAddress) {
+        this.portData[index] = data;
+        this.emitPort(index);
+        return;
+      }
+    }
+    if (this.isInternalRam(location)) {
+      this.internalRam.set(location, data);
+      return;
+    }
+    this.bus.write(location, data);
+  }
+
+  private emitPort(index: number): void {
+    const port = this.definition.internal?.ports[index];
+    if (!port) return;
+    const direction = this.portDirection[index]!;
+    const data = direction
+      ? (this.portData[index]! & direction) | (direction ^ 0xff)
+      : this.portData[index]!;
+    this.bus.signal?.(port.outputSignal, data & port.outputMask);
+  }
+
+  private isInternalRam(address: number): boolean {
+    return (this.definition.internal?.ram ?? [])
+      .some(range => address >= range.start && address <= range.end);
   }
 
   private refKey(): string {

@@ -326,6 +326,7 @@ export function buildGraph(mameSrc: string, driverFile: string): KnowledgeGraph 
           output: route.output,
           target: route.target,
           gain: route.gain,
+          ...(route.input !== undefined ? { input: route.input } : {}),
           raw: route.raw,
           ...spanProps(ast.findStatement(route.raw, cfgFunction)?.span),
         });
@@ -368,7 +369,14 @@ export function buildGraph(mameSrc: string, driverFile: string): KnowledgeGraph 
   resolveSlotInputs(g, mameSrc, slashIncludes, machineConfigs);
 
   // --- gfx ---
-  for (const layout of parseGfxLayouts(combined)) {
+  // MAME exposes standard layouts from emu/video/generic.cpp via extern
+  // declarations. Include that source-owned table so driver graphs retain
+  // the concrete layout instead of an unresolved symbol.
+  const genericGfxFile = join(mameSrc, 'src/emu/video/generic.cpp');
+  const gfxLayoutSource = existsSync(genericGfxFile)
+    ? `${combined}\n${stripComments(readFileSync(genericGfxFile, 'utf8'))}`
+    : combined;
+  for (const layout of parseGfxLayouts(gfxLayoutSource)) {
     g.node('GfxLayout', `gfxlayout:${layout.name}`, {
       name: layout.name, width: layout.width, height: layout.height,
       total: layout.total, planes: layout.planes,
@@ -392,6 +400,16 @@ export function buildGraph(mameSrc: string, driverFile: string): KnowledgeGraph 
       g.edge(decId, eid, 'HAS_ENTRY');
       g.edge(eid, `gfxlayout:${e.layout}`, 'USES_LAYOUT');
     });
+  }
+
+  for (const handler of g.nodes.values()) {
+    if (handler.label !== 'Handler') continue;
+    annotateInputHandlerClosure(
+      g,
+      handler.id,
+      ioportMembers,
+      textMacros.strings,
+    );
   }
 
   return g.toGraph({

@@ -1,5 +1,10 @@
 import assert from 'node:assert/strict';
-import { deviceDefinitionsFromSource, hardwareKnowledgeGraph } from './hardware.ts';
+import {
+  deviceDefinitionsFromSource,
+  hardwareKnowledgeGraph,
+  resolveCompositeExecutableTypes,
+} from './hardware.ts';
+import type { HardwareClosureEntry } from './hardware.ts';
 
 const definitions = deviceDefinitionsFromSource('src/devices/sound/test.cpp', `
 // DEFINE_DEVICE_TYPE(IGNORED, bad, "bad", "comment")
@@ -56,4 +61,54 @@ assert.ok(graph.edges.some(edge =>
   edge.to === 'hardware:AY8910' &&
   edge.rel === 'USES_HARDWARE'));
 
-console.log('hardware.spec: 5 passed');
+const compositeHardware: HardwareClosureEntry[] = [
+  {
+    type: 'CPU',
+    status: 'source-resolved',
+    uses: [],
+    methods: [],
+    dslFiles: [],
+    sourceFiles: [],
+  },
+  {
+    type: 'SPEAKER',
+    status: 'declarative-host',
+    uses: [],
+    methods: [],
+    dslFiles: [],
+    sourceFiles: [],
+  },
+  {
+    type: 'SOUND_BOARD',
+    status: 'source-resolved',
+    uses: [],
+    methods: [],
+    dslFiles: [],
+    sourceFiles: [],
+    composedOf: ['CPU', 'SPEAKER'],
+  },
+  {
+    type: 'CABINET',
+    status: 'source-resolved',
+    uses: [],
+    methods: [],
+    dslFiles: [],
+    sourceFiles: [],
+    composedOf: ['SOUND_BOARD'],
+  },
+  {
+    type: 'INCOMPLETE_BOARD',
+    status: 'source-resolved',
+    uses: [],
+    methods: [],
+    dslFiles: [],
+    sourceFiles: [],
+    composedOf: ['MISSING_CHIP'],
+  },
+];
+const executable = resolveCompositeExecutableTypes(compositeHardware, new Set(['CPU']));
+assert.ok(executable.has('SOUND_BOARD'));
+assert.ok(executable.has('CABINET'));
+assert.ok(!executable.has('INCOMPLETE_BOARD'));
+
+console.log('hardware.spec: 8 passed');

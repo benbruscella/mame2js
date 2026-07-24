@@ -119,6 +119,7 @@ class Generated${safeName(definition.type)} implements Cpu {
   private readonly bus: CpuBus;
   private irqData: number | (() => number) = 0xff;
   private irqHold = false;
+${emitInternalFields(definition)}
 ${fields}
 ${aliases}
 
@@ -162,6 +163,8 @@ ${step}
     }
     return data;
   }
+
+${emitInternalMethods(definition)}
 
   get(name: string): number {
     switch (name) {
@@ -214,6 +217,67 @@ export const cpu: GeneratedCpuExecutable = {
 
 export default cpu;
 `;
+}
+
+function emitInternalFields(definition: GeneratedCpuDefinition): string {
+  const ports = definition.internal?.ports ?? [];
+  return [
+    '  private readonly internalRam = new Uint8Array(0x10000);',
+    `  private readonly portData = new Uint8Array(${ports.length});`,
+    `  private readonly portDirection = new Uint8Array(${ports.length});`,
+  ].join('\n');
+}
+
+function emitInternalMethods(definition: GeneratedCpuDefinition): string {
+  const ram = definition.internal?.ram ?? [];
+  const ports = definition.internal?.ports ?? [];
+  const ramCondition = ram.length
+    ? ram.map(range =>
+        `(location >= ${range.start} && location <= ${range.end})`).join(' || ')
+    : 'false';
+  const portReads = ports.map((port, index) => `
+    if (location === ${port.directionAddress}) return 0xff;
+    if (location === ${port.dataAddress}) {
+      const direction = this.portDirection[${index}];
+      const input = Number(this.bus.signal?.(${JSON.stringify(port.inputSignal)}, 0) ?? 0xff) & 0xff;
+      return direction === 0xff
+        ? this.portData[${index}]
+        : (input & ~direction) | (this.portData[${index}] & direction);
+    }`).join('');
+  const portWrites = ports.map((port, index) => `
+    if (location === ${port.directionAddress}) {
+      this.portDirection[${index}] = data;
+      this.emitPort(${index}, ${JSON.stringify(port.outputSignal)}, ${port.outputMask});
+      return;
+    }
+    if (location === ${port.dataAddress}) {
+      this.portData[${index}] = data;
+      this.emitPort(${index}, ${JSON.stringify(port.outputSignal)}, ${port.outputMask});
+      return;
+    }`).join('');
+  return `  private readMemory(address: number): number {
+    const location = address & 0xffff;${portReads}
+    if (${ramCondition}) return this.internalRam[location];
+    return this.bus.read(location) & 0xff;
+  }
+
+  private writeMemory(address: number, value: number): void {
+    const location = address & 0xffff;
+    const data = value & 0xff;${portWrites}
+    if (${ramCondition}) {
+      this.internalRam[location] = data;
+      return;
+    }
+    this.bus.write(location, data);
+  }
+
+  private emitPort(index: number, signal: string, outputMask: number): void {
+    const direction = this.portDirection[index];
+    const data = direction
+      ? (this.portData[index] & direction) | (direction ^ 0xff)
+      : this.portData[index];
+    this.bus.signal?.(signal, data & outputMask);
+  }`;
 }
 
 function emitMember(member: GeneratedCpuMember): string {
@@ -549,10 +613,10 @@ function emitCall(
   if (name === 'm_data.read_interruptible' ||
       name === 'm_opcodes.read_byte' ||
       name === 'm_args.read_byte') {
-    return `(this.bus.read((${args[0] ?? '0'}) & 0xffff) & 0xff)`;
+    return `(this.readMemory((${args[0] ?? '0'}) & 0xffff) & 0xff)`;
   }
   if (name === 'm_data.write_interruptible') {
-    return `(this.bus.write((${args[0] ?? '0'}) & 0xffff, (${args[1] ?? '0'}) & 0xff), 0)`;
+    return `(this.writeMemory((${args[0] ?? '0'}) & 0xffff, (${args[1] ?? '0'}) & 0xff), 0)`;
   }
   if (name === 'm_io.read_interruptible') {
     return `(this.bus.in((${args[0] ?? '0'}) & 0xffff) & 0xff)`;
@@ -562,10 +626,10 @@ function emitCall(
   }
   if (name === 'm_program.read_byte' || name === 'm_cprogram.read_byte' ||
       name === 'm_copcodes.read_byte') {
-    return `(this.bus.read((${args[0] ?? '0'}) & 0xffff) & 0xff)`;
+    return `(this.readMemory((${args[0] ?? '0'}) & 0xffff) & 0xff)`;
   }
   if (name === 'm_program.write_byte') {
-    return `(this.bus.write((${args[0] ?? '0'}) & 0xffff, (${args[1] ?? '0'}) & 0xff), 0)`;
+    return `(this.writeMemory((${args[0] ?? '0'}) & 0xffff, (${args[1] ?? '0'}) & 0xff), 0)`;
   }
   if (name === 'm_io.read_byte') {
     return `(this.bus.in((${args[0] ?? '0'}) & 0xff) & 0xff)`;

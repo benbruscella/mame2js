@@ -5,6 +5,7 @@ import { invaders } from './invaders.ts';
 import { galaxian } from './galaxian.ts';
 import { galaga } from './galaga.ts';
 import { digdug } from './digdug.ts';
+import { mpatrol } from './mpatrol.ts';
 
 export const supportedGameContracts = [
   pacman,
@@ -14,4 +15,5 @@ export const supportedGameContracts = [
   galaxian,
   galaga,
   digdug,
+  mpatrol,
 ] as const;

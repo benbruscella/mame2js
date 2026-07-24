@@ -35,7 +35,7 @@ with the local TypeScript dependency using `rewriteRelativeImportExtensions`.
 | `npm run gen:all` | clean and generate the branch's currently selected targets |
 | `npm run build` | type-check repository TypeScript without writing to `dist` |
 | `npm run test:unit` | strict type check plus every source/compiler/runtime spec |
-| `npm run test:current` | clean-generate and audit the current four games |
+| `npm run test:current` | clean-generate and audit the currently supported games |
 | `npm run audit:generated` | audit the games currently present in `dist` |
 | `npm run test:generation` | clean-generate every required target and audit all output |
 | `npm run test:games` | deterministic real-ROM contracts for supported games |
@@ -147,6 +147,12 @@ Each required non-host hardware type must be executable. A type may be:
 - generated audio implementation;
 - generated machine composition;
 - explicitly declarative browser-host service.
+
+Audio machines may compose several generated cores. Preserve MAME
+`add_route` output, target, gain, and destination-input facts in the graph and
+machine IR; route secondary stream devices through the primary generated
+worklet. Do not replace a source-declared `AY8910 + MSM5205 + DISCRETE` chain
+with a game-specific mixer or silently select only the first supported chip.
 
 Do not mark unsupported hardware as executable to make the catalog button
 appear. The runtime report and manifest are honesty contracts.

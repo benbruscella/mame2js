@@ -5,7 +5,14 @@
 // setter trio (set_refresh_hz/set_size/set_visarea), and slot-device default
 // option capture — plus a GAME-row regression so the arcade path can't drift.
 
-import { evalExpr, parseGames, parseMachineConfigs, parseDefines, parseAddressMaps } from './parse.ts';
+import {
+  evalExpr,
+  parseAddressMaps,
+  parseDefines,
+  parseGames,
+  parseGfxLayouts,
+  parseMachineConfigs,
+} from './parse.ts';
 
 let totalPass = 0;
 let totalFail = 0;
@@ -22,6 +29,21 @@ function eq(label: string, actual: unknown, expected: unknown): void {
 }
 
 eq('expression bitwise precedence', evalExpr('(3 << 4) | (7 & 3) ^ 1'), 48 | (3 ^ 1));
+
+// --- extended graphics layout offsets ---------------------------------------
+{
+  const [layout] = parseGfxLayouts(`
+static const uint32_t wide_xoffset[4] = { STEP4(0x20, 2) };
+static const uint32_t wide_yoffset[2] = { 0x100, 0x180 };
+static const gfx_layout wide_layout = {
+  4, 2, 1, 2, { 4, 0 },
+  EXTENDED_XOFFS, EXTENDED_YOFFS, 0x200,
+  wide_xoffset, wide_yoffset
+};
+`);
+  eq('extended gfx x offsets', layout?.xOffsets, [0x20, 0x22, 0x24, 0x26]);
+  eq('extended gfx y offsets', layout?.yOffsets, [0x100, 0x180]);
+}
 
 // --- CONS row (nes.cpp:775) --------------------------------------------------
 {
@@ -74,7 +96,7 @@ void nes_state::nes(machine_config &config)
 {
 	rp2a03_device &maincpu(RP2A03G(config, m_maincpu, NTSC_APU_CLOCK));
 	maincpu.set_addrmap(AS_PROGRAM, &nes_state::nes_map);
-	maincpu.add_route(0, "mono", 0.60);
+	maincpu.add_route(0, "mono", 0.60, 2);
 
 	SCREEN(config, m_screen, SCREEN_TYPE_RASTER);
 	m_screen->set_video_attributes(VIDEO_UPDATE_SCANLINE);
@@ -107,7 +129,8 @@ void nes_state::nes(machine_config &config)
   const cpu = cfg.devices.find(d => d.tag === 'maincpu')!;
   eq('cpu clock from external define', Math.round(cpu.clock!), Math.round(21477272 / 12));
   eq('audio route', cpu.audioRoutes, [{
-    output: '0', target: 'mono', gain: 0.6, raw: 'maincpu.add_route(0, "mono", 0.60)',
+    output: '0', target: 'mono', gain: 0.6, input: 2,
+    raw: 'maincpu.add_route(0, "mono", 0.60, 2)',
   }]);
 
   const screen = cfg.devices.find(d => d.tag === 'screen')!;

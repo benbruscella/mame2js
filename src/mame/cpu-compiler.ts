@@ -4,7 +4,7 @@ import type {
   GeneratedHandlerProgram,
   GeneratedSourceRef,
 } from '../runtime/generated-machine.ts';
-import { parseMameSource } from './ast.ts';
+import { parseMameAst, parseMameSource, splitMameArgs } from './ast.ts';
 import { compileMameHandler } from './handler-ir.ts';
 import {
   parseZ80OpcodeDsl,
@@ -59,6 +59,16 @@ export interface GeneratedCpuDefinition {
   service: GeneratedHandlerProgram;
   fetch: GeneratedHandlerProgram;
   opcodes: GeneratedCpuOpcode[];
+  internal?: {
+    ram: { start: number; end: number }[];
+    ports: {
+      dataAddress: number;
+      directionAddress: number;
+      inputSignal: string;
+      outputSignal: string;
+      outputMask: number;
+    }[];
+  };
   summary: {
     opcodes: number;
     compiledOpcodes: number;
@@ -341,20 +351,356 @@ export function compileMameI8080(mameSrc: string): GeneratedCpuDefinition {
   };
 }
 
+/**
+ * Compile MAME's 6800-family opcode source with the M6803 dispatch and cycle
+ * tables selected. MAME keeps the instruction semantics in 6800ops.hxx behind
+ * C preprocessor macros; this pass expands those macros before lowering the
+ * resulting ordinary C++ statements to handler IR.
+ */
+export function compileMameM6803(mameSrc: string): GeneratedCpuDefinition {
+  const cppFile = 'src/devices/cpu/m6800/m6800.cpp';
+  const headerFile = 'src/devices/cpu/m6800/m6800.h';
+  const variantFile = 'src/devices/cpu/m6800/m6801.cpp';
+  const variantHeaderFile = 'src/devices/cpu/m6800/m6801.h';
+  const operationsFile = 'src/devices/cpu/m6800/6800ops.hxx';
+  const cpp = readFileSync(join(mameSrc, cppFile), 'utf8');
+  const header = readFileSync(join(mameSrc, headerFile), 'utf8');
+  const variant = readFileSync(join(mameSrc, variantFile), 'utf8');
+  const operations = readFileSync(join(mameSrc, operationsFile), 'utf8');
+  const macroSource = cpp.slice(0, cpp.indexOf('#include "6800ops.hxx"'));
+  const macros = parseMameOperationMacros(macroSource);
+  const normalize = (body: string): string => normalizeMameExecutionSource(
+    normalizePairLocals(expandMameOperationMacros(body, macros), false)
+      .replace(/\bWM16\(\s*([^,]+),\s*&\s*(m_\w+)\s*\)/g, 'WM16($1, $2.w)')
+      .replace(/\benter_interrupt\(\s*"[^"]*"/g, 'enter_interrupt(0'),
+  );
+
+  const operationAst = parseMameAst([{
+    file: operationsFile,
+    source: operations.replace(
+      /OP_HANDLER\s*\(\s*(\w+)\s*\)/g,
+      'void m6800_cpu_device::$1()',
+    ),
+  }]);
+  const opcodeMethods = operationAst.units[0]!.functions.map(fn => ({
+    name: fn.name,
+    parameters: fn.parameters,
+    program: compileMameHandler(normalize(fn.body)),
+    source: sourceRef(operationsFile, fn.span.line),
+  }));
+
+  const baseAst = parseMameAst([{ file: cppFile, source: cpp }]);
+  const baseFunctions = baseAst.units[0]!.functions;
+  const base = (name: string) => baseFunctions.find(fn =>
+    fn.className === 'm6800_cpu_device' && fn.name === name);
+  const required = [
+    'RM16',
+    'WM16',
+    'enter_interrupt',
+    'check_irq_lines',
+    'check_irq1_enabled',
+    'device_reset',
+    'execute_set_input',
+  ];
+  const missing = required.filter(name => !base(name));
+  if (missing.length) {
+    throw new Error(`MAME M6803 source is missing ${missing.join(', ')}`);
+  }
+  const helperNames = [
+    'RM16',
+    'WM16',
+    'enter_interrupt',
+    'check_irq_lines',
+    'check_irq1_enabled',
+  ];
+  const methods = [
+    ...opcodeMethods,
+    ...helperNames.map(name => {
+      const fn = base(name)!;
+      return {
+        name,
+        parameters: name === 'WM16' ? 'u32 Addr, u16 p' : fn.parameters,
+        program: compileMameHandler(
+          name === 'WM16'
+            ? normalize(fn.body)
+                .replace(/\bp\.b\.h\b/g, 'u8(p >> 8)')
+                .replace(/\bp\.b\.l\b/g, 'u8(p)')
+            : normalize(fn.body),
+        ),
+        source: sourceRef(cppFile, fn.span.line),
+      };
+    }),
+    {
+      name: 'increment_counter',
+      parameters: 'int amount',
+      program: compileMameHandler('cycles += amount;'),
+      source: sourceRef(cppFile, base('enter_interrupt')!.span.line),
+    },
+    {
+      name: 'check_irq2',
+      parameters: '',
+      program: compileMameHandler(''),
+      source: sourceRef(headerFile, lineAt(header, header.indexOf('check_irq2()'))),
+    },
+    {
+      name: 'execute_one',
+      parameters: '',
+      program: compileMameHandler(''),
+      source: sourceRef(cppFile, base('check_irq_lines')!.span.line),
+    },
+    {
+      name: 'eat_cycles',
+      parameters: '',
+      program: compileMameHandler('cycles += 1;'),
+      source: sourceRef(cppFile, base('check_irq_lines')!.span.line),
+    },
+    {
+      name: 'take_trap',
+      parameters: '',
+      program: compileMameHandler(''),
+      source: sourceRef(headerFile, lineAt(header, header.indexOf('take_trap()'))),
+    },
+  ];
+
+  const cycles = extractMameByteArray(variant, 'cycles_6803', { XX: 4 });
+  const dispatch = extractM6803Dispatch(variant);
+  const opcodes = dispatch.map((method, opcode) => ({
+    key: `${opcode.toString(16).padStart(2, '0')}00`,
+    dispatch: false,
+    program: compileMameHandler(`${method}(); cycles += ${cycles[opcode]};`),
+    source: sourceRef(variantFile, lineAt(variant, variant.indexOf('m6803_insn'))),
+  }));
+  const resetMethod = base('device_reset')!;
+  const inputMethod = base('execute_set_input')!;
+  const start = compileMameHandler('');
+  const reset = compileMameHandler(normalize(resetMethod.body));
+  const input = compileMameHandler(
+    normalize(inputMethod.body).replace(/\birqline\b/g, 'inputnum'),
+  );
+  const service = compileMameHandler(`
+    check_irq_lines();
+    if (cycles > 0) return;
+    if (m_wai_state & (M6800_WAI | M6800_SLP)) {
+      cycles += 1;
+      return;
+    }
+  `);
+  const fetch = compileMameHandler(`
+    m_ref = m_copcodes.read_byte(m_pc.w) << 16;
+    m_pc.w++;
+  `);
+  const constants = {
+    M6800_IRQ_LINE: 0,
+    M6800_WAI: 8,
+    M6800_SLP: 0x10,
+    INPUT_LINE_IRQ0: 0,
+    INPUT_LINE_NMI: -1,
+    CLEAR_LINE: 0,
+    ASSERT_LINE: 1,
+  };
+  const members: GeneratedCpuMember[] = [
+    ...['m_ppc', 'm_pc', 'm_s', 'm_x', 'm_d', 'm_ea']
+      .map(name => ({ name, bits: 16 as const, pair: true })),
+    ...['m_cc', 'm_wai_state', 'm_nmi_state', 'm_nmi_pending']
+      .map(name => ({ name, bits: 8 as const })),
+    { name: 'm_irq_state', bits: 8, values: [0, 0, 0, 0, 0] },
+    { name: 'flags8i', bits: 8, values: extractMameByteArray(cpp, 'flags8i') },
+    { name: 'flags8d', bits: 8, values: extractMameByteArray(cpp, 'flags8d') },
+    { name: 'm_ref', bits: 32 },
+    { name: 'cycles' },
+    { name: 'm_icount' },
+  ];
+  const internal = compileM6803InternalPlan(variant);
+  const programs = [
+    start,
+    reset,
+    input,
+    service,
+    fetch,
+    ...methods.map(method => method.program),
+    ...opcodes.map(opcode => opcode.program),
+  ];
+  return {
+    schemaVersion: 1,
+    type: 'M6803',
+    dialect: 'mame-cpp-op-handler',
+    sourceFiles: [cppFile, headerFile, variantFile, variantHeaderFile, operationsFile],
+    constants,
+    aliases: {},
+    members,
+    methods,
+    start,
+    reset,
+    input,
+    service,
+    fetch,
+    opcodes,
+    internal,
+    summary: {
+      opcodes: opcodes.length,
+      compiledOpcodes: opcodes.filter(opcode => !opcode.program.diagnostics.length).length,
+      methods: methods.length,
+      compiledMethods: methods.filter(method => !method.program.diagnostics.length).length,
+      diagnostics: programs.reduce((count, program) => count + program.diagnostics.length, 0),
+    },
+  };
+}
+
+interface MameOperationMacro {
+  parameters?: string[];
+  body: string;
+}
+
+function parseMameOperationMacros(source: string): Map<string, MameOperationMacro> {
+  const macros = new Map<string, MameOperationMacro>();
+  for (const line of source.split(/\r?\n/)) {
+    const match = /^\s*#define\s+(\w+)(?:\(([^)]*)\))?\s+(.+)$/.exec(line);
+    if (!match) continue;
+    macros.set(match[1]!, {
+      ...(match[2] !== undefined
+        ? { parameters: match[2].split(',').map(value => value.trim()) }
+        : {}),
+      body: match[3]!,
+    });
+  }
+  return macros;
+}
+
+function expandMameOperationMacros(
+  source: string,
+  macros: Map<string, MameOperationMacro>,
+): string {
+  let expanded = source;
+  const functions = [...macros].filter(([, macro]) => macro.parameters);
+  const objects = [...macros].filter(([, macro]) => !macro.parameters);
+  for (let pass = 0; pass < 32; pass++) {
+    const before = expanded;
+    for (const [name, macro] of functions) {
+      const pattern = new RegExp(`\\b${name}\\s*\\(`, 'g');
+      let cursor = 0;
+      while (cursor < expanded.length) {
+        pattern.lastIndex = cursor;
+        const match = pattern.exec(expanded);
+        if (!match) break;
+        const open = expanded.indexOf('(', match.index + name.length);
+        const close = matchPair(expanded, open, '(', ')');
+        if (close < 0) break;
+        const args = splitMameArgs(expanded.slice(open + 1, close));
+        let body = macro.body;
+        const parameterIndexes = new Map(
+          macro.parameters!
+            .map((parameter, index) => [parameter, index] as const)
+            .filter(([parameter]) => /^\w+$/.test(parameter)),
+        );
+        if (parameterIndexes.size) {
+          body = body.replace(
+            new RegExp(`\\b(?:${[...parameterIndexes.keys()].join('|')})\\b`, 'g'),
+            parameter => args[parameterIndexes.get(parameter)!] ?? '',
+          );
+        }
+        expanded = expanded.slice(0, match.index) + body + expanded.slice(close + 1);
+        cursor = match.index + body.length;
+      }
+    }
+    for (const [name, macro] of objects) {
+      expanded = expanded.replace(new RegExp(`\\b${name}\\b`, 'g'), macro.body);
+    }
+    if (expanded === before) break;
+  }
+  return expanded;
+}
+
+function extractMameByteArray(
+  source: string,
+  name: string,
+  symbols: Record<string, number> = {},
+): number[] {
+  const match = new RegExp(
+    `${name}\\s*\\[[^\\]]+\\]\\s*=\\s*(?:\\/\\*[\\s\\S]*?\\*\\/\\s*)?\\{([\\s\\S]*?)\\};`,
+  ).exec(source);
+  if (!match) throw new Error(`MAME M6803 source is missing ${name}`);
+  const values = match[1]!
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .split(',')
+    .map(value => value.trim())
+    .filter(Boolean)
+    .map(value => symbols[value] ?? Number(value));
+  if (values.length !== 256 || values.some(value => !Number.isFinite(value))) {
+    throw new Error(`${name} contains ${values.length} invalid entries`);
+  }
+  return values;
+}
+
+function extractM6803Dispatch(source: string): string[] {
+  const match = /m6803_insn\s*\[[^\]]+\]\s*=\s*\{([\s\S]*?)\};/.exec(source);
+  if (!match) throw new Error('MAME M6803 opcode dispatch table is missing');
+  const methods = [...match[1]!.matchAll(/&m6801_cpu_device::(\w+)/g)]
+    .map(entry => entry[1]!);
+  if (methods.length !== 256) {
+    throw new Error(`MAME M6803 dispatch contains ${methods.length}, expected 256`);
+  }
+  return methods;
+}
+
+function compileM6803InternalPlan(
+  source: string,
+): NonNullable<GeneratedCpuDefinition['internal']> {
+  const address = (method: string): number => {
+    const match = new RegExp(
+      `map\\(\\s*(0x[\\da-f]+|\\d+)\\s*,[^;]+FUNC\\([^)]*::${method}\\)`,
+      'i',
+    ).exec(source);
+    if (!match) throw new Error(`MAME M6803 internal map is missing ${method}`);
+    return Number(match[1]);
+  };
+  const map = /void\s+m6801_cpu_device::m6803_mem[\s\S]*?\{([\s\S]*?)\}/.exec(source)?.[1] ?? '';
+  const ram = /map\(\s*(0x[\da-f]+|\d+)\s*,\s*(0x[\da-f]+|\d+)\s*\)\.ram/.exec(map);
+  if (!ram) throw new Error('MAME M6803 internal RAM map is missing');
+  const outputMask = Number(
+    /void\s+m6801_cpu_device::write_port2[\s\S]*?\bdata\s*&=\s*(0x[\da-f]+|\d+)/i
+      .exec(source)?.[1],
+  ) || 0xff;
+  return {
+    ram: [{ start: Number(ram[1]), end: Number(ram[2]) }],
+    ports: [1, 2].map(port => ({
+      dataAddress: address(`p${port}_data_w`),
+      directionAddress: address(`p${port}_ddr_w`),
+      inputSignal: `in_p${port}_cb`,
+      outputSignal: `out_p${port}_cb`,
+      outputMask: port === 2 ? outputMask : 0xff,
+    })),
+  };
+}
+
 function normalizeI8080Source(source: string): string {
+  return normalizePairLocals(source);
+}
+
+function normalizePairLocals(source: string, rewriteMemberPostfix = true): string {
   let normalized = source
     .replace(/\b(m_\w+)\.w\.l\b/g, '$1.w')
-    .replace(/\b(m_\w+)\.d\b/g, '$1.w')
-    .replace(/\b([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+)\+\+/g, 'POSTINC($1)')
-    .replace(/\b([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+)--/g, 'POSTDEC($1)');
-  const pairLocals = [...normalized.matchAll(/\bPAIR\s+(\w+)\s*;/g)].map(match => match[1]!);
-  normalized = normalized.replace(/\bPAIR\s+(\w+)\s*;/g, 'u16 $1 = 0;');
+    .replace(/\b(m_\w+)\.d\b/g, '$1.w');
+  if (rewriteMemberPostfix) {
+    normalized = normalized
+      .replace(/\b([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+)\+\+/g, 'POSTINC($1)')
+      .replace(/\b([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+)--/g, 'POSTDEC($1)');
+  }
+  const pairDeclaration = /\bPAIR\s+(\w+(?:\s*,\s*\w+)*)\s*;/g;
+  const pairLocals = [...normalized.matchAll(pairDeclaration)]
+    .flatMap(match => match[1]!.split(',').map(name => name.trim()))
+    .filter(name => /^\w+$/.test(name));
+  normalized = normalized.replace(
+    pairDeclaration,
+    (_match, names: string) =>
+      `u32 ${names.split(',').map(name => `${name.trim()} = 0`).join(', ')};`,
+  );
   for (const name of pairLocals) {
     normalized = normalized
       .replace(new RegExp(`\\b${name}\\.b\\.l\\s*=\\s*([^;]+);`, 'g'),
         `${name} = (${name} & 0xff00) | (u8($1));`)
       .replace(new RegExp(`\\b${name}\\.b\\.h\\s*=\\s*([^;]+);`, 'g'),
         `${name} = (${name} & 0x00ff) | (u16($1) << 8);`)
+      .replace(new RegExp(`\\b${name}\\.w\\.l\\b`, 'g'), name)
       .replace(new RegExp(`\\b${name}\\.(?:w|d)\\b`, 'g'), name)
       .replace(new RegExp(`\\b${name}\\.b\\.l\\b`, 'g'), `u8(${name})`)
       .replace(new RegExp(`\\b${name}\\.b\\.h\\b`, 'g'), `u8(${name} >> 8)`);
@@ -444,7 +790,7 @@ function compileOpcodeOperations(
 }
 
 export function normalizeMameExecutionSource(source: string): string {
-  let normalized = source
+  let normalized = stripInactivePreprocessorBranches(source)
     .replaceAll('[[fallthrough]];', '')
     .replace(/\bstatic_assert\s*\([^;]*\)\s*;/g, '')
     .replace(/\bbitswap\s*<\s*\d+\s*>\s*\(/g, 'BITSWAP(')
@@ -491,6 +837,24 @@ export function normalizeMameExecutionSource(source: string): string {
         new RegExp(`\\b${name}\\s*\\[([^\\]]+)\\]`, 'g'),
         (_entry, index: string) => `TABLE(${index}, ${values.join(', ')})`,
       );
+  }
+  return normalized;
+}
+
+function stripInactivePreprocessorBranches(source: string): string {
+  let normalized = source;
+  const branch =
+    /^[ \t]*#(ifdef|ifndef)\s+\w+[^\r\n]*\r?\n([\s\S]*?)(?:^[ \t]*#else[^\r\n]*\r?\n([\s\S]*?))?^[ \t]*#endif[^\r\n]*(?:\r?\n|$)/gm;
+  for (let pass = 0; pass < 8; pass++) {
+    let changed = false;
+    normalized = normalized.replace(
+      branch,
+      (_match, directive: string, primary: string, alternate = '') => {
+        changed = true;
+        return directive === 'ifndef' ? primary : alternate;
+      },
+    );
+    if (!changed) break;
   }
   return normalized;
 }
@@ -755,6 +1119,20 @@ function matchBrace(source: string, open: number): number {
   for (let index = open; index < source.length; index++) {
     if (source[index] === '{') depth++;
     else if (source[index] === '}' && --depth === 0) return index;
+  }
+  return -1;
+}
+
+function matchPair(
+  source: string,
+  open: number,
+  left: string,
+  right: string,
+): number {
+  let depth = 0;
+  for (let index = open; index < source.length; index++) {
+    if (source[index] === left) depth++;
+    else if (source[index] === right && --depth === 0) return index;
   }
   return -1;
 }

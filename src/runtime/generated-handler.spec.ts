@@ -206,6 +206,26 @@ assert.equal(executeGeneratedHandler(pointerSlice, {
 }), 12 + 0xa5);
 assert.equal(spriteRam[14], 0xa5);
 
+const sourceRectangle = {
+  min_x: 10,
+  max_x: 20,
+  min_y: 30,
+  max_y: 40,
+  contains() { return 1; },
+};
+assert.equal(executeGeneratedHandler(compileMameHandler(`
+  rectangle clip = cliprect;
+  clip.min_y = 0;
+  clip = cliprect;
+  clip.max_y = 127;
+  return cliprect.min_y + cliprect.max_y;
+`), {}, { cliprect: sourceRectangle }), 70);
+assert.deepEqual(
+  [sourceRectangle.min_x, sourceRectangle.max_x, sourceRectangle.min_y, sourceRectangle.max_y],
+  [10, 20, 30, 40],
+  'C++ rectangle locals must copy rather than alias their source value',
+);
+
 let requiredDeviceState = 0;
 const requiredDeviceCall = compileMameHandler('m_cpu->set_input_line(0, 1);');
 executeGeneratedHandler(requiredDeviceCall, {
