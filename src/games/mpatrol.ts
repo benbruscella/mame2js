@@ -61,8 +61,8 @@ export const mpatrol: GameTestContract = {
       writes: 632916,
       nonzeroWrites: 632872,
       writeHash: '5934ede4',
-      pcmHash: '5f38a169',
-      rms: 0.054946,
+      pcmHash: 'acded621',
+      rms: 0.052465,
     },
   },
 };

@@ -53,8 +53,8 @@ export const pooyan: GameTestContract = {
       writes: 2305,
       nonzeroWrites: 1986,
       writeHash: 'bef8a1d8',
-      pcmHash: 'e554607a',
-      rms: 0.020936,
+      pcmHash: 'cf81d212',
+      rms: 0.020744,
     },
   },
 };

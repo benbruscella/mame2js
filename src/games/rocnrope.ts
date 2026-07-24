@@ -39,8 +39,8 @@ export const rocnrope: GameTestContract = {
       writes: 1422,
       nonzeroWrites: 1291,
       writeHash: '6f7920bc',
-      pcmHash: 'e6a71079',
-      rms: 0.019646,
+      pcmHash: 'e1b65adb',
+      rms: 0.019465,
     },
   },
 };

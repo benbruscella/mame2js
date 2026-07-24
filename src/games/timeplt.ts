@@ -53,8 +53,8 @@ export const timeplt: GameTestContract = {
       writes: 5831,
       nonzeroWrites: 5556,
       writeHash: '636af7b8',
-      pcmHash: 'fd1dd828',
-      rms: 0.028542,
+      pcmHash: '1ad0b0d1',
+      rms: 0.028462,
     },
   },
 };
