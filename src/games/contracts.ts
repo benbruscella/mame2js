@@ -8,6 +8,7 @@ import { digdug } from './digdug.ts';
 import { mpatrol } from './mpatrol.ts';
 import { rocnrope } from './rocnrope.ts';
 import { junofrst } from './junofrst.ts';
+import { gyruss } from './gyruss.ts';
 
 export const supportedGameContracts = [
   pacman,
@@ -20,4 +21,5 @@ export const supportedGameContracts = [
   mpatrol,
   rocnrope,
   junofrst,
+  gyruss,
 ] as const;

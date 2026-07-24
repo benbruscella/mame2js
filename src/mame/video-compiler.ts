@@ -409,6 +409,7 @@ function compileTilemaps(
     const transparentIndirect = transparentIndirectExpression === undefined
       ? undefined
       : expressionNumber(transparentIndirectExpression, values);
+    const transmasks = tilemapTransmasks(`${setup}\n${start.body}`, member, values);
     plans.push({
       member,
       ...(/\b(m_\w+)\b/.exec(args[0] ?? '')?.[1]
@@ -428,11 +429,38 @@ function compileTilemaps(
       ...(transparentIndirect !== undefined && transparentIndirect >= 0
         ? { transparentIndirect }
         : {}),
+      ...(transmasks.length ? { transmasks } : {}),
       source: sourceRef(start),
     });
     createRe.lastIndex = close + 1;
   }
   return plans;
+}
+
+function tilemapTransmasks(
+  source: string,
+  member: string,
+  values: Record<string, number>,
+): NonNullable<GeneratedVideoPlan['tilemaps'][number]['transmasks']> {
+  const masks = new Map<number, {
+    group: number;
+    foreground: number;
+    background: number;
+  }>();
+  const pattern = new RegExp(
+    `${member}->set_transmask\\s*\\(([^,]+),\\s*([^,]+),\\s*([^)]+)\\)`,
+    'g',
+  );
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(source)) !== null) {
+    const group = expressionNumber(match[1], values);
+    masks.set(group, {
+      group,
+      foreground: expressionNumber(match[2], values) >>> 0,
+      background: expressionNumber(match[3], values) >>> 0,
+    });
+  }
+  return [...masks.values()].sort((left, right) => left.group - right.group);
 }
 
 function tilemapScrollDelta(
@@ -828,11 +856,12 @@ function compilePalette(
       }
       const currentPostIncrementOffset = postIncrementOffset;
       if (usesPostIncrement) postIncrementOffset += Math.max(0, loop.end - loop.start);
+      const colorOrExpression =
+        /(?:\||\+)\s*(-?(?:0x[\da-f]+|\d+))/i.exec(lookupExpression)?.[1]
+        ?? /(?:\||\+)\s*(-?(?:0x[\da-f]+|\d+))/i.exec(colorExpression)?.[1];
       return [{
         penOffset: expressionAt(args[0]!, loop.start),
-        colorOr: expressionNumber(
-          /(?:\||\+)\s*(-?(?:0x[\da-f]+|\d+))/i.exec(colorExpression)?.[1],
-        ),
+        colorOr: expressionNumber(colorOrExpression),
         lookupOffset: usesPostIncrement
           ? currentPostIncrementOffset
           : lookupOffset + expressionAt(lookupIndex ?? 'i', loop.start),

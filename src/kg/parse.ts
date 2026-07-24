@@ -312,13 +312,33 @@ export interface RomRegionDef {
 }
 export interface RomSetDef { name: string; regions: RomRegionDef[]; }
 
+function maskDisabledIfZero(source: string): string {
+  const stack: { parent: boolean; condition: boolean }[] = [];
+  let active = true;
+  return source.split(/(\n)/).map(part => {
+    if (part === '\n') return part;
+    const directive = /^\s*#\s*(if|else|endif)\b\s*(.*)$/.exec(part);
+    if (directive?.[1] === 'if') {
+      const condition = directive[2]!.trim() !== '0';
+      stack.push({ parent: active, condition });
+      active = active && condition;
+    } else if (directive?.[1] === 'else') {
+      const frame = stack.at(-1);
+      if (frame) active = frame.parent && !frame.condition;
+    } else if (directive?.[1] === 'endif') {
+      active = stack.pop()?.parent ?? true;
+    }
+    return active && !directive ? part : ' '.repeat(part.length);
+  }).join('');
+}
+
 export function parseRomSets(src: string): RomSetDef[] {
   const out: RomSetDef[] = [];
   const re = /ROM_START\(\s*(\w+)\s*\)([\s\S]*?)ROM_END/g;
   let m: RegExpExecArray | null;
   while ((m = re.exec(src)) !== null) {
     const set: RomSetDef = { name: m[1], regions: [] };
-    const body = m[2];
+    const body = maskDisabledIfZero(m[2]);
     const stmtRe = /(ROM_REGION|ROM_LOAD|ROM_RELOAD|ROM_CONTINUE|ROM_FILL)\s*\(/g;
     let sm: RegExpExecArray | null;
     let region: RomRegionDef | null = null;

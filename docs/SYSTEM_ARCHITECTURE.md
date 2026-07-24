@@ -234,7 +234,10 @@ recognizes MAME's direct packed-bitmap loops and lowers their source arithmetic
 to a compact bitmap plan. This avoids interpreting one handler operation per
 pixel while retaining the source method and memory-layout provenance. The
 generic video runtime executes either plan against ROM regions and shared
-memory.
+memory. Tile categories, groups and `set_transmask` layer masks remain explicit
+IR. Drivers that call `screen.update_partial` select partial raster composition,
+so mid-frame video RAM changes are rendered at the source-declared boundary
+rather than from a torn end-of-frame snapshot.
 
 ### AUDIO
 

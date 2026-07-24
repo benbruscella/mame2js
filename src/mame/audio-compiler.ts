@@ -10,6 +10,7 @@ import {
   AY_FILTER_CONTROL_BASE,
   AY_FILTER_CONTROL_STRIDE,
   type GeneratedDacFilterPlan,
+  type GeneratedDiscreteMixerPlan,
   type GeneratedSpeakerFilterPlan,
 } from '../runtime/audio-protocol.ts';
 
@@ -140,6 +141,117 @@ export function compileNamco54Discrete(
       gain: channel.gain / gainTotal,
     })),
     outputGain: 0.65,
+    source: {
+      file: sourceFile,
+      line: source.slice(0, marker.index).split('\n').length,
+      netlist,
+    },
+  };
+}
+
+/**
+ * Lower the stream/filter/adder/resistor-mixer subset of MAME's discrete
+ * netlists. The accepted operations are selected by topology, never driver.
+ */
+export function compileDiscreteMixer(
+  mameSrc: string,
+  sourceFiles: string | readonly string[],
+  netlist: string,
+): GeneratedDiscreteMixerPlan | undefined {
+  const markerPattern = new RegExp(
+    `DISCRETE_SOUND_START\\s*\\(\\s*${netlist}\\s*\\)`,
+  );
+  const sourceEntry = [...new Set(
+    (Array.isArray(sourceFiles) ? sourceFiles : [sourceFiles])
+      .filter(file => existsSync(join(mameSrc, file))),
+  )]
+    .map(file => ({ file, source: readFileSync(join(mameSrc, file), 'utf8') }))
+    .find(candidate => markerPattern.test(candidate.source));
+  if (!sourceEntry) return undefined;
+  const { file: sourceFile, source } = sourceEntry;
+  const body = discreteSoundBody(source, netlist);
+  if (!body) return undefined;
+  const operations = [...body.matchAll(/\b(DISCRETE_[A-Z0-9_]+)\s*\(/g)]
+    .map(match => match[1]!)
+    .filter(operation =>
+      !/^DISCRETE_(?:INPUTX?_STREAM|INPUTX?_DATA|RCFILTER_SW|ADDER[2-8]|MIXER[2-8]|OUTPUT)$/
+        .test(operation));
+  if (operations.length) return undefined;
+  const marker = markerPattern.exec(source)!;
+  const ayHeader = readFileSync(join(mameSrc, 'src/devices/sound/ay8910.h'), 'utf8');
+  const constants = new Map([
+    ...preprocessorMacros(ayHeader),
+    ...preprocessorMacros(source),
+  ]);
+  const analog = (expression: string | undefined): number => {
+    let expanded = expression ?? '';
+    for (let pass = 0; pass < 6; pass++) {
+      expanded = expanded.replace(/\b[A-Za-z_]\w*\b/g, token =>
+        constants.get(token)?.replace(/\/\*[\s\S]*?\*\//g, '').trim() ?? token);
+    }
+    return requiredAnalog(expanded);
+  };
+  const node = (expression: string | undefined): number => {
+    const match = /\bNODE_(\d+)\b/.exec(expression ?? '');
+    if (!match) throw new Error(`${netlist}: unsupported discrete node ${expression}`);
+    return Number(match[1]);
+  };
+  const streamInputs = callArgs(body, 'DISCRETE_INPUTX_STREAM').map(args => ({
+    node: node(args[0]),
+    input: Number(args[1]),
+    gain: analog(args[2]),
+    offset: analog(args[3]),
+  }));
+  const dataInputs = callArgs(body, 'DISCRETE_INPUTX_DATA').map(args => ({
+    node: node(args[0]),
+    gain: analog(args[1]),
+    offset: analog(args[2]),
+  }));
+  const controlInputs = callArgs(body, 'DISCRETE_INPUT_DATA').map(args => node(args[0]));
+  const filters = callArgs(body, 'DISCRETE_RCFILTER_SW').map(args => ({
+    node: node(args[0]),
+    input: node(args[2]),
+    control: node(args[3]),
+    resistance: analog(args[4]),
+    capacitors: args.slice(5).map(analog).filter(value => value > 0),
+  }));
+  const adders = Array.from({ length: 7 }, (_, index) => index + 2)
+    .flatMap(count => callArgs(body, `DISCRETE_ADDER${count}`).map(args => ({
+      node: node(args[0]),
+      inputs: args.slice(2, 2 + count).map(node),
+    })));
+  const mixers = Array.from({ length: 7 }, (_, index) => index + 2)
+    .flatMap(count => callArgs(body, `DISCRETE_MIXER${count}`).map(args => {
+      const descriptor = symbolName(args.at(-1));
+      const resistances = descriptor
+        ? structValues(source, descriptor).firstArray.slice(0, count).map(analog)
+        : [];
+      if (resistances.length !== count || resistances.some(value => !(value > 0))) {
+        throw new Error(`${netlist}: incomplete ${count}-input resistor mixer`);
+      }
+      return {
+        node: node(args[0]),
+        inputs: args.slice(2, 2 + count).map(node),
+        resistances,
+      };
+    }));
+  const outputs = callArgs(body, 'DISCRETE_OUTPUT').map(args => ({
+    node: node(args[0]),
+    gain: analog(args[1]),
+  }));
+  if (!streamInputs.length || !mixers.length || !outputs.length) {
+    throw new Error(`${netlist}: unsupported discrete stream mixer topology`);
+  }
+  return {
+    schemaVersion: 1,
+    type: 'DISCRETE_MIXER',
+    streamInputs,
+    dataInputs,
+    controlInputs,
+    filters,
+    adders,
+    mixers,
+    outputs,
     source: {
       file: sourceFile,
       line: source.slice(0, marker.index).split('\n').length,
@@ -1356,7 +1468,27 @@ export interface GeneratedAyRoute {
   channel: number;
   gain: number;
   target: string;
+  targetInput?: number;
   filter?: { index: number; bank: number; channel: number };
+}
+
+export interface GeneratedDiscreteMixerPlanData {
+  schemaVersion: number;
+  type: string;
+  streamInputs: { node: number; input: number; gain: number; offset: number }[];
+  dataInputs: { node: number; gain: number; offset: number }[];
+  controlInputs: number[];
+  filters: {
+    node: number;
+    input: number;
+    control: number;
+    resistance: number;
+    capacitors: number[];
+  }[];
+  adders: { node: number; inputs: number[] }[];
+  mixers: { node: number; inputs: number[]; resistances: number[] }[];
+  outputs: { node: number; gain: number }[];
+  source: { file: string; line: number; netlist: string };
 }
 
 export interface GeneratedAuxiliaryAudioDevice {
@@ -1584,6 +1716,9 @@ export class GeneratedAy8910Mixer {
     core: GeneratedMsm5205Core | GeneratedDac8Core;
   }[];
   private readonly auxiliaryGainTotal: number;
+  private readonly discreteMixer?: GeneratedDiscreteMixerPlanData;
+  private readonly discreteValues = new Map<number, number>();
+  private readonly discreteFilterMemory = new Map<number, number>();
   private readonly outputRate: number;
   private muted = false;
 
@@ -1592,8 +1727,8 @@ export class GeneratedAy8910Mixer {
     chips: number,
     outputRate: number,
     routes: GeneratedAyRoute[] = [],
-    chipGains: number[] = [],
     auxiliaryDevices: GeneratedAuxiliaryAudioDevice[] = [],
+    discreteMixer?: GeneratedDiscreteMixerPlanData,
   ) {
     this.outputRate = outputRate;
     const count = Math.max(1, chips);
@@ -1614,7 +1749,7 @@ export class GeneratedAy8910Mixer {
           Array.from({ length: plan.channels }, (_unused, channel) => ({
             chip,
             channel,
-            gain: chipGains[chip] ?? 1,
+            gain: 1,
             target: 'mono',
           })));
     const filterCount = this.routes.reduce(
@@ -1653,9 +1788,20 @@ export class GeneratedAy8910Mixer {
       (sum, device) => sum + device.gain,
       0,
     );
+    this.discreteMixer = discreteMixer;
+    for (const input of discreteMixer?.dataInputs ?? []) {
+      this.discreteValues.set(input.node, 0);
+    }
+    for (const node of discreteMixer?.controlInputs ?? []) {
+      this.discreteValues.set(node, 0);
+    }
   }
 
   write(offset: number, data: number, method?: string): void {
+    if (method === 'discrete') {
+      this.discreteValues.set(offset, data);
+      return;
+    }
     const auxiliaryWrite = /^([^.]+)\\.(\\w+)$/.exec(method ?? '');
     if (auxiliaryWrite) {
       this.auxiliary.find(device =>
@@ -1710,6 +1856,7 @@ export class GeneratedAy8910Mixer {
         }
       }
     }
+    if (this.discreteMixer) return this.sampleDiscreteMixer();
     let mixed = 0;
     for (const route of this.routes) {
       const samples = this.channelSamples[route.chip];
@@ -1724,6 +1871,68 @@ export class GeneratedAy8910Mixer {
       -1,
       Math.min(1, mixed / (this.gainTotal + this.auxiliaryGainTotal)),
     );
+  }
+
+  private sampleDiscreteMixer(): number {
+    const mixer = this.discreteMixer!;
+    const values = new Map(this.discreteValues);
+    for (const input of mixer.streamInputs) {
+      const route = this.routes.find(candidate => candidate.targetInput === input.input);
+      const samples = route ? this.channelSamples[route.chip] : undefined;
+      const value = route?.channel === -1
+        ? (samples?.reduce((sum, sample) => sum + sample, 0) ?? 0) / plan.channels
+        : samples?.[route?.channel ?? -1] ?? 0;
+      values.set(input.node, value * (route?.gain ?? 1) * input.gain + input.offset);
+    }
+    for (const input of mixer.dataInputs) {
+      const raw = this.discreteValues.get(input.node) ?? 0;
+      const maximum = Math.abs(input.gain) * 255 || 1;
+      values.set(input.node, (raw * input.gain + input.offset) / maximum);
+    }
+    for (const filter of mixer.filters) {
+      const control = values.get(filter.control) ?? 0;
+      const capacitance = filter.capacitors.reduce(
+        (sum, value, index) => sum + ((control >> index) & 1 ? value : 0),
+        0,
+      );
+      const input = values.get(filter.input) ?? 0;
+      if (capacitance === 0) {
+        values.set(filter.node, input);
+        this.discreteFilterMemory.set(filter.node, input);
+        continue;
+      }
+      const k = 1 - Math.exp(-1 / (filter.resistance * capacitance) / this.outputRate);
+      const memory = this.discreteFilterMemory.get(filter.node) ?? input;
+      const output = memory + (input - memory) * k;
+      this.discreteFilterMemory.set(filter.node, output);
+      values.set(filter.node, output);
+    }
+    for (const adder of mixer.adders) {
+      values.set(adder.node, adder.inputs.reduce(
+        (sum, input) => sum + (values.get(input) ?? 0),
+        0,
+      ));
+    }
+    for (const stage of mixer.mixers) {
+      const conductance = stage.resistances.reduce(
+        (sum, resistance) => sum + 1 / resistance,
+        0,
+      );
+      values.set(stage.node, stage.inputs.reduce(
+        (sum, input, index) =>
+          sum + (values.get(input) ?? 0) / stage.resistances[index]!,
+        0,
+      ) / conductance);
+    }
+    const outputGain = mixer.outputs.reduce(
+      (sum, output) => sum + Math.abs(output.gain),
+      0,
+    ) || 1;
+    const output = mixer.outputs.reduce(
+      (sum, candidate) => sum + (values.get(candidate.node) ?? 0) * candidate.gain,
+      0,
+    ) / outputGain;
+    return Math.max(-1, Math.min(1, output));
   }
 
   private recalculate(filter: GeneratedFilterState): void {
@@ -1822,9 +2031,9 @@ class GeneratedAy8910Processor extends AudioWorkletProcessor {
         type: string;
         clock?: number;
         chips?: number;
-        chipGains?: number[];
         routes?: GeneratedAyRoute[];
         auxiliaryDevices?: GeneratedAuxiliaryAudioDevice[];
+        discreteMixer?: GeneratedDiscreteMixerPlanData;
         refresh?: number;
         offset?: number;
         data?: number;
@@ -1837,8 +2046,8 @@ class GeneratedAy8910Processor extends AudioWorkletProcessor {
           message.chips ?? 1,
           sampleRate,
           message.routes,
-          message.chipGains,
           message.auxiliaryDevices,
+          message.discreteMixer,
         );
         this.renderer = new GeneratedAy8910FrameRenderer(
           this.mixer,

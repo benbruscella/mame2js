@@ -3,6 +3,7 @@ import * as ts from 'typescript';
 import {
   compileAy8910,
   compileMameSpeakerFilter,
+  compileDiscreteMixer,
   compileMsm5205,
   compileNamco54Discrete,
   compileNamcoWsg,
@@ -238,7 +239,6 @@ const ayModule = await import(
     routes?: { chip: number; channel: number; gain: number; target: string; filter?: {
       index: number; bank: number; channel: number;
     } }[],
-    chipGains?: number[],
     auxiliaryDevices?: {
       type: string;
       deviceTag: string;
@@ -270,7 +270,6 @@ const composite = new ayModule.GeneratedAy8910Mixer(
     { chip: 0, channel: -1, gain: 1, target: 'filtermix' },
     { chip: 1, channel: -1, gain: 1, target: 'filtermix' },
   ],
-  [],
   [{
     type: 'MSM5205',
     deviceTag: 'msm1',
@@ -332,4 +331,4 @@ assert.ok(timed.slice(0, 400).every(sample => sample === 0));
 assert.ok(timed.slice(400).some(sample => sample !== 0));
 assert.match(aySource, /write\.frac/);
 
-console.log('audio-compiler.spec: 29 passed');
+console.log('audio-compiler.spec: generated audio cores passed');

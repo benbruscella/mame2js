@@ -15,6 +15,7 @@ import type { GeneratedAudioRoute } from './generated-machine.ts';
 import type {
   GeneratedAuxiliaryAudioDevice,
   GeneratedDacFilterPlan,
+  GeneratedDiscreteMixerPlan,
   GeneratedSpeakerFilterPlan,
 } from './audio-protocol.ts';
 
@@ -25,13 +26,10 @@ export interface WorkletCoreConfig {
   readonly voices?: number;
   /** number of chip instances the worklet should host (ay8910 bank) */
   readonly chips?: number;
-  /** per-chip mix weights (board analog net); defaults to all-equal */
-  readonly chipGains?: number[];
   readonly routes?: GeneratedAudioRoute[];
-  /** DAC route gain override */
-  readonly dacGain?: number;
   readonly auxiliary?: GeneratedDacFilterPlan;
   readonly auxiliaryDevices?: GeneratedAuxiliaryAudioDevice[];
+  readonly discreteMixer?: GeneratedDiscreteMixerPlan;
   readonly speakerFilter?: GeneratedSpeakerFilterPlan;
   /** video refresh rate (Hz) — paces the worklet's write scheduler */
   readonly refresh?: number;
@@ -109,11 +107,10 @@ export class AudioOutput {
       clock: core.clock ?? core.sampleRate,
       voices: core.voices,
       chips: core.chips,
-      chipGains: core.chipGains,
       routes: core.routes,
-      dacGain: core.dacGain,
       auxiliary: core.auxiliary,
       auxiliaryDevices: core.auxiliaryDevices,
+      discreteMixer: core.discreteMixer,
       refresh: core.refresh,
       debug: core.debug,
     });

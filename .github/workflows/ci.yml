@@ -45,5 +45,5 @@ jobs:
       - name: Run every colocated unit and lowering spec
         run: npm run test:unit
 
-      - name: Clean-generate and audit the current four games
+      - name: Clean-generate and audit the current supported games
         run: npm run test:current

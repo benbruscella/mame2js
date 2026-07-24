@@ -808,7 +808,21 @@ function handlerProps(
 ): Record<string, PropValue> {
   const sourceName = method.replace(/_\d+$/, '');
   const fn = ast.findFunctionInHierarchy(ownerClass, sourceName);
-  const body = inline?.inlineBody ?? fn?.body;
+  let body = inline?.inlineBody ?? fn?.body;
+  if (body && fn) {
+    const source = ast.ast.units.map(unit => unit.source).join('\n');
+    for (const table of source.matchAll(
+      /\bstatic\s+(?:(?:const|constexpr)\s+)+[\w:]+\s+(\w+)\s*\[[^\]]*\]\s*=\s*\{([^{}]+)\}\s*;/g,
+    )) {
+      if (!new RegExp(`\\b${table[1]}\\s*\\[`).test(body)) continue;
+      const values = splitMameArgs(table[2]!).map(value => value.trim());
+      if (body.includes(table[0])) body = body.replace(table[0], '');
+      body = body.replace(
+        new RegExp(`\\b${table[1]}\\s*\\[([^\\]]+)\\]`, 'g'),
+        (_entry, index: string) => `TABLE(${index}, ${values.join(', ')})`,
+      );
+    }
+  }
   const identifiers = new Set(body?.match(/\b[A-Za-z_]\w*\b/g) ?? []);
   const sourceConstants = Object.entries(constants)
     .filter(([name]) => identifiers.has(name))
@@ -820,11 +834,11 @@ function handlerProps(
     ...(sourceConstants.length ? { sourceConstants } : {}),
     ...(inline?.inlineBody !== undefined ? {
       sourceParameters: inline.inlineParameters ?? '',
-      sourceBody: inline.inlineBody,
+      sourceBody: body ?? inline.inlineBody,
       inline: true,
     } : fn ? {
       sourceParameters: fn.parameters.trim(),
-      sourceBody: fn.body.trim(),
+      sourceBody: body!.trim(),
     } : {}),
   };
 }

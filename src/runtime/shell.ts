@@ -12,6 +12,7 @@ import type { GeneratedAudioRoute } from './generated-machine.ts';
 import type {
   GeneratedAuxiliaryAudioDevice,
   GeneratedDacFilterPlan,
+  GeneratedDiscreteMixerPlan,
   GeneratedSpeakerFilterPlan,
 } from './audio-protocol.ts';
 
@@ -39,16 +40,14 @@ export interface SoundSpec {
   waveRegion?: string;
   /** number of sound chips (ay8910: gyruss has 5) */
   chips?: number;
-  /** per-chip mix weights from the board's analog net (generator-curated) */
-  chipGains?: number[];
   /** Per-output routes lowered from MAME add_route calls. */
   routes?: GeneratedAudioRoute[];
-  /** DAC route gain override (default = junofrst's 0.25) */
-  dacGain?: number;
   /** MAME discrete DAC/filter network mixed with the primary core. */
   auxiliary?: GeneratedDacFilterPlan;
   /** Source-routed secondary stream devices mixed by the generated worklet. */
   auxiliaryDevices?: GeneratedAuxiliaryAudioDevice[];
+  /** MAME DISCRETE_SOUND_START network consuming primary stream outputs. */
+  discreteMixer?: GeneratedDiscreteMixerPlan;
   /** MAME's source-derived post-mix speaker effect. */
   speakerFilter?: GeneratedSpeakerFilterPlan;
 }
@@ -256,11 +255,10 @@ export async function runShell(cfg: ShellConfig, preloaded?: Regions): Promise<v
         clock,
         waveRom: cfg.sound.waveRegion ? regions[cfg.sound.waveRegion] : undefined,
         chips: cfg.sound.chips,
-        chipGains: cfg.sound.chipGains,
         routes: cfg.sound.routes,
-        dacGain: cfg.sound.dacGain,
         auxiliary: cfg.sound.auxiliary,
         auxiliaryDevices: cfg.sound.auxiliaryDevices,
+        discreteMixer: cfg.sound.discreteMixer,
         speakerFilter: cfg.sound.speakerFilter,
         refresh: cfg.board.screen.refresh,
         debug: input.debug,

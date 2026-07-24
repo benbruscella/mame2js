@@ -5,6 +5,7 @@ import type { GeneratedMachine } from './generated-machine.ts';
 import {
   createGeneratedTileInfoTarget,
   generatedScrollBand,
+  generatedTileGroupTransparentMask,
   generatedTileMemoryIndex,
   GeneratedMameVideoPrimitives,
   GeneratedVideoRenderer,
@@ -106,17 +107,74 @@ if (
 ) {
   throw new Error(`generated visible-area translation is wrong: ${[...frame]}`);
 }
-const cachedTile = { gfx: 0, code: 0, color: 0, flags: 0, category: 0 };
+const partialStarts: number[] = [];
+const partialMachine: GeneratedMachine = {
+  ...machine,
+  callbacks: [{
+    ...machine.callbacks[0]!,
+    targetMethod: 'screen_update_partial',
+  }],
+  handlers: [{
+    id: 'handler:screen_partial',
+    ownerClass: 'fixture_state',
+    method: 'screen_update_partial',
+    program: compileMameHandler(`
+      if (cliprect.min_y == screen.visible_area().min_y)
+        frame_start();
+      return 0;
+    `),
+  }],
+  execution: {
+    ...machine.execution,
+    screen: { ...machine.execution.screen, updateMode: 'partial' },
+    screenUpdate: { handler: 'fixture_state.screen_update_partial' },
+  },
+};
+const partialRenderer = new GeneratedVideoRenderer(partialMachine, {
+  width: 2,
+  height: 2,
+  vblank: () => {},
+  render: () => {},
+  generatedVideoBindings: () => ({
+    calls: { frame_start: () => partialStarts.push(1) },
+  }),
+});
+const partialFrame = new Uint32Array(4);
+partialRenderer.updatePartial(partialFrame, 2);
+partialRenderer.updatePartial(partialFrame, 3);
+partialRenderer.render(partialFrame);
+assert.equal(partialStarts.length, 1, 'partial clips must retain the full MAME visible area');
+const cachedTile = { gfx: 0, code: 0, color: 0, flags: 0, category: 0, group: 0 };
 const tileinfo = createGeneratedTileInfoTarget(cachedTile);
 tileinfo.category = 1;
+tileinfo.group = 7;
 tileinfo.set(2, 3, 4, 5);
 if (cachedTile.category !== 1) throw new Error('tile category did not reach the render cache');
+if (cachedTile.group !== 7) throw new Error('tile group did not reach the render cache');
 if (cachedTile.gfx !== 2 || cachedTile.code !== 3 || cachedTile.color !== 4 || cachedTile.flags !== 5) {
   throw new Error('tileinfo.set did not reach the render cache');
 }
 if (generatedTileMemoryIndex(1012) !== 1012) {
   throw new Error('custom mapper memory index was folded into the logical tile count');
 }
+const splitPlan = {
+  member: 'm_bg_tilemap',
+  tileWidth: 8,
+  tileHeight: 8,
+  columns: 1,
+  rows: 1,
+  mapper: 'TILEMAP_SCAN_ROWS',
+  tileInfo: 'fixture_state.tile_info',
+  transmasks: [
+    { group: 0, foreground: 0, background: 0 },
+    { group: 1, foreground: 0x0f, background: 0 },
+  ],
+};
+assert.equal(generatedTileGroupTransparentMask(splitPlan, 1, 0), 0x0f);
+assert.equal(generatedTileGroupTransparentMask(splitPlan, 1, 0x10), 0x0f);
+assert.equal(generatedTileGroupTransparentMask(splitPlan, 1, 0x20), 0);
+assert.equal(generatedTileGroupTransparentMask(splitPlan, 1, 0x30), 0x0f);
+assert.equal(generatedTileGroupTransparentMask(splitPlan, 2, 0), undefined);
 const screenState: Record<string, unknown> = {};
 const videoRegion = Uint8Array.of(0x12, 0x34);
 const generatedPrimitives = new GeneratedMameVideoPrimitives(
@@ -146,6 +204,19 @@ if (generatedScreen.vpos() !== 37) {
   throw new Error('generated screen shadowed the board scanline binding');
 }
 generatedScreen.update_partial(37);
+let partialLine = -1;
+const partialPrimitives = new GeneratedMameVideoPrimitives(
+  machine,
+  {},
+  {},
+  {},
+  line => { partialLine = line; },
+);
+executeGeneratedProgram(
+  compileMameHandler('m_screen->update_partial(19);'),
+  partialPrimitives.generatedVideoBindings(new Uint32Array(4)),
+);
+assert.equal(partialLine, 19, 'generated screen must forward partial raster updates');
 generatedPrimitives.vblank();
 if (generatedScreen.frame_number() !== 1) {
   throw new Error('generated screen frame counter did not advance at vblank');
@@ -192,4 +263,4 @@ if (tilemap.tiles.length !== 0 || tilemap.dirty.length !== 0) {
   throw new Error('mark_all_dirty did not invalidate generated tile cache');
 }
 
-console.log('generated-video.spec: 10 passed');
+console.log('generated-video.spec: 19 passed');

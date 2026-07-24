@@ -150,8 +150,8 @@ export interface GeneratedScreen {
   vtotal: number;
   vbstart: number;
   vbend?: number;
-  /** Rendering cadence requested by MAME's VIDEO_UPDATE_* screen attributes. */
-  updateMode?: 'frame' | 'scanline';
+  /** Rendering cadence requested by MAME screen attributes or update_partial calls. */
+  updateMode?: 'frame' | 'scanline' | 'partial';
   rotate: number;
   source?: GeneratedSourceRef;
 }
@@ -288,6 +288,12 @@ export interface GeneratedTilemapPlan {
   scrollDy?: [number, number];
   transparentPen?: number;
   transparentIndirect?: number;
+  /** Per-tile group pen masks declared through MAME tilemap_t::set_transmask. */
+  transmasks?: {
+    group: number;
+    foreground: number;
+    background: number;
+  }[];
   source?: GeneratedSourceRef;
 }
 

@@ -19,6 +19,7 @@ import {
 import type { BoardConfig } from '../runtime/types.ts';
 import { compileMameVideo } from '../mame/video-compiler.ts';
 import {
+  compileDiscreteMixer,
   compileMameSpeakerFilter,
   compileNamco54Discrete,
 } from '../mame/audio-compiler.ts';
@@ -185,7 +186,18 @@ export async function generate(graph: KnowledgeGraph, opts: GenerateOptions): Pr
     if (r.props.mirror) spec.mirror = Number(r.props.mirror);
     if (r.props.share) spec.share = String(r.props.share);
     if (reads[0]) spec.read = handlerKey(reads[0]);
-    if (writes[0]) spec.write = handlerKey(writes[0]);
+    if (writes[0]) {
+      spec.write = handlerKey(writes[0]);
+      const share = String(r.props.share ?? '');
+      const member = share && `m_${share.replace(/[^A-Za-z0-9_]/g, '_')}`;
+      const sourceBody = String(writes[0].node.props.sourceBody ?? '');
+      if (
+        member &&
+        new RegExp(`\\b${member}\\s*\\[[^\\]]+\\]\\s*[-+*/&|^]?=`).test(sourceBody)
+      ) {
+        spec.writeHandlerOwnsRam = true;
+      }
+    }
     // .portr("IN0") -> read handler key "port.IN0" (boards register these from InputPorts)
     if (r.props.portRead) spec.read = `port.${r.props.portRead}`;
     if (r.props.portWrite) spec.write = `port.${r.props.portWrite}`;
@@ -311,7 +323,13 @@ export async function generate(graph: KnowledgeGraph, opts: GenerateOptions): Pr
     vbstart,
     vbend,
     updateMode: (screenDev?.props.screenVideoAttributes as string[] | undefined)
-      ?.includes('VIDEO_UPDATE_SCANLINE') ? 'scanline' as const : 'frame' as const,
+      ?.includes('VIDEO_UPDATE_SCANLINE')
+      ? 'scanline' as const
+      : graph.nodes.some(node =>
+          node.label === 'Handler' &&
+          String(node.props.sourceBody ?? '').includes('update_partial('))
+        ? 'partial' as const
+        : 'frame' as const,
     rotate: monitor === 'ROT90' ? 90 : monitor === 'ROT270' ? 270 : monitor === 'ROT180' ? 180 : 0,
   };
 
@@ -342,22 +360,6 @@ export async function generate(graph: KnowledgeGraph, opts: GenerateOptions): Pr
         return type.endsWith('_AUDIO') || type.endsWith('_SOUND');
       })
     : undefined;
-  // Per-family analog mix weights, hand-derived from each driver's discrete
-  // resistor network — the one MAME layer the graph can't carry yet (the
-  // nets are data tables inside DISCRETE_SOUND_START, not device wiring).
-  // Values are relative: chipGains[] scales each PSG inside the bank, and
-  // dacGain replaces the worklet's junofrst-derived default (0.25).
-  // TODO(#12): parse plain add_route gains from the graph for the simple
-  // (non-discrete) boards, and lift these into graph facts.
-  const soundFamily = family;
-  const AY_MIX: Record<string, { chipGains?: number[]; dacGain?: number }> = {
-    // gyruss.cpp sound_discrete + konami_*_mixer_desc: chips 0/1 feed the
-    // mixer at 1.0 through 2.2k per channel; chips 2-4 at 0.33 through
-    // 1.1k (= 0.66 of a chip-0 channel); the i8039 DAC (4V TTL) through
-    // 4.7k ≈ 0.62 of ONE channel's full swing — vs our flat bank where it
-    // was ~11 channels' worth ("pulsing drums way too loud").
-    gyruss: { chipGains: [1, 1, 0.66, 0.66, 0.66], dacGain: 0.014 },
-  };
   const sound = devices.some(d => String(d.props.type).startsWith('RP2A03'))
     // the NES APU lives on the CPU die — the RP2A03 is its own sound device
     ? { kind: 'nes', clock: cpus[0].clock }
@@ -374,7 +376,6 @@ export async function generate(graph: KnowledgeGraph, opts: GenerateOptions): Pr
             ...(auxiliaryAudioDevices.length
               ? { auxiliaryDevices: auxiliaryAudioDevices }
               : {}),
-            ...AY_MIX[soundFamily],
           }
         : discreteDevice
           ? {
@@ -397,6 +398,19 @@ export async function generate(graph: KnowledgeGraph, opts: GenerateOptions): Pr
         discreteNetlist,
       ),
     });
+  }
+  if (sound.kind === 'ay8910' && discreteNetlist) {
+    const discreteMixer = compileDiscreteMixer(
+      opts.mameSrc,
+      [
+        String(graph.meta.driverFile),
+        ...graph.nodes
+          .filter(node => node.label === 'SourceFile')
+          .map(node => String(node.props.path)),
+      ],
+      discreteNetlist,
+    );
+    if (discreteMixer) Object.assign(sound, { discreteMixer });
   }
   if (sound.kind !== 'none') {
     Object.assign(sound, {

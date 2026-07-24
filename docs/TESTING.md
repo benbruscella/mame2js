@@ -139,6 +139,8 @@ src/games/rocnrope.ts
 src/games/rocnrope.spec.ts
 src/games/junofrst.ts
 src/games/junofrst.spec.ts
+src/games/gyruss.ts
+src/games/gyruss.spec.ts
 ```
 
 The token declares only:
@@ -200,6 +202,7 @@ roms/arcade/digdug.zip
 roms/arcade/mpatrol.zip
 roms/arcade/rocnrope.zip
 roms/arcade/junofrst.zip
+roms/arcade/gyruss.zip
 ```
 
 Override them without moving files:
@@ -215,6 +218,7 @@ MAMEKIT_DIGDUG_ROM=/path/digdug.zip \
 MAMEKIT_MPATROL_ROM=/path/mpatrol.zip \
 MAMEKIT_ROCNROPE_ROM=/path/rocnrope.zip \
 MAMEKIT_JUNOFIRST_ROM=/path/junofrst.zip \
+MAMEKIT_GYRUSS_ROM=/path/gyruss.zip \
 npm run test:games
 ```
 

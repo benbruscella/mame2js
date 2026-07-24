@@ -189,7 +189,49 @@ export async function runGameAcceptance(
     audio: audio.finish(allWrites),
   };
   assert.equal(Object.keys(checkpoints).length, contract.checkpoints.length);
-  assert.ok(new Set(Object.values(checkpoints).map(value => value.video)).size >= 3);
+  const debugBoard = board as unknown as {
+    shares?: Record<string, Uint8Array>;
+    state?: Record<string, unknown>;
+    cpus?: Map<string, { get(name: string): number }>;
+  };
+  const debugTilemap = debugBoard.state?.m_tilemap as {
+    tiles?: unknown[];
+  } | undefined;
+  const debugPalette = debugBoard.state?.m_palette as {
+    colors?: Uint32Array;
+  } | undefined;
+  const sharedActivity = Object.fromEntries(
+    Object.entries(debugBoard.shares ?? {}).map(([name, bytes]) => [
+      name,
+      {
+        nonzero: bytes.reduce((count, value) => count + Number(value !== 0), 0),
+        hash: hash(bytes),
+      },
+    ]),
+  );
+  assert.ok(
+    new Set(Object.values(checkpoints).map(value => value.video)).size >= 3,
+    `${contract.game}: video did not progress ` +
+      `(${JSON.stringify({
+        checkpoints,
+        snapshot: finalSnapshot,
+        sharedActivity,
+        tilemap: {
+          tiles: debugTilemap?.tiles?.length ?? 0,
+          first: debugTilemap?.tiles?.find(Boolean),
+        },
+        palette: debugPalette?.colors
+          ? {
+              colors: debugPalette.colors.length,
+              unique: new Set(debugPalette.colors).size,
+              nonblack: debugPalette.colors.reduce(
+                (count, color) => count + Number(color !== 0xff000000),
+                0,
+              ),
+            }
+          : undefined,
+      })})`,
+  );
   assert.ok(
     result.audio.writes > 0,
     `${contract.game}: generated sound has no writes (${JSON.stringify(result.audio)})`,
@@ -197,7 +239,28 @@ export async function runGameAcceptance(
   assert.ok(
     result.audio.rms > 0.001,
     `${contract.game}: generated sound is silent ` +
-      `(${JSON.stringify({ audio: result.audio, snapshot: finalSnapshot })})`,
+      `(${JSON.stringify({
+        audio: result.audio,
+        methods: Object.fromEntries(
+          [...new Set(allWrites.map(write => write.method ?? 'register'))].map(method => [
+            method,
+            allWrites.filter(write => (write.method ?? 'register') === method).length,
+          ]),
+        ),
+        writes: allWrites.slice(0, 32),
+        cpuInterrupts: Object.fromEntries(
+          [...(debugBoard.cpus ?? [])].map(([tag, cpu]) => [
+            tag,
+            {
+              iff1: cpu.get('m_iff1'),
+              irq: cpu.get('m_irq_state'),
+              hold: cpu.get('m_irq_hold'),
+              nmi: cpu.get('m_nmi_pending'),
+            },
+          ]),
+        ),
+        snapshot: finalSnapshot,
+      })})`,
   );
   for (const [index, requirement] of (contract.audioRequirements ?? []).entries()) {
     const actual = requiredAudioCounts.get(index) ?? 0;
@@ -272,8 +335,8 @@ async function createAudioProbe(
         chips: number,
         outputRate: number,
         routes?: NonNullable<ShellConfig['sound']['routes']>,
-        chipGains?: number[],
         auxiliaryDevices?: NonNullable<ShellConfig['sound']['auxiliaryDevices']>,
+        discreteMixer?: NonNullable<ShellConfig['sound']['discreteMixer']>,
       ) => AyMixer;
       GeneratedAy8910FrameRenderer: new (
         mixer: AyMixer,
@@ -287,8 +350,8 @@ async function createAudioProbe(
       config.sound.chips ?? 1,
       outputRate,
       config.sound.routes,
-      config.sound.chipGains,
       config.sound.auxiliaryDevices,
+      config.sound.discreteMixer,
     );
     const renderer = new generated.GeneratedAy8910FrameRenderer(
       mixer,

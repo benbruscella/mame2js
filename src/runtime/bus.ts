@@ -12,6 +12,8 @@ export interface RangeSpec {
   write?: string;
   /** shared RAM tag; ranges with the same share alias the same bytes */
   share?: string;
+  /** The MAME write handler explicitly stores this shared RAM byte itself. */
+  writeHandlerOwnsRam?: boolean;
 }
 
 export type ReadHandler = (addr: number, offset: number) => number;
@@ -53,7 +55,9 @@ export class Bus {
         if (r.write) {
           const h = registry.write[r.write];
           if (!h) throw new Error(`missing write handler: ${r.write}`);
-          write = (a, off, d) => { bytes[off] = d; h(a, off, d); };
+          write = r.writeHandlerOwnsRam
+            ? h
+            : (a, off, d) => { bytes[off] = d; h(a, off, d); };
         }
       }
       if (r.kind === 'handler' || (r.kind !== 'ram' && (r.read || r.write))) {

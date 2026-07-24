@@ -67,8 +67,8 @@ npm run serve
 
 `npm run gen:all` always deletes `dist` before generation. The current branch
 keeps that command scoped to Pac-Man, Pooyan, Time Pilot, Space Invaders,
-Galaxian, Galaga, Dig Dug, Moon Patrol, Roc'n Rope and Juno First while the
-source-generation pattern is validated one machine at a time.
+Galaxian, Galaga, Dig Dug, Moon Patrol, Roc'n Rope, Juno First and Gyruss
+while the source-generation pattern is validated one machine at a time.
 
 The generated application is served at `http://localhost:8280/app/`.
 

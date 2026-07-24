@@ -11,6 +11,12 @@ import {
 
 assertGameContract(timeplt);
 const graph = gameSourceGraph(timeplt);
+const timer = graph.nodes.find(node =>
+  node.label === 'Handler' &&
+  node.props.ownerClass === 'timeplt_audio_device' &&
+  node.props.method === 'portB_r');
+assert.match(String(timer?.props.sourceBody), /^\s*return TABLE\(/);
+assert.doesNotMatch(String(timer?.props.sourceBody), /static\s+const/);
 const machine = graph.nodes.find(node =>
   node.label === 'MachineConfig' &&
   node.props.cls === timeplt.machine.className &&

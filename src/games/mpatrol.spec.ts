@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { compileDiscreteMixer } from '../mame/audio-compiler.ts';
 import { compileMameM6803 } from '../mame/cpu-compiler.ts';
 import { compileMameVideo } from '../mame/video-compiler.ts';
 import { mpatrol } from './mpatrol.ts';
@@ -25,6 +26,17 @@ const types = new Set(
 for (const type of ['Z80', 'M6803', 'AY8910', 'MSM5205', 'DISCRETE']) {
   assert.ok(types.has(type), `Moon Patrol graph must extract ${type}`);
 }
+assert.equal(
+  compileDiscreteMixer(
+    mameSrc,
+    graph.nodes
+      .filter(node => node.label === 'SourceFile')
+      .map(node => String(node.props.path)),
+    'm52_sound_c_discrete',
+  ),
+  undefined,
+  'an unsupported partial netlist must not replace the generated AY/MSM path',
+);
 
 const video = compileMameVideo(graph, mameSrc, machine.id);
 assert.ok(video, 'Moon Patrol MAME video source must lower to executable video IR');

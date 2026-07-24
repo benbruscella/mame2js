@@ -311,12 +311,20 @@ class IrBoard implements Board {
       );
     }
 
-    const video = machine.execution.screenUpdate
-      ? new GeneratedVideoRenderer(
-          machine,
-          new GeneratedMameVideoPrimitives(machine, regions, this.state, this.bindings),
-        )
-      : undefined;
+    let activeFramebuffer: Uint32Array | undefined;
+    let video: GeneratedVideoRenderer | undefined;
+    if (machine.execution.screenUpdate) {
+      const primitives = new GeneratedMameVideoPrimitives(
+        machine,
+        regions,
+        this.state,
+        this.bindings,
+        line => {
+          if (activeFramebuffer) video?.updatePartial(activeFramebuffer, line);
+        },
+      );
+      video = new GeneratedVideoRenderer(machine, primitives);
+    }
     this.frameRunner = new GeneratedFrameRunner({
       machine,
       processors: [...machine.execution.cpus.map(specification => ({
@@ -349,7 +357,8 @@ class IrBoard implements Board {
           callbackEndpoints,
         );
       },
-      onLine: line => {
+      onLine: (line, phase, framebuffer) => {
+        if (phase === 'before-processors') activeFramebuffer = framebuffer;
         this.currentLine = line;
         const seconds = 1 /
           (this.machine.execution.screen.refresh * this.machine.execution.screen.vtotal);

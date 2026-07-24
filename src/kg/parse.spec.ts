@@ -13,6 +13,7 @@ import {
   parseGfxLayouts,
   parseMachineConfigs,
   parseMemoryBanks,
+  parseRomSets,
 } from './parse.ts';
 
 let totalPass = 0;
@@ -30,6 +31,21 @@ function eq(label: string, actual: unknown, expected: unknown): void {
 }
 
 eq('expression bitwise precedence', evalExpr('(3 << 4) | (7 & 3) ^ 1'), 48 | (3 ^ 1));
+
+eq('disabled diagnostic ROM is excluded', parseRomSets(`
+ROM_START( board )
+  ROM_REGION( 0x4000, "maincpu", 0 )
+  ROM_LOAD( "program.bin", 0, 0x2000, CRC(11111111) )
+#if 0
+  ROM_LOAD( "diagnostic.bin", 0x2000, 0x2000, CRC(22222222) )
+#endif
+  ROM_REGION( 0x2000, "tiles", 0 )
+  ROM_LOAD( "tiles.bin", 0, 0x2000, CRC(33333333) )
+ROM_END
+`)[0]?.regions.map(region => region.loads.map(load => load.file)), [
+  ['program.bin'],
+  ['tiles.bin'],
+]);
 
 eq('memory bank configure_entries', parseMemoryBanks(
   'm_mainbank->configure_entries(0, 16, memregion("maincpu")->base() + 0x10000, 0x1000);',
